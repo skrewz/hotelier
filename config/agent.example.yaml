@@ -1,0 +1,18 @@
+# Hotelier Agent Configuration
+host: "localhost"
+port: 8080
+id: "agent-1"
+name: "Development Agent #1"
+tags:
+  - "business-default"
+  - "frontend"
+task_timeout: 1800
+heartbeat_interval: 15
+working_dir: "/tmp/hotelier"
+log_level: "info"
+task_mode: "pi"
+
+# Whether to automatically pick up the next pending task after completion.
+# When false (default), the agent remains idle after finishing a task and
+# waits for the host to assign the next one.
+#auto_claim_next_task: false

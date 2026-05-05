@@ -1,0 +1,9 @@
+# Hotelier Check-In Host Configuration
+host: "0.0.0.0"
+port: 8080
+read_timeout: 30
+write_timeout: 30
+max_log_size: 1048576
+task_timeout: 3600
+heartbeat_interval: 30
+max_agents: 0

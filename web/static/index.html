@@ -1,0 +1,716 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Hotelier — Agent Queue Dashboard</title>
+    <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #0f172a; color: #e2e8f0; }
+        .header { background: #1e293b; padding: 1rem 2rem; border-bottom: 1px solid #334155; display: flex; justify-content: space-between; align-items: center; }
+        .header h1 { font-size: 1.5rem; color: #38bdf8; }
+        .stats { display: flex; gap: 2rem; }
+        .stat { text-align: center; }
+        .stat-value { font-size: 1.5rem; font-weight: bold; color: #38bdf8; }
+        .stat-label { font-size: 0.75rem; color: #94a3b8; text-transform: uppercase; }
+        .container { display: flex; height: calc(100vh - 60px); }
+        .sidebar { width: 320px; background: #1e293b; border-right: 1px solid #334155; overflow-y: auto; }
+        .main { flex: 1; overflow-y: auto; padding: 1rem; }
+        .panel { padding: 1rem; border-bottom: 1px solid #334155; }
+        .panel h3 { font-size: 0.875rem; color: #94a3b8; margin-bottom: 0.75rem; text-transform: uppercase; letter-spacing: 0.05em; }
+        .agent-item { padding: 0.5rem; margin-bottom: 0.5rem; background: #0f172a; border-radius: 0.375rem; cursor: pointer; }
+        .agent-item:hover { background: #1e293b; }
+        .agent-name { font-weight: 600; font-size: 0.875rem; }
+        .agent-tags { font-size: 0.75rem; color: #64748b; margin-top: 0.25rem; }
+        .agent-status { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 0.5rem; }
+        .status-idle { background: #22c55e; }
+        .status-running { background: #f59e0b; }
+        .status-disconnected { background: #ef4444; }
+        .task-item { padding: 0.75rem; margin-bottom: 0.5rem; background: #1e293b; border-radius: 0.375rem; border-left: 3px solid #38bdf8; cursor: pointer; transition: background 0.15s; }
+        .task-item:hover { background: #334155; }
+        .task-item.active { background: #334155; border-left-color: #38bdf8; box-shadow: inset 0 0 0 1px #38bdf8; }
+        .task-item.completed { border-left-color: #22c55e; }
+        .task-item.failed { border-left-color: #ef4444; }
+        .task-item.cancelled { border-left-color: #94a3b8; }
+        .task-id { font-weight: 600; font-size: 0.875rem; }
+        .task-meta { font-size: 0.75rem; color: #94a3b8; margin-top: 0.25rem; }
+        .task-prompt { font-size: 0.85rem; color: #cbd5e1; margin-top: 0.5rem; }
+        .submit-form { padding: 1rem; background: #1e293b; border-radius: 0.375rem; margin-bottom: 1rem; }
+        .submit-form h3 { margin-bottom: 0.75rem; }
+        .form-group { margin-bottom: 0.75rem; }
+        .form-group label { display: block; font-size: 0.75rem; color: #94a3b8; margin-bottom: 0.25rem; }
+        .form-group input, .form-group textarea { width: 100%; padding: 0.5rem; background: #0f172a; border: 1px solid #334155; border-radius: 0.375rem; color: #e2e8f0; font-family: inherit; }
+        .form-group textarea { min-height: 80px; resize: vertical; }
+        .btn { padding: 0.5rem 1rem; background: #3b82f6; color: white; border: none; border-radius: 0.375rem; cursor: pointer; font-size: 0.875rem; }
+        .btn:hover { background: #2563eb; }
+        .btn-sm { padding: 0.25rem 0.5rem; font-size: 0.75rem; }
+        .btn-ghost { background: transparent; color: #94a3b8; border: 1px solid #334155; }
+        .btn-ghost:hover { background: #1e293b; color: #e2e8f0; }
+
+        /* Task detail view */
+        .task-detail { display: flex; flex-direction: column; height: 100%; }
+        .task-detail-header { display: flex; justify-content: space-between; align-items: center; padding: 1rem; background: #1e293b; border-radius: 0.5rem 0.5rem 0 0; border: 1px solid #334155; border-bottom: none; }
+        .task-detail-id { font-weight: 600; font-size: 0.875rem; color: #38bdf8; }
+        .task-detail-meta { font-size: 0.75rem; color: #94a3b8; margin-top: 0.25rem; }
+        .task-detail-prompt { font-size: 0.85rem; color: #cbd5e1; padding: 0.75rem 1rem; background: #0f172a; border: 1px solid #334155; border-top: none; border-radius: 0 0 0.5rem 0.5rem; margin-bottom: 1rem; line-height: 1.5; }
+        .task-detail-body { flex: 1; overflow-y: auto; padding: 0.5rem 0; }
+
+        /* Streaming log messages */
+        .log-msg { margin-bottom: 0.5rem; padding: 0.5rem 0.75rem; border-radius: 0.375rem; font-size: 0.85rem; line-height: 1.6; }
+        .log-msg.agent { background: #0f172a; border-left: 2px solid #22c55e; color: #e2e8f0; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; white-space: pre-wrap; }
+        .log-msg.agent .md-rendered { white-space: normal; }
+        .log-msg.agent .md-rendered h1, .log-msg.agent .md-rendered h2, .log-msg.agent .md-rendered h3, .log-msg.agent .md-rendered h4, .log-msg.agent .md-rendered h5, .log-msg.agent .md-rendered h6 { margin: 0.5em 0 0.25em; font-weight: 600; }
+        .log-msg.agent .md-rendered h1 { font-size: 1.25em; }
+        .log-msg.agent .md-rendered h2 { font-size: 1.1em; }
+        .log-msg.agent .md-rendered h3 { font-size: 1em; }
+        .log-msg.agent .md-rendered p { margin: 0.25em 0; }
+        .log-msg.agent .md-rendered code { background: #1e293b; padding: 0.125em 0.375em; border-radius: 0.25em; font-size: 0.9em; font-family: 'SF Mono', 'Fira Code', monospace; }
+        .log-msg.agent .md-rendered pre { background: #1e293b; padding: 0.75rem; border-radius: 0.375rem; overflow-x: auto; margin: 0.5em 0; }
+        .log-msg.agent .md-rendered pre code { background: none; padding: 0; }
+        .log-msg.agent .md-rendered table { border-collapse: collapse; width: 100%; margin: 0.5em 0; font-size: 0.85rem; }
+        .log-msg.agent .md-rendered th, .log-msg.agent .md-rendered td { border: 1px solid #334155; padding: 0.375rem 0.75rem; text-align: left; }
+        .log-msg.agent .md-rendered th { background: #1e293b; font-weight: 600; }
+        .log-msg.agent .md-rendered tr:nth-child(even) { background: #0f172a; }
+        .log-msg.agent .md-rendered ul, .log-msg.agent .md-rendered ol { margin: 0.25em 0; padding-left: 1.5em; }
+        .log-msg.agent .md-rendered li { margin: 0.125em 0; }
+        .log-msg.agent .md-rendered blockquote { border-left: 3px solid #38bdf8; padding-left: 0.75rem; margin: 0.5em 0; color: #94a3b8; }
+        .log-msg.agent .md-rendered a { color: #38bdf8; text-decoration: none; }
+        .log-msg.agent .md-rendered a:hover { text-decoration: underline; }
+        .log-msg.agent .md-rendered hr { border: none; border-top: 1px solid #334155; margin: 0.75em 0; }
+        .log-msg.agent .md-rendered strong { font-weight: 600; }
+        .log-msg.agent .md-rendered em { font-style: italic; }
+        .log-msg.system { color: #64748b; font-size: 0.75rem; font-style: italic; padding-left: 0.75rem; }
+        .log-msg.error { background: #1c0a0a; border-left: 2px solid #ef4444; color: #fca5a5; }
+        .log-msg.unknown-event { background: #1e293b; border-left: 2px solid #475569; color: #64748b; font-size: 0.75rem; }
+        .log-msg.unknown-event pre { margin: 0; white-space: pre-wrap; word-break: break-word; }
+        .log-msg .timestamp { color: #475569; font-size: 0.7rem; font-family: 'SF Mono', 'Fira Code', monospace; margin-right: 0.5rem; }
+
+        /* Tool call blocks */
+        .tool-block { margin-bottom: 0.75rem; border-radius: 0.5rem; overflow: hidden; border: 1px solid #334155; }
+        .tool-block-header { display: flex; align-items: center; justify-content: space-between; padding: 0.5rem 0.75rem; background: #1e293b; cursor: pointer; user-select: none; font-size: 0.8rem; }
+        .tool-block-header:hover { background: #253347; }
+        .tool-block-header .tool-icon { margin-right: 0.5rem; }
+        .tool-block-header .tool-name { font-weight: 600; color: #f59e0b; font-family: 'SF Mono', 'Fira Code', monospace; }
+        .tool-block-header .tool-id { color: #64748b; font-size: 0.7rem; font-family: 'SF Mono', 'Fira Code', monospace; margin-left: 0.5rem; }
+        .tool-block-header .tool-status { margin-left: 0.75rem; font-size: 0.7rem; font-weight: 600; text-transform: uppercase; }
+        .tool-block-header .tool-status.running { color: #f59e0b; }
+        .tool-block-header .tool-status.success { color: #22c55e; }
+        .tool-block-header .tool-status.error { color: #ef4444; }
+        .tool-block-header .tool-chevron { color: #64748b; transition: transform 0.15s; font-size: 0.75rem; }
+        .tool-block-header .tool-chevron.open { transform: rotate(90deg); }
+        .tool-block-body { display: none; background: #0f172a; border-top: 1px solid #334155; }
+        .tool-block-body.open { display: block; }
+        .tool-block-body .tool-args { padding: 0.5rem 0.75rem; font-size: 0.75rem; color: #94a3b8; font-family: 'SF Mono', 'Fira Code', monospace; white-space: pre-wrap; word-break: break-all; }
+        .tool-block-body .tool-output { padding: 0.5rem 0.75rem; font-size: 0.75rem; color: #cbd5e1; font-family: 'SF Mono', 'Fira Code', monospace; white-space: pre-wrap; word-break: break-all; max-height: 300px; overflow-y: auto; border-top: 1px solid #1e293b; }
+        .tool-block-body .tool-output .output-label { color: #475569; font-size: 0.65rem; text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 0.25rem; }
+
+        .streaming-cursor::after { content: '▊'; animation: blink 1s infinite; color: #22c55e; }
+        @keyframes blink { 0%, 50% { opacity: 1; } 51%, 100% { opacity: 0; } }
+
+        .empty-state { display: flex; align-items: center; justify-content: center; height: 100%; color: #475569; font-size: 0.875rem; flex-direction: column; gap: 0.5rem; }
+        .empty-state span { font-size: 2rem; }
+
+        .tab-bar { display: flex; gap: 0; margin-bottom: 1rem; }
+        .tab { padding: 0.5rem 1rem; background: #1e293b; border: 1px solid #334155; border-bottom: none; border-radius: 0.375rem 0.375rem 0 0; cursor: pointer; font-size: 0.875rem; }
+        .tab.active { background: #334155; }
+        .badge { display: inline-block; padding: 0.125rem 0.375rem; border-radius: 0.25rem; font-size: 0.625rem; font-weight: 600; text-transform: uppercase; }
+        .badge-pending { background: #334155; color: #94a3b8; }
+        .badge-assigned { background: #1e3a5f; color: #38bdf8; }
+        .badge-running { background: #422006; color: #f59e0b; }
+        .badge-completed { background: #052e16; color: #22c55e; }
+        .badge-failed { background: #450a0a; color: #ef4444; }
+        .badge-cancelled { background: #1c1917; color: #78716c; }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <h1>🏨 Hotelier</h1>
+        <div class="stats">
+            <div class="stat">
+                <div class="stat-value" id="agent-count">0</div>
+                <div class="stat-label">Agents</div>
+            </div>
+            <div class="stat">
+                <div class="stat-value" id="task-count">0</div>
+                <div class="stat-label">Tasks</div>
+            </div>
+            <div class="stat">
+                <div class="stat-value" id="idle-count">0</div>
+                <div class="stat-label">Idle</div>
+            </div>
+            <div class="stat">
+                <div class="stat-value" id="running-count">0</div>
+                <div class="stat-label">Running</div>
+            </div>
+        </div>
+    </div>
+
+    <div class="container">
+        <div class="sidebar">
+            <div class="panel">
+                <h3>🤖 Agents</h3>
+                <div id="agent-list"></div>
+            </div>
+            <div class="panel">
+                <h3>📋 Submit Task</h3>
+                <div class="submit-form">
+                    <div class="form-group">
+                        <label>Repositories (comma-separated)</label>
+                        <input type="text" id="task-repos" placeholder="/path/to/repo1, /path/to/repo2">
+                    </div>
+                    <div class="form-group">
+                        <label>Prompt</label>
+                        <textarea id="task-prompt" placeholder="Describe the task..."></textarea>
+                    </div>
+                    <div class="form-group">
+                        <label>Tags (comma-separated, optional)</label>
+                        <input type="text" id="task-tags" placeholder="business-default, android">
+                    </div>
+                    <button class="btn" onclick="submitTask()">Submit Task</button>
+                </div>
+            </div>
+        </div>
+
+        <div class="main">
+            <div class="tab-bar">
+                <div class="tab active" onclick="showTab('tasks')">Tasks</div>
+                <div class="tab" onclick="showTab('detail')">Task Detail</div>
+            </div>
+            <div id="tab-tasks">
+                <div id="task-list"></div>
+            </div>
+            <div id="tab-detail" style="display:none;">
+                <div id="task-detail-view">
+                    <div class="empty-state"><span>📄</span>Select a task to view details</div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        let refreshInterval;
+        let ws;
+        let activeTaskId = null;
+        let taskLogs = {};  // Accumulates logs per task: { taskId: [entries] }
+
+        function showTab(tab) {
+            document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+            event.target.classList.add('active');
+            document.getElementById('tab-tasks').style.display = tab === 'tasks' ? 'block' : 'none';
+            document.getElementById('tab-detail').style.display = tab === 'detail' ? 'block' : 'none';
+        }
+
+        async function refresh() {
+            try {
+                const [agentsRes, tasksRes] = await Promise.all([
+                    fetch('/api/agents'),
+                    fetch('/api/tasks')
+                ]);
+                const agents = await agentsRes.json();
+                const tasks = await tasksRes.json();
+                renderAgents(agents);
+                renderTasks(tasks);
+                updateStats(agents, tasks);
+
+                // If a task detail is open, refresh it
+                if (activeTaskId) {
+                    refreshTaskDetail(activeTaskId);
+                }
+            } catch (e) {
+                console.error('refresh failed:', e);
+            }
+        }
+
+        function updateStats(agents, tasks) {
+            document.getElementById('agent-count').textContent = agents.count || 0;
+            document.getElementById('task-count').textContent = tasks.count || 0;
+            document.getElementById('idle-count').textContent = (agents.agents || []).filter(a => a.state === 'IDLE').length;
+            document.getElementById('running-count').textContent = (agents.agents || []).filter(a => a.state === 'RUNNING').length;
+        }
+
+        function renderAgents(data) {
+            const list = document.getElementById('agent-list');
+            const agents = data.agents || [];
+            if (agents.length === 0) {
+                list.innerHTML = '<div style="padding:0.5rem;color:#64748b;font-size:0.875rem;">No agents connected</div>';
+                return;
+            }
+            list.innerHTML = agents.map(a => {
+                const statusClass = `status-${a.state.toLowerCase()}`;
+                return `<div class="agent-item">
+                    <div class="agent-name"><span class="agent-status ${statusClass}"></span>${a.name || a.id}</div>
+                    <div class="agent-tags">${(a.tags || []).join(', ')}</div>
+                </div>`;
+            }).join('');
+        }
+
+        function renderTasks(data) {
+            const list = document.getElementById('task-list');
+            const tasks = data.tasks || [];
+            if (tasks.length === 0) {
+                list.innerHTML = '<div style="padding:0.5rem;color:#64748b;font-size:0.875rem;">No tasks yet</div>';
+                return;
+            }
+            list.innerHTML = tasks.map(t => {
+                const badgeClass = `badge-${t.status.toLowerCase()}`;
+                const itemClass = t.status.toLowerCase();
+                const isActive = t.id === activeTaskId ? ' active' : '';
+                return `<div class="task-item ${itemClass}${isActive}" onclick="selectTask('${t.id}')">
+                    <div class="task-id">${t.id} <span class="badge ${badgeClass}">${t.status}</span></div>
+                    <div class="task-meta">${t.assigned_to ? '→ ' + t.assigned_to : 'unassigned'} · ${new Date(t.created_at).toLocaleString()}</div>
+                    <div class="task-prompt">${escapeHtml(t.prompt.substring(0, 120))}${t.prompt.length > 120 ? '...' : ''}</div>
+                </div>`;
+            }).join('');
+        }
+
+        function currentToolId(block) {
+            return block ? block.toolId : '';
+        }
+
+        function renderToolBlockStart(block, timeStr, cursorClass) {
+            // Create the tool block div in the DOM using a fragment
+            const frag = document.createDocumentFragment();
+            const div = document.createElement('div');
+            div.className = 'tool-block';
+            div.id = 'tool-' + block.toolId;
+            div.innerHTML = `
+                <div class="tool-block-header" onclick="toggleToolBlock('${block.toolId}')">
+                    <div>
+                        <span class="tool-icon">🔧</span>
+                        <span class="tool-name">${escapeHtml(block.toolName)}</span>
+                        <span class="tool-id">${block.toolId}</span>
+                    </div>
+                    <div style="display:flex;align-items:center;gap:0.5rem;">
+                        <span class="tool-status running">running</span>
+                        <span class="tool-chevron">▶</span>
+                    </div>
+                </div>
+                <div class="tool-block-body" id="tool-body-${block.toolId}">
+                    ${block.args ? `<div class="tool-args">${escapeHtml(block.args)}</div>` : ''}
+                    <div class="tool-output"><div class="output-label">Output</div></div>
+                </div>
+            `;
+            frag.appendChild(div);
+            return frag;
+        }
+
+        function renderToolBlockEnd(block) {
+            // Update existing tool block in place — never create a new div
+            const blockEl = document.getElementById('tool-' + block.toolId);
+            if (!blockEl) return;
+
+            const statusClass = block.status === 'error' ? 'error' : 'success';
+            const statusLabel = block.status === 'error' ? 'error' : 'done';
+
+            // Update header
+            const header = blockEl.querySelector('.tool-block-header');
+            header.innerHTML = `
+                <div>
+                    <span class="tool-icon">🔧</span>
+                    <span class="tool-name">${escapeHtml(block.toolName)}</span>
+                    <span class="tool-id">${block.toolId}</span>
+                </div>
+                <div style="display:flex;align-items:center;gap:0.5rem;">
+                    <span class="tool-status ${statusClass}">${statusLabel}</span>
+                    <span class="tool-chevron">▶</span>
+                </div>
+            `;
+
+            // Update body: append result to output
+            const bodyEl = blockEl.querySelector('.tool-block-body');
+            const outputDiv = bodyEl.querySelector('.tool-output');
+            if (outputDiv && block.output) {
+                outputDiv.innerHTML = renderMarkdown(block.output);
+            } else if (!outputDiv && block.output) {
+                bodyEl.innerHTML = `<div class="tool-output"><div class="output-label">Output</div>${renderMarkdown(block.output)}</div>`;
+            }
+        }
+
+        function toggleToolBlock(toolId) {
+            const body = document.getElementById('tool-body-' + toolId);
+            const chevron = body?.previousElementSibling?.querySelector('.tool-chevron');
+            if (body) {
+                body.classList.toggle('open');
+                if (chevron) chevron.classList.toggle('open');
+            }
+        }
+
+        // renderUnknownEvent renders an unrecognized RPC event in a grey <pre> block.
+        function renderUnknownEvent(event) {
+            const pre = document.createElement('pre');
+            pre.className = 'log-msg unknown-event';
+            pre.innerHTML = `<code>${escapeHtml(JSON.stringify(event, null, 2))}</code>`;
+            return pre;
+        }
+
+        function toggleToolBlock(toolId) {
+            const body = document.getElementById('tool-body-' + toolId);
+            const chevron = body?.previousElementSibling?.querySelector('.tool-chevron');
+            if (body) {
+                body.classList.toggle('open');
+                if (chevron) chevron.classList.toggle('open');
+            }
+        }
+
+        function escapeHtml(str) {
+            const div = document.createElement('div');
+            div.textContent = str;
+            return div.innerHTML;
+        }
+
+        function renderMarkdown(text) {
+            if (typeof marked !== 'undefined') {
+                return marked.parse(text);
+            }
+            return escapeHtml(text);
+        }
+
+        function selectTask(taskId) {
+            activeTaskId = taskId;
+            refresh();
+            showTab('detail');
+            document.querySelectorAll('.tab').forEach(t => {
+                t.classList.remove('active');
+                if (t.textContent.trim() === 'Task Detail') t.classList.add('active');
+            });
+            document.getElementById('tab-tasks').style.display = 'none';
+            document.getElementById('tab-detail').style.display = 'block';
+            refreshTaskDetail(taskId);
+        }
+
+        async function refreshTaskDetail(taskId) {
+            try {
+                const res = await fetch(`/api/tasks/${taskId}`);
+                if (!res.ok) return;
+                const data = await res.json();
+                renderTaskDetail(data.task, data.logs || [], data.log_count || 0);
+            } catch (e) {
+                console.error('failed to load task detail:', e);
+            }
+        }
+
+        function renderTaskDetail(task, logs, logCount) {
+            const view = document.getElementById('task-detail-view');
+            if (!task) return;
+
+            const badgeClass = `badge-${task.status.toLowerCase()}`;
+            const promptHtml = escapeHtml(task.prompt);
+
+            let logsFrag = document.createDocumentFragment();
+            if (logs.length === 0) {
+                const emptyMsg = document.createElement('div');
+                emptyMsg.className = 'log-msg system';
+                emptyMsg.textContent = 'Waiting for agent output...';
+                logsFrag.appendChild(emptyMsg);
+            } else {
+                const isRunning = task.status === 'RUNNING' || task.status === 'ASSIGNED';
+                let currentToolBlock = null;
+
+                logs.forEach((log, i) => {
+                    const isLast = i === logs.length - 1 && isRunning;
+                    const timeStr = new Date(log.timestamp).toLocaleTimeString();
+                    const cursorClass = isLast ? ' streaming-cursor' : '';
+
+                    // Parse tool start
+                    const toolStartMatch = log.line.match(/^\[TOOL_START\]\s+(\S+?)\s*:?\s*(.*)\s*\(id:\s*([^)]+)\)/);
+                    if (toolStartMatch) {
+                        // Close any open tool block first
+                        if (currentToolBlock) {
+                            renderToolBlockEnd(currentToolBlock);
+                        }
+                        const toolName = toolStartMatch[1];
+                        const args = toolStartMatch[2].trim();
+                        const toolId = toolStartMatch[3];
+                        currentToolBlock = {
+                            toolName, toolId, args: '', output: '',
+                            status: 'running', hasOutput: false
+                        };
+                        const frag = renderToolBlockStart(currentToolBlock, timeStr, cursorClass);
+                        logsFrag.appendChild(frag);
+                        return;
+                    }
+
+                    // Parse tool output
+                    const toolOutputMatch = log.line.match(/^\[TOOL_OUTPUT\]\s+(\S+?)\s*\(id:\s*([^)]+)\):\s*(.*)$/);
+                    if (toolOutputMatch) {
+                        const toolId = toolOutputMatch[2];
+                        const output = toolOutputMatch[3];
+                        if (currentToolBlock && currentToolId(currentToolBlock) === toolId) {
+                            currentToolBlock.output += output;
+                            currentToolBlock.hasOutput = true;
+                        }
+                        return;
+                    }
+
+                    // Parse tool end
+                    const toolEndMatch = log.line.match(/^\[TOOL_END\]\s+(\S+?)\s*\(id:\s*([^)]+)\)(?:\s*\[ERROR\])?:?\s*(.*)$/);
+                    if (toolEndMatch) {
+                        const toolName = toolEndMatch[1];
+                        const toolId = toolEndMatch[2];
+                        const result = toolEndMatch[3].trim();
+                        if (currentToolBlock && currentToolId(currentToolBlock) === toolId) {
+                            if (result) currentToolBlock.output += result;
+                            currentToolBlock.status = log.line.includes('[ERROR]') ? 'error' : 'success';
+                        }
+                        if (currentToolBlock) {
+                            renderToolBlockEnd(currentToolBlock);
+                            currentToolBlock = null;
+                        }
+                        return;
+                    }
+
+                    // Non-tool log lines
+                    if (currentToolBlock) {
+                        // Close any unclosed tool block
+                        renderToolBlockEnd(currentToolBlock);
+                        currentToolBlock = null;
+                    }
+
+                    let msgEl;
+                    if (log.line === 'Task started' || log.line === 'Task completed successfully') {
+                        msgEl = document.createElement('div');
+                        msgEl.className = `log-msg system${cursorClass}`;
+                        msgEl.textContent = log.line;
+                    } else {
+                        msgEl = document.createElement('div');
+                        msgEl.className = `log-msg agent${cursorClass}`;
+                        const inner = document.createElement('div');
+                        inner.className = 'md-rendered';
+                        inner.innerHTML = renderMarkdown(log.line);
+                        msgEl.appendChild(inner);
+                    }
+                    logsFrag.appendChild(msgEl);
+                });
+
+                // Close any remaining open tool block
+                if (currentToolBlock) {
+                    renderToolBlockEnd(currentToolBlock);
+                    currentToolBlock = null;
+                }
+            }
+
+            const detailContainer = document.createElement('div');
+            detailContainer.className = 'task-detail';
+            detailContainer.innerHTML = `
+                <div class="task-detail-header">
+                    <div>
+                        <div class="task-detail-id">${escapeHtml(task.id)} <span class="badge ${badgeClass}">${task.status}</span></div>
+                        <div class="task-detail-meta">${task.assigned_to ? 'Agent: ' + escapeHtml(task.assigned_to) : 'Unassigned'} · ${logs.length} log entries</div>
+                    </div>
+                    <button class="btn btn-sm btn-ghost" onclick="selectTask('')">Close</button>
+                </div>
+                <div class="task-detail-prompt">${promptHtml}</div>
+                <div class="task-detail-body"></div>
+            `;
+            const detailBody = detailContainer.querySelector('.task-detail-body');
+            detailBody.appendChild(logsFrag);
+            view.innerHTML = '';
+            view.appendChild(detailContainer);
+
+            // Scroll to bottom
+            const scrollBody = view.querySelector('.task-detail-body');
+            if (scrollBody) scrollBody.scrollTop = scrollBody.scrollHeight;
+        }
+
+        async function submitTask() {
+            const repos = document.getElementById('task-repos').value;
+            const prompt = document.getElementById('task-prompt').value;
+            const tags = document.getElementById('task-tags').value;
+
+            if (!prompt) {
+                alert('Prompt is required');
+                return;
+            }
+
+            const task = {
+                repos: repos ? repos.split(',').map(s => s.trim()).filter(Boolean) : [],
+                prompt: prompt,
+                tags: tags ? tags.split(',').map(s => s.trim()).filter(Boolean) : []
+            };
+
+            try {
+                const res = await fetch('/api/tasks', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(task)
+                });
+                if (res.ok) {
+                    document.getElementById('task-repos').value = '';
+                    document.getElementById('task-prompt').value = '';
+                    document.getElementById('task-tags').value = '';
+                    refresh();
+                }
+            } catch (e) {
+                console.error('submit failed:', e);
+            }
+        }
+
+        // WebSocket for live updates
+        function connectWS() {
+            const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
+            const url = `${protocol}//${location.host}/ws`;
+            console.log('Connecting to WebSocket:', url);
+            ws = new WebSocket(url);
+            ws.onopen = () => {
+                console.log('WebSocket connected');
+            };
+            ws.onerror = (err) => {
+                console.error('WebSocket error:', err);
+            };
+            ws.onclose = (event) => {
+                console.log('WebSocket closed (code:', event.code, 'reason:', event.reason, ') — reconnecting in 5s');
+                setTimeout(connectWS, 5000);
+            };
+            ws.onmessage = (event) => {
+                try {
+                    const msg = JSON.parse(event.data);
+                    if (msg.method === 'task.updated') {
+                        // Parse params — may be a string or already an object
+                        let params = {};
+                        if (typeof msg.params === 'string') {
+                            try { params = JSON.parse(msg.params); } catch(e) {}
+                        } else {
+                            params = msg.params || {};
+                        }
+                        let taskId = params.task_id || null;
+                        refresh();
+                        if (taskId === activeTaskId) {
+                            refreshTaskDetail(taskId);
+                        }
+                    } else if (msg.method === 'task.log') {
+                        // Parse params — params may be a string (JSON-encoded) or already an object
+                        let params = {};
+                        if (typeof msg.params === 'string') {
+                            try { params = JSON.parse(msg.params); } catch(e) { params = {}; }
+                        } else {
+                            params = msg.params || {};
+                        }
+
+                        // Accumulate log in memory
+                        const logEntry = {
+                            task_id: params.task_id,
+                            line: params.line,
+                            level: params.level || 'info',
+                            timestamp: new Date().toISOString()
+                        };
+                        if (!taskLogs[params.task_id]) {
+                            taskLogs[params.task_id] = [];
+                        }
+                        taskLogs[params.task_id].push(logEntry);
+
+                        // Append to detail view if active
+                        if (params.task_id === activeTaskId) {
+                            appendLogToDetail(logEntry);
+                        }
+                    }
+                } catch (e) {}
+            };
+            ws.onclose = () => setTimeout(connectWS, 5000);
+        }
+
+        function appendLogToDetail(logEntry) {
+            const view = document.getElementById('task-detail-view');
+            const body = view.querySelector('.task-detail-body');
+            if (!body) return;
+
+            const timeStr = new Date(logEntry.timestamp).toLocaleTimeString();
+            const line = logEntry.line;
+
+            // Parse tool start
+            const toolStartMatch = line.match(/^\[TOOL_START\]\s+(\S+?)\s*:?\s*(.*)\s*\(id:\s*([^)]+)\)/);
+            if (toolStartMatch) {
+                const toolName = toolStartMatch[1];
+                const args = toolStartMatch[2].trim();
+                const toolId = toolStartMatch[3];
+                const frag = renderToolBlockStart({ toolName, toolId, args, output: '', status: 'running', hasOutput: false }, timeStr, '');
+                body.appendChild(frag);
+                body.scrollTop = body.scrollHeight;
+                return;
+            }
+
+            // Parse tool output — update the existing tool block in place
+            const toolOutputMatch = line.match(/^\[TOOL_OUTPUT\]\s+(\S+?)\s*\(id:\s*([^)]+)\):\s*(.*)$/);
+            if (toolOutputMatch) {
+                const toolId = toolOutputMatch[2];
+                const output = toolOutputMatch[3];
+                const block = body.querySelector(`#tool-${toolId}`);
+                if (block) {
+                    const outputDiv = block.querySelector('.tool-output');
+                    if (outputDiv) {
+                        const existing = outputDiv.innerHTML || '';
+                        outputDiv.innerHTML = renderMarkdown(existing + output);
+                    }
+                }
+                body.scrollTop = body.scrollHeight;
+                return;
+            }
+
+            // Parse tool end — update the existing tool block in place
+            const toolEndMatch = line.match(/^\[TOOL_END\]\s+(\S+?)\s*\(id:\s*([^)]+)\)(?:\s*\[ERROR\])?:?\s*(.*)$/);
+            if (toolEndMatch) {
+                const toolName = toolEndMatch[1];
+                const toolId = toolEndMatch[2];
+                const result = toolEndMatch[3].trim();
+                const isError = line.includes('[ERROR]');
+                const statusClass = isError ? 'error' : 'success';
+                const statusLabel = isError ? 'error' : 'done';
+                const block = body.querySelector(`#tool-${toolId}`);
+                if (block) {
+                    const header = block.querySelector('.tool-block-header');
+                    header.innerHTML = `
+                        <div>
+                            <span class="tool-icon">🔧</span>
+                            <span class="tool-name">${escapeHtml(toolName)}</span>
+                            <span class="tool-id">${toolId}</span>
+                        </div>
+                        <div style="display:flex;align-items:center;gap:0.5rem;">
+                            <span class="tool-status ${statusClass}">${statusLabel}</span>
+                            <span class="tool-chevron">▶</span>
+                        </div>
+                    `;
+                    const bodyEl = block.querySelector('.tool-block-body');
+                    const outputDiv = bodyEl.querySelector('.tool-output');
+                    if (outputDiv && result) {
+                        const existing = outputDiv.innerHTML || '';
+                        outputDiv.innerHTML = renderMarkdown(existing + result);
+                    } else if (result) {
+                        bodyEl.innerHTML = `<div class="tool-output"><div class="output-label">Output</div>${renderMarkdown(result)}</div>`;
+                    }
+                }
+                body.scrollTop = body.scrollHeight;
+                return;
+            }
+
+            // Non-tool log lines
+            let msgEl;
+            if (line === 'Task started' || line === 'Task completed successfully') {
+                msgEl = document.createElement('div');
+                msgEl.className = 'log-msg system';
+                msgEl.textContent = line;
+            } else {
+                msgEl = document.createElement('div');
+                msgEl.className = 'log-msg agent';
+                const inner = document.createElement('div');
+                inner.className = 'md-rendered';
+                inner.innerHTML = renderMarkdown(line);
+                msgEl.appendChild(inner);
+            }
+            body.appendChild(msgEl);
+            body.scrollTop = body.scrollHeight;
+
+            // Update log count in header
+            const meta = view.querySelector('.task-detail-meta');
+            if (meta) {
+                const count = taskLogs[logEntry.task_id]?.length || 0;
+                meta.textContent = `${meta.textContent.split(' · ')[0]} · ${count} log entries`;
+            }
+        }
+
+        // Initial load
+        refresh();
+        connectWS();
+        refreshInterval = setInterval(refresh, 5000);
+    </script>
+</body>
+</html>
