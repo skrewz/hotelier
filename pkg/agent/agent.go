@@ -6,9 +6,6 @@ import (
 	"fmt"
 	"log"
 	"os"
-	"os/exec"
-	"path/filepath"
-	"strings"
 	"sync"
 	"time"
 
@@ -340,7 +337,6 @@ func (a *Agent) ExecuteTask(task TaskAssignment) (*TaskResult, error) {
 	a.log.Printf("[TASK] repos: %v", task.Repos)
 	a.log.Printf("[TASK] prompt: %s", task.Prompt)
 	a.log.Printf("[TASK] tags: %v", task.Tags)
-	a.log.Printf("[TASK] mode: %s", a.config.TaskMode)
 
 	// Send log that task started
 	if err := a.SendLog(task.TaskID, "Task started"); err != nil {
@@ -374,193 +370,9 @@ func (a *Agent) ExecuteTask(task TaskAssignment) (*TaskResult, error) {
 	return result, nil
 }
 
-// DefaultHandler returns a default task handler that executes shell commands.
-// It clones remote repos, logs the working directory, and logs each command it spawns.
-func DefaultHandler(ctx context.Context, task TaskAssignment, cb LogCallback) (*TaskResult, error) {
-	// Determine the working directory.
-	// If there are remote repos, clone them into a temp dir and use that.
-	// If there are only local repos, use the first one as the working directory.
-	workDir, err := defaultHandlerPrepareRepos(ctx, task.Repos, cb)
-	if err != nil {
-		return nil, fmt.Errorf("prepare repos: %w", err)
-	}
-
-	// Log the working directory being used
-	logLine := fmt.Sprintf("[WORKDIR] using working directory: %s", workDir)
-	if cb != nil {
-		_ = cb(task.TaskID, logLine)
-	}
-
-	// Execute the prompt as a shell command
-	cmd := exec.CommandContext(ctx, "bash", "-c", task.Prompt)
-	cmd.Dir = workDir
-
-	// Log the command being spawned
-	cmdLine := fmt.Sprintf("[SHELL] %s", cmd.String())
-	if cb != nil {
-		_ = cb(task.TaskID, cmdLine)
-	}
-
-	stdout, err := cmd.CombinedOutput()
-	if err != nil {
-		return &TaskResult{
-			TaskID:  task.TaskID,
-			Success: false,
-			Output:  string(stdout),
-			Error:   err.Error(),
-		}, nil
-	}
-
-	return &TaskResult{
-		TaskID:  task.TaskID,
-		Success: true,
-		Output:  string(stdout),
-	}, nil
-}
-
-// defaultHandlerPrepareRepos clones any remote repos into a temp directory
-// and returns the working directory. If there are only local repos, the first
-// one is used as the working directory.
-func defaultHandlerPrepareRepos(ctx context.Context, repos []string, cb LogCallback) (string, error) {
-	if len(repos) == 0 {
-		workDir, err := os.MkdirTemp("", "hotelier-task-*")
-		if err != nil {
-			return "", fmt.Errorf("create temp dir: %w", err)
-		}
-		return workDir, nil
-	}
-
-	// Check if any repo is a remote URL
-	hasRemote := false
-	for _, repo := range repos {
-		if isGitURL(repo) {
-			hasRemote = true
-			break
-		}
-	}
-
-	if hasRemote {
-		// Create a task-specific directory and clone remote repos into it
-		workDir, err := os.MkdirTemp("", "hotelier-task-*")
-		if err != nil {
-			return "", fmt.Errorf("create task dir: %w", err)
-		}
-
-		for _, repo := range repos {
-			if isGitURL(repo) {
-				repoName := filepath.Base(strings.TrimSuffix(repo, ".git"))
-				clonePath := filepath.Join(workDir, repoName)
-				cmdLine := fmt.Sprintf("[GIT] git clone --depth 1 %s %s", repo, clonePath)
-				if cb != nil {
-					_ = cb("", cmdLine)
-				}
-				cloneCmd := exec.CommandContext(ctx, "git", "clone", "--depth", "1", repo, clonePath)
-				out, err := cloneCmd.CombinedOutput()
-				if err != nil {
-					return "", fmt.Errorf("git clone %s: %w (output: %s)", repo, err, string(out))
-				}
-			} else {
-				// Local path — copy contents into the task directory
-				resolved := repo
-				if !filepath.IsAbs(repo) {
-					resolved = filepath.Join(workDir, repo)
-				}
-				absPath, err := filepath.Abs(resolved)
-				if err != nil {
-					return "", fmt.Errorf("resolve local repo path %s: %w", repo, err)
-				}
-				cmdLine := fmt.Sprintf("[REPO] using local repo: %s", absPath)
-				if cb != nil {
-					_ = cb("", cmdLine)
-				}
-				// Copy the local repo contents into the task directory
-				entries, err := os.ReadDir(absPath)
-				if err != nil {
-					return "", fmt.Errorf("read local repo %s: %w", absPath, err)
-				}
-				for _, entry := range entries {
-					src := filepath.Join(absPath, entry.Name())
-					dst := filepath.Join(workDir, entry.Name())
-					if entry.IsDir() {
-						if err := copyDir(src, dst); err != nil {
-							return "", fmt.Errorf("copy dir %s: %w", entry.Name(), err)
-						}
-					} else {
-						if err := copyFile(src, dst); err != nil {
-							return "", fmt.Errorf("copy file %s: %w", entry.Name(), err)
-						}
-					}
-				}
-			}
-		}
-
-		return workDir, nil
-	}
-
-	// All local repos — use the first one as the working directory
-	resolved := repos[0]
-	if !filepath.IsAbs(resolved) {
-		resolved = filepath.Join(".", resolved)
-	}
-	absPath, err := filepath.Abs(resolved)
-	if err != nil {
-		return "", fmt.Errorf("resolve local repo path %s: %w", repos[0], err)
-	}
-	cmdLine := fmt.Sprintf("[REPO] using local repo: %s", absPath)
-	if cb != nil {
-		_ = cb("", cmdLine)
-	}
-	return absPath, nil
-}
-
-// copyFile copies a single file from src to dst.
-func copyFile(src, dst string) error {
-	data, err := os.ReadFile(src)
-	if err != nil {
-		return err
-	}
-	return os.WriteFile(dst, data, 0o644)
-}
-
-// copyDir recursively copies a directory from src to dst.
-func copyDir(src, dst string) error {
-	entries, err := os.ReadDir(src)
-	if err != nil {
-		return err
-	}
-	if err := os.MkdirAll(dst, 0o755); err != nil {
-		return err
-	}
-	for _, entry := range entries {
-		srcPath := filepath.Join(src, entry.Name())
-		dstPath := filepath.Join(dst, entry.Name())
-		if entry.IsDir() {
-			if err := copyDir(srcPath, dstPath); err != nil {
-				return err
-			}
-		} else {
-			if err := copyFile(srcPath, dstPath); err != nil {
-				return err
-			}
-		}
-	}
-	return nil
-}
-
 // LoadConfig loads the agent configuration from a file.
 func LoadConfig(path string) (config.AgentConfig, error) {
 	return config.LoadAgentConfig(path)
-}
-
-// RunAgent is a convenience function to load config and run the agent.
-func RunAgent(configPath string) error {
-	cfg, err := LoadConfig(configPath)
-	if err != nil {
-		return fmt.Errorf("load config: %w", err)
-	}
-
-	agent := New(cfg, DefaultHandler)
-	return agent.Start()
 }
 
 // Ensure json is used

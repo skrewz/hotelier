@@ -47,8 +47,6 @@ type AgentConfig struct {
 	WorkingDir string `yaml:"working_dir"`
 	// LogLevel is the logging level (debug, info, warn, error).
 	LogLevel string `yaml:"log_level"`
-	// TaskMode is the execution mode: "shell" (default) or "pi".
-	TaskMode string `yaml:"task_mode"`
 	// AutoClaimNextTask controls whether the agent automatically picks up
 	// the next pending task after completing the current one. When false,
 	// the agent remains idle and waits for the host to assign a task.

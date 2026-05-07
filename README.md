@@ -32,7 +32,7 @@ cp config/server.example.yaml config/server.yaml
 cp config/agent.example.yaml config/agent.yaml
 
 ./bin/hotelier    # Server on :8080
-./bin/agent       # Agent (uses pi AI agent by default)
+./bin/agent       # Agent (runs tasks via the pi AI agent)
 ```
 
 ## Configuration
@@ -73,12 +73,10 @@ heartbeat_interval: 15
 task_timeout: 1800
 working_dir: "/tmp/hotelier"
 log_level: "info"
-task_mode: "pi"
 ```
 
 | Field | Description | Default |
 |-------|-------------|--------|
-| `task_mode` | Execution mode: `"pi"` (AI agent) or `"shell"` (raw bash) | `"pi"` |
 | `working_dir` | Base directory for task execution | `"/tmp/hotelier"` |
 | `log_level` | Logging level (`debug`, `info`, `warn`, `error`) | `"info"` |
 
@@ -109,16 +107,6 @@ Or through the web UI dashboard.
 | `GET` | `/api/agents/:id` | Get agent details |
 | `GET` | `/api/health` | Health check |
 | `WS` | `/ws` | WebSocket (JSON-RPC) |
-
-## Execution Modes
-
-Agents support two task execution modes, configured via `task_mode` in the agent config:
-
-### `pi` (default)
-Tasks are executed by the [pi](https://pi.dev) AI agent via its RPC interface. The agent streams output line-by-line back to the host as the AI works through the prompt. This is the recommended mode for development tasks.
-
-### `shell`
-Tasks are executed as raw bash commands in the target repository. This is useful for simple scripting tasks or when AI execution is not desired.
 
 ## Deployment
 

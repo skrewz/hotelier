@@ -16,7 +16,6 @@ import (
 
 // isGitURL returns true if the string looks like a git remote URL.
 func isGitURL(s string) bool {
-	// SSH-style: user@host:path or git@host:path
 	if strings.Contains(s, "://") {
 		return true
 	}

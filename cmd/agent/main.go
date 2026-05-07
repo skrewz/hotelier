@@ -27,15 +27,8 @@ func main() {
 		}
 	}
 
-	// Create handler based on task mode
-	var handler agent.Handler
-	var cleanup func()
-	switch cfg.TaskMode {
-	case "pi":
-		handler, cleanup = createPIHandler(cfg)
-	default:
-		handler = createShellHandler(cfg)
-	}
+	// Create the PI handler — the only execution mode for this agent
+	handler, cleanup := createPIHandler(cfg)
 
 	// Create agent
 	ag := agent.New(cfg, handler)
@@ -56,20 +49,12 @@ func main() {
 	<-sigCh
 	log.Println("shutting down agent...")
 
-	// Clean up handler resources (e.g., pi subprocess)
-	if cleanup != nil {
-		cleanup()
-	}
+	// Clean up handler resources (pi subprocess)
+	cleanup()
 
 	ag.Stop()
 
 	log.Println("agent stopped")
-}
-
-func createShellHandler(cfg config.AgentConfig) agent.Handler {
-	return func(ctx context.Context, task agent.TaskAssignment, _ agent.LogCallback) (*agent.TaskResult, error) {
-		return agent.DefaultHandler(ctx, task, nil)
-	}
 }
 
 func createPIHandler(cfg config.AgentConfig) (agent.Handler, func()) {
