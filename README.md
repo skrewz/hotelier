@@ -108,39 +108,6 @@ Or through the web UI dashboard.
 | `GET` | `/api/health` | Health check |
 | `WS` | `/ws` | WebSocket (JSON-RPC) |
 
-## Deployment
-
-### Docker
-
-```bash
-docker build -t hotelier/server .
-docker build -t hotelier/agent -f Dockerfile.agent .
-
-docker run -d -p 8080:8080 -v $(pwd)/config/server.yaml:/etc/hotelier.yaml hotelier/server
-docker run -v $(pwd)/config/agent.yaml:/etc/agent.yaml hotelier/agent
-```
-
-### systemd
-
-```ini
-# /etc/systemd/system/hotelier.service
-[Unit]
-Description=Hotelier Check-In Host
-After=network.target
-
-[Service]
-ExecStart=/usr/local/bin/hotelier --config /etc/hotelier/config/server.yaml
-Restart=always
-User=hotelier
-
-[Install]
-WantedBy=multi-user.target
-```
-
-### Kubernetes
-
-Agents run as pods with `config/agent.yaml` as a ConfigMap. Server runs as a Deployment with Ingress for the web UI.
-
 ## Tags
 
 Agents declare capability tags at registration. Tasks specify required tags for routing:
