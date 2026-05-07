@@ -283,10 +283,10 @@
                     </div>
                     <div style="display:flex;align-items:center;gap:0.5rem;">
                         <span class="tool-status running">running</span>
-                        <span class="tool-chevron open">▶</span>
+                        <span class="tool-chevron">▶</span>
                     </div>
                 </div>
-                <div class="tool-block-body open" id="tool-body-${block.toolId}">
+                <div class="tool-block-body" id="tool-body-${block.toolId}">
                     ${block.args ? `<div class="tool-args">${escapeHtml(block.args)}</div>` : ''}
                     <div class="tool-output"><div class="output-label">Output</div></div>
                 </div>
@@ -322,15 +322,8 @@
             const outputDiv = bodyEl.querySelector('.tool-output');
             if (outputDiv && block.output) {
                 outputDiv.innerHTML = renderMarkdown(block.output);
-                // Auto-expand tool blocks that have content
-                bodyEl.classList.add('open');
-                const chevron = header.querySelector('.tool-chevron');
-                if (chevron) chevron.classList.add('open');
             } else if (!outputDiv && block.output) {
                 bodyEl.innerHTML = `<div class="tool-output"><div class="output-label">Output</div>${renderMarkdown(block.output)}</div>`;
-                bodyEl.classList.add('open');
-                const chevron = header.querySelector('.tool-chevron');
-                if (chevron) chevron.classList.add('open');
             }
         }
 
@@ -419,8 +412,8 @@
                     const timeStr = new Date(log.timestamp).toLocaleTimeString();
                     const cursorClass = isLast ? ' streaming-cursor' : '';
 
-                    // Parse tool start — format: [TOOL_START] toolName: args (id: toolId)
-                    const toolStartMatch = log.line.match(/^\[TOOL_START\]\s+(\S+)\s*:\s*(.*)\s*\(id:\s*([^)]+)\)/);
+                    // Parse tool start
+                    const toolStartMatch = log.line.match(/^\[TOOL_START\]\s+(\S+?)\s*:?\s*(.*)\s*\(id:\s*([^)]+)\)/);
                     if (toolStartMatch) {
                         // Close any open tool block first
                         if (currentToolBlock) {
@@ -438,8 +431,8 @@
                         return;
                     }
 
-                    // Parse tool output — format: [TOOL_OUTPUT] toolName (id: toolId): output
-                    const toolOutputMatch = log.line.match(/^\[TOOL_OUTPUT\]\s+(\S+)\s*\(id:\s*([^)]+)\):\s*(.*)$/);
+                    // Parse tool output
+                    const toolOutputMatch = log.line.match(/^\[TOOL_OUTPUT\]\s+(\S+?)\s*\(id:\s*([^)]+)\):\s*(.*)$/);
                     if (toolOutputMatch) {
                         const toolId = toolOutputMatch[2];
                         const output = toolOutputMatch[3];
@@ -450,8 +443,8 @@
                         return;
                     }
 
-                    // Parse tool end — format: [TOOL_END] toolName (id: toolId): result  or  [TOOL_END] toolName (id: toolId) [ERROR]
-                    const toolEndMatch = log.line.match(/^\[TOOL_END\]\s+(\S+)\s*\(id:\s*([^)]+)\)(?:\s*\[ERROR\])?:?\s*(.*)$/);
+                    // Parse tool end
+                    const toolEndMatch = log.line.match(/^\[TOOL_END\]\s+(\S+?)\s*\(id:\s*([^)]+)\)(?:\s*\[ERROR\])?:?\s*(.*)$/);
                     if (toolEndMatch) {
                         const toolName = toolEndMatch[1];
                         const toolId = toolEndMatch[2];
@@ -624,8 +617,8 @@
             const timeStr = new Date(logEntry.timestamp).toLocaleTimeString();
             const line = logEntry.line;
 
-            // Parse tool start — format: [TOOL_START] toolName: args (id: toolId)
-            const toolStartMatch = line.match(/^\[TOOL_START\]\s+(\S+)\s*:\s*(.*)\s*\(id:\s*([^)]+)\)/);
+            // Parse tool start
+            const toolStartMatch = line.match(/^\[TOOL_START\]\s+(\S+?)\s*:?\s*(.*)\s*\(id:\s*([^)]+)\)/);
             if (toolStartMatch) {
                 const toolName = toolStartMatch[1];
                 const args = toolStartMatch[2].trim();
@@ -637,7 +630,7 @@
             }
 
             // Parse tool output — update the existing tool block in place
-            const toolOutputMatch = line.match(/^\[TOOL_OUTPUT\]\s+(\S+)\s*\(id:\s*([^)]+)\):\s*(.*)$/);
+            const toolOutputMatch = line.match(/^\[TOOL_OUTPUT\]\s+(\S+?)\s*\(id:\s*([^)]+)\):\s*(.*)$/);
             if (toolOutputMatch) {
                 const toolId = toolOutputMatch[2];
                 const output = toolOutputMatch[3];
@@ -647,12 +640,6 @@
                     if (outputDiv) {
                         const existing = outputDiv.innerHTML || '';
                         outputDiv.innerHTML = renderMarkdown(existing + output);
-                        // Auto-expand tool blocks that have content
-                        if (!outputDiv.closest('.tool-block-body').classList.contains('open')) {
-                            outputDiv.closest('.tool-block-body').classList.add('open');
-                            const chevron = outputDiv.closest('.tool-block-body').previousElementSibling?.querySelector('.tool-chevron');
-                            if (chevron) chevron.classList.add('open');
-                        }
                     }
                 }
                 body.scrollTop = body.scrollHeight;
@@ -660,7 +647,7 @@
             }
 
             // Parse tool end — update the existing tool block in place
-            const toolEndMatch = line.match(/^\[TOOL_END\]\s+(\S+)\s*\(id:\s*([^)]+)\)(?:\s*\[ERROR\])?:?\s*(.*)$/);
+            const toolEndMatch = line.match(/^\[TOOL_END\]\s+(\S+?)\s*\(id:\s*([^)]+)\)(?:\s*\[ERROR\])?:?\s*(.*)$/);
             if (toolEndMatch) {
                 const toolName = toolEndMatch[1];
                 const toolId = toolEndMatch[2];
