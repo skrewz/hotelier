@@ -14,7 +14,13 @@ import (
 
 func main() {
 	configPath := flag.String("config", "config/agent.yaml", "path to agent configuration file")
+	debug := flag.Bool("debug", false, "enable RPC debug logging to stdout")
 	flag.Parse()
+
+	// Allow DEBUG env var to override the flag.
+	if os.Getenv("DEBUG") == "1" {
+		*debug = true
+	}
 
 	// Load configuration
 	cfg, err := config.LoadAgentConfig(*configPath)
@@ -28,7 +34,7 @@ func main() {
 	}
 
 	// Create the PI handler — the only execution mode for this agent
-	handler, cleanup := createPIHandler(cfg)
+	handler, cleanup := createPIHandler(cfg, *debug)
 
 	// Create agent
 	ag := agent.New(cfg, handler)
@@ -57,13 +63,13 @@ func main() {
 	log.Println("agent stopped")
 }
 
-func createPIHandler(cfg config.AgentConfig) (agent.Handler, func()) {
+func createPIHandler(cfg config.AgentConfig, debug bool) (agent.Handler, func()) {
 	workDir := cfg.WorkingDir
 	if workDir == "" {
 		workDir = "/tmp/hotelier"
 	}
 
-	h := agent.NewPIHandler(workDir, "", "", "")
+	h := agent.NewPIHandlerDebug(workDir, "", "", "", debug)
 	if err := h.Start(context.Background()); err != nil {
 		log.Fatalf("failed to start pi handler: %v", err)
 	}

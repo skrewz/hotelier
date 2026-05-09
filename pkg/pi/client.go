@@ -43,6 +43,7 @@ type PiClient struct {
 	model         string
 	thinkingLevel string
 	agentDir      string
+	debug         bool
 }
 
 // PiClientConfig holds configuration for the pi client.
@@ -59,6 +60,8 @@ type PiClientConfig struct {
 	AgentDir string
 	// Log is the logger for pi client events.
 	Log *log.Logger
+	// Debug enables verbose RPC logging to stdout.
+	Debug bool
 }
 
 // NewClient creates a new pi RPC client.
@@ -73,6 +76,7 @@ func NewClient(cfg PiClientConfig) *PiClient {
 		model:         cfg.Model,
 		thinkingLevel: cfg.ThinkingLevel,
 		agentDir:      cfg.AgentDir,
+		debug:         cfg.Debug,
 		eventCh:       make(chan Event, 256),
 		doneCh:        make(chan struct{}),
 	}
@@ -231,6 +235,11 @@ func (c *PiClient) sendCommandLocked(cmd map[string]interface{}) error {
 		return fmt.Errorf("marshal command: %w", err)
 	}
 
+	// Log raw RPC commands to stdout when debug is enabled.
+	if c.debug {
+		fmt.Fprintf(os.Stdout, "[RPC] -> %s\n", string(data))
+	}
+
 	_, err = c.stdin.Write(append(data, '\n'))
 	if err != nil {
 		return fmt.Errorf("write command: %w", err)
@@ -249,6 +258,11 @@ func (c *PiClient) readEvents() {
 		line := scanner.Text()
 		if line == "" {
 			continue
+		}
+
+		// Log raw RPC events to stdout when debug is enabled.
+		if c.debug {
+			fmt.Fprintf(os.Stdout, "[RPC] <- %s\n", line)
 		}
 
 		var event Event

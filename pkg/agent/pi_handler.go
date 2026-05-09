@@ -27,13 +27,21 @@ func isGitURL(s string) bool {
 
 // PIHandler executes tasks using the pi AI agent via RPC subprocess.
 type PIHandler struct {
-	client *pi.PiClient
-	log    *log.Logger
-	mu     sync.Mutex
+	client  *pi.PiClient
+	log     *log.Logger
+	debug   bool
+	debugMu sync.Mutex
+	mu      sync.Mutex
 }
 
 // NewPIHandler creates a new PIHandler.
 func NewPIHandler(cwd string, provider, model, thinkingLevel string) *PIHandler {
+	return NewPIHandlerDebug(cwd, provider, model, thinkingLevel, false)
+}
+
+// NewPIHandlerDebug creates a new PIHandler with optional RPC debug logging.
+// When debug is true, all RPC communication is logged to stdout.
+func NewPIHandlerDebug(cwd string, provider, model, thinkingLevel string, debug bool) *PIHandler {
 	logger := log.New(os.Stdout, "[pi-handler] ", log.LstdFlags)
 	cfg := pi.PiClientConfig{
 		CWD:           cwd,
@@ -41,10 +49,12 @@ func NewPIHandler(cwd string, provider, model, thinkingLevel string) *PIHandler 
 		Model:         model,
 		ThinkingLevel: thinkingLevel,
 		Log:           logger,
+		Debug:         debug,
 	}
 	return &PIHandler{
 		client: pi.NewClient(cfg),
 		log:    logger,
+		debug:  debug,
 	}
 }
 
@@ -54,6 +64,9 @@ func (h *PIHandler) Start(ctx context.Context) error {
 		return fmt.Errorf("start pi client: %w", err)
 	}
 	h.log.Printf("pi client started")
+	if h.debug {
+		h.log.Printf("[DEBUG] RPC debug logging enabled")
+	}
 	return nil
 }
 
