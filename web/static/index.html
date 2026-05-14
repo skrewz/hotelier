@@ -114,6 +114,31 @@
         .tab-bar { display: flex; gap: 0; margin-bottom: 1rem; }
         .tab { padding: 0.5rem 1rem; background: #1e293b; border: 1px solid #334155; border-bottom: none; border-radius: 0.375rem 0.375rem 0 0; cursor: pointer; font-size: 0.875rem; }
         .tab.active { background: #334155; }
+        .log-breadcrumb { display: flex; align-items: center; gap: 0.5rem; padding: 0.5rem 1rem; background: #1e293b; border-radius: 0.5rem; margin-bottom: 0.75rem; flex-wrap: wrap; }
+        .log-breadcrumb .crumb { color: #38bdf8; cursor: pointer; text-decoration: underline; font-size: 0.875rem; }
+        .log-breadcrumb .crumb:hover { color: #7dd3fc; }
+        .log-breadcrumb .separator { color: #475569; font-size: 0.75rem; }
+        .log-breadcrumb .current { color: #94a3b8; font-size: 0.875rem; }
+        .log-task-item { padding: 0.5rem 0.75rem; margin-bottom: 0.25rem; background: #1e293b; border-radius: 0.375rem; cursor: pointer; display: flex; justify-content: space-between; align-items: center; }
+        .log-task-item:hover { background: #334155; }
+        .log-task-id { font-size: 0.85rem; color: #e2e8f0; }
+        .log-task-count { font-size: 0.7rem; color: #64748b; }
+        .log-entry-line { padding: 0.375rem 0.75rem; border-bottom: 1px solid #1e293b; font-size: 0.8rem; line-height: 1.5; white-space: pre-wrap; word-break: break-word; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; }
+        .log-entry-line:last-child { border-bottom: none; }
+        .log-entry-line .log-level-badge { display: inline-block; padding: 0.05rem 0.35rem; border-radius: 0.25rem; font-size: 0.6rem; font-weight: 700; text-transform: uppercase; margin-right: 0.5rem; min-width: 3.5em; text-align: center; vertical-align: middle; }
+        .log-entry-line .log-level-badge.tool { background: #422006; color: #fbbf24; }
+        .log-entry-line .log-level-badge.text { background: #172554; color: #60a5fa; }
+        .log-entry-line .log-level-badge.info { background: #1e3a5f; color: #38bdf8; }
+        .log-entry-line .log-level-badge.system { background: #1e293b; color: #64748b; }
+        .log-entry-line .log-level-badge.error { background: #450a0a; color: #fca5a5; }
+        .log-entry-line .log-timestamp { color: #475569; font-size: 0.65rem; font-family: 'SF Mono', 'Fira Code', monospace; margin-right: 0.5rem; }
+        .log-entry-line .log-content { color: #cbd5e1; }
+        .log-entry-line[data-level="tool"] { border-left: 2px solid #f59e0b; }
+        .log-entry-line[data-level="text"] { border-left: 2px solid #3b82f6; }
+        .log-entry-line[data-level="info"] { border-left: 2px solid #06b6d4; }
+        .log-entry-line[data-level="system"] { border-left: 2px solid #64748b; }
+        .log-entry-line[data-level="error"] { border-left: 2px solid #ef4444; }
+        .log-entry-line[data-level=""] { border-left: 2px solid #334155; }
         .badge { display: inline-block; padding: 0.125rem 0.375rem; border-radius: 0.25rem; font-size: 0.625rem; font-weight: 600; text-transform: uppercase; }
         .badge-pending { background: #334155; color: #94a3b8; }
         .badge-assigned { background: #1e3a5f; color: #38bdf8; }
@@ -176,6 +201,7 @@
             <div class="tab-bar">
                 <div class="tab active" onclick="showTab('tasks')">Tasks</div>
                 <div class="tab" onclick="showTab('detail')">Task Detail</div>
+                <div class="tab" onclick="showTab('logs')">Logs</div>
             </div>
             <div id="tab-tasks">
                 <div id="task-list"></div>
@@ -183,6 +209,11 @@
             <div id="tab-detail" style="display:none;">
                 <div id="task-detail-view">
                     <div class="empty-state"><span>📄</span>Select a task to view details</div>
+                </div>
+            </div>
+            <div id="tab-logs" style="display:none;">
+                <div id="log-view">
+                    <div class="empty-state"><span>📋</span>No logs configured</div>
                 </div>
             </div>
         </div>
@@ -199,6 +230,10 @@
             event.target.classList.add('active');
             document.getElementById('tab-tasks').style.display = tab === 'tasks' ? 'block' : 'none';
             document.getElementById('tab-detail').style.display = tab === 'detail' ? 'block' : 'none';
+            document.getElementById('tab-logs').style.display = tab === 'logs' ? 'block' : 'none';
+            if (tab === 'logs') {
+                loadLogDates();
+            }
         }
 
         async function refresh() {
@@ -705,6 +740,127 @@
                 const count = taskLogs[logEntry.task_id]?.length || 0;
                 meta.textContent = `${meta.textContent.split(' · ')[0]} · ${count} log entries`;
             }
+        }
+
+        // =====================================================================
+        // Log browser
+        // =====================================================================
+
+        let logBreadcrumb = []; // [date, taskID?, ...]
+
+        async function loadLogDates() {
+            const view = document.getElementById('log-view');
+            try {
+                const res = await fetch('/api/logs');
+                if (!res.ok) {
+                    view.innerHTML = '<div class="empty-state"><span>⚠️</span>Log store not configured (set log_dir in server.yaml)</div>';
+                    return;
+                }
+                const data = await res.json();
+                renderLogDates(data.dates || []);
+            } catch (e) {
+                view.innerHTML = '<div class="empty-state"><span>⚠️</span>Failed to load logs: ' + escapeHtml(e.message) + '</div>';
+            }
+        }
+
+        function renderLogDates(dates) {
+            const view = document.getElementById('log-view');
+            if (dates.length === 0) {
+                view.innerHTML = '<div class="empty-state"><span>📭</span>No log dates found</div>';
+                return;
+            }
+            let html = '<div class="log-breadcrumb"><span class="current">All Dates</span></div>';
+            html += '<div id="log-dates-list">';
+            html += dates.map(d => `
+                <div class="log-task-item" onclick="loadLogTasks('${d}')">
+                    <span class="log-task-id">📅 ${d}</span>
+                </div>
+            `).join('');
+            html += '</div>';
+            view.innerHTML = html;
+        }
+
+        async function loadLogTasks(date) {
+            logBreadcrumb = [date];
+            const view = document.getElementById('log-view');
+            try {
+                const res = await fetch('/api/logs/' + date + '/tasks');
+                if (!res.ok) {
+                    view.innerHTML = '<div class="empty-state"><span>⚠️</span>No tasks found for ' + date + '</div>';
+                    return;
+                }
+                const data = await res.json();
+                renderLogTaskList(date, data.tasks || [], data.count || 0);
+            } catch (e) {
+                view.innerHTML = '<div class="empty-state"><span>⚠️</span>Failed to load tasks: ' + escapeHtml(e.message) + '</div>';
+            }
+        }
+
+        function renderLogTaskList(date, tasks, count) {
+            const view = document.getElementById('log-view');
+            let html = '<div class="log-breadcrumb">';
+            html += '<span class="crumb" onclick="loadLogDates()">All Dates</span>';
+            html += '<span class="separator">›</span>';
+            html += '<span class="current">' + date + ' (' + count + ' tasks)</span>';
+            html += '</div>';
+            if (tasks.length === 0) {
+                html += '<div class="empty-state"><span>📭</span>No tasks for this date</div>';
+            } else {
+                html += '<div id="log-tasks-list">';
+                html += tasks.map(t => `
+                    <div class="log-task-item" onclick="loadLogEntries('${date}', '${t}')">
+                        <span class="log-task-id">🔖 ${escapeHtml(t)}</span>
+                        <span class="log-task-count">click to view</span>
+                    </div>
+                `).join('');
+                html += '</div>';
+            }
+            view.innerHTML = html;
+        }
+
+        async function loadLogEntries(date, taskID) {
+            logBreadcrumb = [date, taskID];
+            const view = document.getElementById('log-view');
+            try {
+                const res = await fetch('/api/logs/' + date + '/' + taskID);
+                if (!res.ok) {
+                    view.innerHTML = '<div class="empty-state"><span>⚠️</span>Failed to load entries</div>';
+                    return;
+                }
+                const data = await res.json();
+                renderLogEntries(date, taskID, data.entries || [], data.count || 0);
+            } catch (e) {
+                view.innerHTML = '<div class="empty-state"><span>⚠️</span>Failed to load entries: ' + escapeHtml(e.message) + '</div>';
+            }
+        }
+
+        function renderLogEntries(date, taskID, entries, count) {
+            const view = document.getElementById('log-view');
+            let html = '<div class="log-breadcrumb">';
+            html += '<span class="crumb" onclick="loadLogDates()">All Dates</span>';
+            html += '<span class="separator">›</span>';
+            html += '<span class="crumb" onclick="loadLogTasks(\'' + date + '\')">' + date + '</span>';
+            html += '<span class="separator">›</span>';
+            html += '<span class="current">' + escapeHtml(taskID) + ' (' + count + ' entries)</span>';
+            html += '</div>';
+
+            if (entries.length === 0) {
+                html += '<div class="empty-state"><span>📭</span>No log entries for this task</div>';
+            } else {
+                html += '<div id="log-entries-list">';
+                html += entries.map(e => {
+                    const ts = e.timestamp ? new Date(e.timestamp).toLocaleTimeString() : '';
+                    const level = e.level || '';
+                    const content = escapeHtml(e.line);
+                    return `<div class="log-entry-line" data-level="${escapeHtml(level)}">
+                        ${ts ? '<span class="log-timestamp">' + ts + '</span>' : ''}
+                        <span class="log-level-badge ${escapeHtml(level)}">${escapeHtml(level || '—')}</span>
+                        <span class="log-content">${content}</span>
+                    </div>`;
+                }).join('');
+                html += '</div>';
+            }
+            view.innerHTML = html;
         }
 
         // Initial load
