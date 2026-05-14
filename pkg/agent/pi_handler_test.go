@@ -178,6 +178,49 @@ func TestPIHandler_FullDeltaSentAsOneEntry(t *testing.T) {
 	}
 }
 
+// TestParseRepoRef verifies the parseRepoRef helper correctly splits
+// repo references into URL and optional branch/ref.
+func TestParseRepoRef(t *testing.T) {
+	tests := []struct {
+		input   string
+		wantURL string
+		wantRef string
+	}{
+		// HTTPS URLs without ref
+		{"https://github.com/user/repo", "https://github.com/user/repo", ""},
+		// HTTPS URLs with branch ref
+		{"https://github.com/user/repo@main", "https://github.com/user/repo", "main"},
+		// HTTPS URLs with feature branch
+		{"https://github.com/skrewz/hotelier@speculative-feature", "https://github.com/skrewz/hotelier", "speculative-feature"},
+		// HTTPS URLs with commit SHA
+		{"https://github.com/user/repo@abc123def", "https://github.com/user/repo", "abc123def"},
+		// HTTPS URLs with tag
+		{"https://github.com/user/repo@v1.2.0", "https://github.com/user/repo", "v1.2.0"},
+		// HTTPS URLs with .git suffix and ref
+		{"https://github.com/user/repo.git@develop", "https://github.com/user/repo.git", "develop"},
+		// SSH URLs without ref
+		{"git@github.com:user/repo", "git@github.com:user/repo", ""},
+		// SSH URLs with ref
+		{"git@github.com:user/repo@feature", "git@github.com:user/repo", "feature"},
+		// SSH URLs with .git and ref
+		{"git@github.com:user/repo.git@main", "git@github.com:user/repo.git", "main"},
+		// Local paths — no parsing
+		{"/local/path/to/repo", "/local/path/to/repo", ""},
+		{"relative/path/repo", "relative/path/repo", ""},
+		{"", "", ""},
+	}
+
+	for _, tc := range tests {
+		url, ref := parseRepoRef(tc.input)
+		if url != tc.wantURL {
+			t.Errorf("parseRepoRef(%q) url = %q, want %q", tc.input, url, tc.wantURL)
+		}
+		if ref != tc.wantRef {
+			t.Errorf("parseRepoRef(%q) ref = %q, want %q", tc.input, ref, tc.wantRef)
+		}
+	}
+}
+
 // TestIsGitURL verifies the isGitURL helper correctly identifies remote URLs.
 func TestIsGitURL(t *testing.T) {
 	tests := []struct {

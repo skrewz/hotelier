@@ -14,6 +14,43 @@ import (
 	"hotelier/pkg/pi"
 )
 
+// parseRepoRef splits a repo reference into URL and optional branch/ref.
+// Supported formats:
+//
+//	https://github.com/user/repo@branch-name
+//	https://github.com/user/repo@abc123def  (commit SHA)
+//	git@github.com:user/repo@branch-name    (SSH with ref)
+//	https://github.com/user/repo            (no ref — default branch)
+//	git@github.com:user/repo                (SSH, no ref)
+//
+// Returns (url, ref). If no ref is specified, ref is an empty string.
+func parseRepoRef(repo string) (url, ref string) {
+	// Handle SSH URLs first: git@host:path/repo@ref
+	if strings.HasPrefix(repo, "git@") {
+		colonIdx := strings.Index(repo, ":")
+		if colonIdx < 0 {
+			return repo, ""
+		}
+		pathPart := repo[colonIdx+1:]
+		refIdx := strings.LastIndex(pathPart, "@")
+		if refIdx >= 0 {
+			return repo[:colonIdx+1] + pathPart[:refIdx], pathPart[refIdx+1:]
+		}
+		return repo, ""
+	}
+
+	// Handle HTTPS/HTTP URLs: https://host/user/repo@ref
+	if idx := strings.LastIndex(repo, "@"); idx > 0 {
+		ref = repo[idx+1:]
+		url = repo[:idx]
+		if ref != "" {
+			return url, ref
+		}
+	}
+
+	return repo, ""
+}
+
 // isGitURL returns true if the string looks like a git remote URL.
 func isGitURL(s string) bool {
 	if strings.Contains(s, "://") {
@@ -272,10 +309,16 @@ func (h *PIHandler) prepareRepos(ctx context.Context, taskID string, repos []str
 	for _, repo := range repos {
 		if isGitURL(repo) {
 			// Clone remote repo into taskDir
-			repoName := filepath.Base(strings.TrimSuffix(repo, ".git"))
+			repoURL, repoRef := parseRepoRef(repo)
+			repoName := filepath.Base(strings.TrimSuffix(repoURL, ".git"))
 			clonePath := filepath.Join(taskDir, repoName)
 			h.log.Printf("[GIT] cloning %s -> %s", repo, clonePath)
-			cloneCmd := exec.CommandContext(ctx, "git", "clone", "--depth", "1", repo, clonePath)
+			cloneArgs := []string{"clone", "--depth", "1"}
+			if repoRef != "" {
+				cloneArgs = append(cloneArgs, "--branch", repoRef)
+			}
+			cloneArgs = append(cloneArgs, repoURL, clonePath)
+			cloneCmd := exec.CommandContext(ctx, "git", cloneArgs...)
 			out, err := cloneCmd.CombinedOutput()
 			if err != nil {
 				return "", fmt.Errorf("git clone %s: %w (output: %s)", repo, err, string(out))
