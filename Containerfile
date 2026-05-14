@@ -19,13 +19,17 @@ RUN go mod download && go mod verify
 COPY . .
 ARG LDFLAGS="-s -w"
 RUN go build -trimpath -ldflags "${LDFLAGS}" -o /usr/local/bin/hotelier ./cmd/hotelier
+RUN mkdir -p /var/log/hotelier
 
+# ---------------------------------------------------------------------------
+# runtime — scratch image with the binary
+# ---------------------------------------------------------------------------
 FROM scratch
 
 COPY --from=builder /usr/local/bin/hotelier /hotelier
+COPY --from=builder /var/log/hotelier /var/log/hotelier
 
 WORKDIR /etc/hotelier
-RUN mkdir -p /var/log/hotelier
 
 EXPOSE 8080
 
