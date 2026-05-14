@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"hotelier/pkg/config"
+	"hotelier/pkg/logstore"
 	"hotelier/pkg/queue"
 	"hotelier/pkg/registry"
 	"hotelier/pkg/rpc"
@@ -167,6 +168,7 @@ type Server struct {
 	taskQueue      *queue.TaskQueue
 	hub            *rpc.Hub
 	logStore       *TaskLogStore
+	diskLogStore   *logstore.LogStore
 	logAccumulator *LogAccumulator
 	log            *log.Logger
 	upgrader       *rpc.Upgrader
@@ -191,6 +193,17 @@ func New(cfg config.ServerConfig) *Server {
 		upgrader:       rpc.NewUpgrader(),
 		webDir:         "web/static",
 		templateDir:    "web/templates",
+	}
+
+	// Initialize disk-backed log store if configured
+	if cfg.LogDir != "" {
+		disk, err := logstore.New(cfg.LogDir)
+		if err != nil {
+			logger.Printf("failed to create disk log store: %v (logs will be in-memory only)", err)
+		} else {
+			s.diskLogStore = disk
+			logger.Printf("disk log store enabled: %s", cfg.LogDir)
+		}
 	}
 
 	s.registerRPCMethods()
@@ -220,6 +233,8 @@ func (s *Server) Start() error {
 	mux.HandleFunc("/api/agents", s.HandleAgents)
 	mux.HandleFunc("/api/agents/", s.HandleAgentDetail)
 	mux.HandleFunc("/api/health", s.HandleHealth)
+	mux.HandleFunc("/api/logs", s.HandleLogs)
+	mux.HandleFunc("/api/logs/", s.HandleLogEntry)
 
 	// Web UI
 	mux.HandleFunc("/", s.HandleWebUI)
@@ -259,6 +274,11 @@ func (s *Server) LogStore() *TaskLogStore {
 // LogAccumulator returns the log accumulator (for testing).
 func (s *Server) LogAccumulator() *LogAccumulator {
 	return s.logAccumulator
+}
+
+// DiskLogStore returns the disk-backed log store (for testing).
+func (s *Server) DiskLogStore() *logstore.LogStore {
+	return s.diskLogStore
 }
 
 func (s *Server) registerRPCMethods() {
@@ -423,6 +443,15 @@ func (s *Server) handleAgentLog(ctx context.Context, params json.RawMessage) (in
 		entry.Level,
 		func(e TaskLogEntry) {
 			s.logStore.Add(e)
+			// Persist to disk if configured
+			if s.diskLogStore != nil {
+				_ = s.diskLogStore.Append(logstore.Entry{
+					TaskID:    e.TaskID,
+					Line:      e.Line,
+					Level:     e.Level,
+					Timestamp: e.Timestamp,
+				})
+			}
 			s.hub.SendNotification("", "task.log", map[string]interface{}{
 				"task_id": e.TaskID,
 				"line":    e.Line,
@@ -830,4 +859,89 @@ func (s *Server) HandleAgentDetail(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(agent)
+}
+
+// HandleLogs handles the /api/logs endpoint — returns a list of date directories.
+func (s *Server) HandleLogs(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	if s.diskLogStore == nil {
+		http.Error(w, "log store not configured", http.StatusServiceUnavailable)
+		return
+	}
+
+	dates, err := s.diskLogStore.ListDates()
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"dates": dates,
+		"count": len(dates),
+	})
+}
+
+// HandleLogEntry handles /api/logs/:date/tasks and /api/logs/:date/:task.
+func (s *Server) HandleLogEntry(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	if s.diskLogStore == nil {
+		http.Error(w, "log store not configured", http.StatusServiceUnavailable)
+		return
+	}
+
+	path := strings.TrimPrefix(r.URL.Path, "/api/logs/")
+	parts := strings.Split(path, "/")
+
+	switch len(parts) {
+	case 1:
+		// /api/logs/:date → list tasks for this date
+		if parts[0] == "" {
+			http.Error(w, "date required", http.StatusBadRequest)
+			return
+		}
+		tasks, err := s.diskLogStore.ListTasks(parts[0])
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"date":  parts[0],
+			"tasks": tasks,
+			"count": len(tasks),
+		})
+
+	case 2:
+		// /api/logs/:date/:task → return log entries
+		date, taskID := parts[0], parts[1]
+		if date == "" || taskID == "" {
+			http.Error(w, "date and task id required", http.StatusBadRequest)
+			return
+		}
+		entries, err := s.diskLogStore.ReadLogs(date, taskID)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"date":    date,
+			"task_id": taskID,
+			"entries": entries,
+			"count":   len(entries),
+		})
+
+	default:
+		http.Error(w, "not found", http.StatusNotFound)
+	}
 }

@@ -25,6 +25,9 @@ type ServerConfig struct {
 	HeartbeatInterval int `yaml:"heartbeat_interval"`
 	// MaxAgents is the maximum number of agents allowed (0 = unlimited).
 	MaxAgents int `yaml:"max_agents"`
+	// LogDir is the base directory where task logs are persisted to disk.
+	// When empty, logs are kept in memory only.
+	LogDir string `yaml:"log_dir"`
 }
 
 // AgentConfig holds the configuration for an agent.
