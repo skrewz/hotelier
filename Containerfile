@@ -18,7 +18,7 @@ RUN go mod download && go mod verify
 
 COPY . .
 ARG LDFLAGS="-s -w"
-RUN go build -trimpath -ldflags "${LDFLAGS}" -o /usr/local/bin/hotelier ./cmd/hotelier
+RUN CGO_ENABLED=0 go build -trimpath -ldflags "${LDFLAGS}" -o /usr/local/bin/hotelier ./cmd/hotelier
 RUN mkdir -p /var/log/hotelier
 
 # ---------------------------------------------------------------------------
