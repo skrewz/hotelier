@@ -116,6 +116,133 @@ Agents declare capability tags at registration. Tasks specify required tags for 
 - `android` — Android-specific tasks
 - Custom tags — Any capability your agent supports
 
+## Deployment
+
+### Container (Server Only)
+
+Hotelier ships a multi-stage `Containerfile` for building the **server-side** binary as a container image. The agent is intentionally **not** containerized — agentic coding agents expect direct access to a machine's filesystem, shell, and tools (the `pi` agent runs a persistent RPC subprocess that expects a real host environment).
+
+#### Build
+
+```bash
+make image
+```
+
+This uses `podman` to build the image. The build has two stages:
+
+1. **builder** — a `golang:1.25-bookworm` image that compiles the `hotelier` binary with `-trimpath` and version ldflags.
+2. **runtime** — a minimal `debian:12-slim` image with only `ca-certificates` and `git` installed (git is needed for agents to clone repos).
+
+The resulting image runs as a non-root user (`hotelier`) on port 8080.
+
+#### Run
+
+```bash
+podman run -d --name hotelier \
+  -p 8080:8080 \
+  -v /path/to/config:/etc/hotelier:Z \
+  hotelier:latest
+```
+
+#### Configuration
+
+The server reads its config from `/etc/hotelier/server.yaml` inside the container. Mount a host directory containing your config:
+
+```bash
+# On the host
+cp config/server.example.yaml /path/to/config/server.yaml
+# Edit /path/to/config/server.yaml as needed
+
+# Run the container
+podman run -d --name hotelier \
+  -p 8080:8080 \
+  -v /path/to/config:/etc/hotelier:Z \
+  hotelier:latest
+```
+
+##### Volume Mounts
+
+| Mount | Purpose |
+|-------|--------|
+| `/etc/hotelier` | Config files (read-only recommended) — mount a host directory containing `server.yaml` |
+| `/var/log/hotelier` | Task log persistence — set `log_dir` in config to enable; mount a host directory |
+
+Example with read-only config:
+
+```bash
+podman run -d --name hotelier \
+  -p 8080:8080 \
+  -v /path/to/config:/etc/hotelier:Z,ro \
+  hotelier:latest
+```
+
+##### Environment Variables
+
+No environment variables are required. The server is configured entirely through the YAML config file.
+
+#### Task Log Persistence
+
+Set `log_dir` in `server.yaml` to persist task logs to the mounted volume:
+
+```yaml
+log_dir: "/var/log/hotelier"
+```
+
+Logs are stored in a date-partitioned structure:
+
+```
+/var/log/hotelier/
+  2026-05-10/
+    task-abc123/
+      logs.jsonl
+    task-def456/
+      logs.jsonl
+  2026-05-11/
+    task-ghi789/
+      logs.jsonl
+```
+
+Each `logs.jsonl` file contains one JSON object per line (JSONL format), with fields:
+`task_id`, `line`, `level`, `timestamp`.
+
+The web UI includes a **Logs** tab for browsing persisted task logs.
+
+Run with log persistence:
+
+```bash
+podman run -d --name hotelier \
+  -p 8080:8080 \
+  -v /path/to/config:/etc/hotelier:Z,ro \
+  -v /path/to/logs:/var/log/hotelier:Z \
+  hotelier:latest
+```
+
+##### Health Check
+
+The container includes a built-in health check that pings the server's own binary every 30 seconds. Check status with:
+
+```bash
+podman inspect --format='{{.State.Health.Status}}' hotelier
+```
+
+### Agent Deployment
+
+Agents run **natively on machines** — they are not containerized. Each agent machine needs:
+
+1. The `bin/agent` binary (built via `make build`)
+2. A `config/agent.yaml` pointing to the Check-In Host
+3. Go installed (for the `pi` agent subprocess)
+4. `pi` CLI installed (`go install github.com/mariozechner/pi-coding-agent@latest`)
+5. `git` installed (for cloning repos)
+
+```bash
+# On the agent machine
+make build
+cp config/agent.example.yaml config/agent.yaml
+# Edit config/agent.yaml with your server address
+./bin/agent
+```
+
 ## License
 
 MIT
