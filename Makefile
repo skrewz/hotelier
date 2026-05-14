@@ -1,4 +1,4 @@
-.PHONY: build test test-coverage test-race lint clean run-server run-agent help image image-clean
+.PHONY: build test test-coverage test-race lint check-format clean run-server run-agent image
 
 MODULE  := hotelier
 GO      := go
@@ -7,16 +7,12 @@ LDFLAGS := -s -w -X main.Version=$(VERSION)
 
 all: build
 
-help: ## Show available targets
-	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | \
-		awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-18s\033[0m %s\n", $$1, $$2}'
-
 build: ## Build hotelier server and agent binaries
 	$(GO) build -trimpath -ldflags "$(LDFLAGS)" -o bin/hotelier ./cmd/hotelier
 	$(GO) build -trimpath -ldflags "$(LDFLAGS)" -o bin/agent ./cmd/agent
 
-test: ## Run all tests
-	$(GO) test -race -count=1 ./...
+test: lint test-coverage test-race ## Run all tests (after linting)
+	@echo "All test targets passed"
 
 test-coverage: ## Run tests with coverage report
 	$(GO) test -race -count=1 -coverprofile=coverage.out -coverpkg=./pkg/... ./...
@@ -24,29 +20,25 @@ test-coverage: ## Run tests with coverage report
 	@$(GO) tool cover -func=coverage.out | grep -E 'total'
 	@$(GO) tool cover -html=coverage.out -o coverage.html
 	@echo "HTML report: coverage.html"
+	@echo "Coverage passed"
 
 test-race: ## Run tests with race detector
 	$(GO) test -race -count=1 ./...
+	@echo "Race detector passed"
 
-lint: ## Run go vet and check formatting
+lint: ## Run go vet and check formatting with gofumpt
 	$(GO) vet ./...
 	$(MAKE) check-format
 
 clean: ## Remove build artifacts and container image
 	rm -rf bin/ coverage.out coverage.html
-	$(MAKE) image-clean
+	podman rmi hotelier:latest 2>/dev/null || true
 
 run-server: ## Run the hotelier server
 	$(GO) run ./cmd/hotelier
 
 run-agent: ## Run the hotelier agent
 	$(GO) run ./cmd/agent
-
-fmt: ## Format Go code
-	$(GO) fmt ./...
-
-format: ## Format Go code with gofumpt (strict formatting)
-	gofumpt -w .
 
 check-format: ## Check Go code formatting with gofumpt (fails if not formatted)
 	@if [ -n "$$($(GO) env GOPATH)" ]; then \
@@ -61,18 +53,15 @@ check-format: ## Check Go code formatting with gofumpt (fails if not formatted)
 		exit 1; \
 	fi
 
-tidy: ## Tidy go.mod
-	$(GO) mod tidy
-
 install: ## Install binaries to $GOPATH/bin
 	$(GO) install -trimpath -ldflags "$(LDFLAGS)" ./cmd/hotelier
 	$(GO) install -trimpath -ldflags "$(LDFLAGS)" ./cmd/agent
 
 image: ## Build the hotelier container image
 	podman build \
+		--format docker \
 		--build-arg LDFLAGS="$(LDFLAGS)" \
 		-t hotelier:latest \
 		.
 
-image-clean: ## Remove the hotelier container image
-	podman rmi hotelier:latest 2>/dev/null || true
+
