@@ -1,4 +1,4 @@
-.PHONY: build test test-coverage test-race lint clean run-server run-agent help
+.PHONY: build test test-coverage test-race lint clean run-server run-agent help image image-clean
 
 MODULE  := hotelier
 GO      := go
@@ -32,8 +32,9 @@ lint: ## Run go vet and check formatting
 	$(GO) vet ./...
 	$(MAKE) check-format
 
-clean: ## Remove build artifacts
+clean: ## Remove build artifacts and Docker image
 	rm -rf bin/ coverage.out coverage.html
+	$(MAKE) image-clean
 
 run-server: ## Run the hotelier server
 	$(GO) run ./cmd/hotelier
@@ -66,3 +67,12 @@ tidy: ## Tidy go.mod
 install: ## Install binaries to $GOPATH/bin
 	$(GO) install -trimpath -ldflags "$(LDFLAGS)" ./cmd/hotelier
 	$(GO) install -trimpath -ldflags "$(LDFLAGS)" ./cmd/agent
+
+image: ## Build the hotelier server Docker image
+	podman build \
+		--build-arg LDFLAGS="$(LDFLAGS)" \
+		-t hotelier:latest \
+		.
+
+image-clean: ## Remove the hotelier Docker image
+	podman rmi hotelier:latest 2>/dev/null || true
