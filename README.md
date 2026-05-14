@@ -2,6 +2,8 @@
 
 Ephemeral YOLO agent queue — autonomous AI development infrastructure.
 
+***Warning***: this is alpha-grade software (read: made for myself, all bugs included). Use at your own risk.
+
 ## Overview
 
 Hotelier orchestrates ephemeral AI agents ("machines") that register, receive tasks, execute them against target repositories, stream logs, and submit results. Agents are configured entirely via YAML config files.
@@ -9,12 +11,12 @@ Hotelier orchestrates ephemeral AI agents ("machines") that register, receive ta
 ## Architecture
 
 ```
-┌──────────────┐    WebSocket     ┌──────────────┐
-│  Check-In    │◄────────────────►│    Agent     │
-│  Host        │  JSON-RPC 2.0    │  (any machine│
+┌──────────────┐    WebSocket     ┌───────────────┐
+│  Check-In    │◄────────────────►│    Agent      │
+│  Host        │  JSON-RPC 2.0    │  (any machine │
 │  :8080       │                  │   running the │
 │              │                  │   agent CLI)  │
-└──────────────┘                  └──────────────┘
+└──────────────┘                  └───────────────┘
   ├── REST API                      ├── agent.yaml
   ├── Web UI                        ├── Register
   ├── Task Queue                    ├── Execute tasks
