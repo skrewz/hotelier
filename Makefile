@@ -32,7 +32,7 @@ lint: ## Run go vet and check formatting
 	$(GO) vet ./...
 	$(MAKE) check-format
 
-clean: ## Remove build artifacts and Docker image
+clean: ## Remove build artifacts and container image
 	rm -rf bin/ coverage.out coverage.html
 	$(MAKE) image-clean
 
@@ -68,11 +68,11 @@ install: ## Install binaries to $GOPATH/bin
 	$(GO) install -trimpath -ldflags "$(LDFLAGS)" ./cmd/hotelier
 	$(GO) install -trimpath -ldflags "$(LDFLAGS)" ./cmd/agent
 
-image: ## Build the hotelier server Docker image
+image: ## Build the hotelier container image
 	podman build \
 		--build-arg LDFLAGS="$(LDFLAGS)" \
 		-t hotelier:latest \
 		.
 
-image-clean: ## Remove the hotelier Docker image
+image-clean: ## Remove the hotelier container image
 	podman rmi hotelier:latest 2>/dev/null || true
