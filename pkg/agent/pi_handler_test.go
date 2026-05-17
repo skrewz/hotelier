@@ -280,24 +280,23 @@ func TestPIHandler_PrepareReposLocal(t *testing.T) {
 		t.Fatalf("prepareRepos failed: %v", err)
 	}
 
-	// The working directory should be under baseDir/tasks/task-1
-	expectedPrefix := filepath.Join(baseDir, "tasks", "task-1")
-	if !strings.HasPrefix(taskDir, expectedPrefix) {
-		t.Errorf("taskDir %q should start with %q", taskDir, expectedPrefix)
+	// For local repos, the working directory should be the resolved repo path.
+	expectedWD, err := filepath.Abs(repoDir)
+	if err != nil {
+		t.Fatalf("abs %s: %v", repoDir, err)
+	}
+	if taskDir != expectedWD {
+		t.Errorf("working dir %q should be %q", taskDir, expectedWD)
 	}
 
-	// The local repo should be accessible within the task dir
-	// (local paths are resolved relative to the task dir)
-	// Since repoDir is absolute, it should be used as-is
-	absRepo, _ := filepath.Abs(repoDir)
 	// The repo should be accessible (we just verify the path is valid)
-	if _, err := os.Stat(absRepo); err != nil {
-		t.Errorf("repo dir %s should exist: %v", absRepo, err)
+	if _, err := os.Stat(expectedWD); err != nil {
+		t.Errorf("repo dir %s should exist: %v", expectedWD, err)
 	}
 }
 
 // TestPIHandler_PrepareReposNoRepos verifies that when no repos are specified,
-// the handler returns its base CWD.
+// the handler creates and returns a task-specific directory.
 func TestPIHandler_PrepareReposNoRepos(t *testing.T) {
 	baseDir, err := os.MkdirTemp("", "hotelier-base-*")
 	if err != nil {
@@ -320,8 +319,15 @@ func TestPIHandler_PrepareReposNoRepos(t *testing.T) {
 		t.Fatalf("prepareRepos failed: %v", err)
 	}
 
-	if taskDir != baseDir {
-		t.Errorf("expected working dir %q, got %q", baseDir, taskDir)
+	// Should return a task-specific directory, not the base CWD.
+	expectedPrefix := filepath.Join(baseDir, "tasks", "task-1")
+	if taskDir != expectedPrefix {
+		t.Errorf("expected working dir %q, got %q", expectedPrefix, taskDir)
+	}
+
+	// The directory should exist.
+	if _, err := os.Stat(taskDir); err != nil {
+		t.Errorf("task dir %s should exist: %v", taskDir, err)
 	}
 }
 

@@ -296,8 +296,14 @@ func (h *PIHandler) ExecuteTask(ctx context.Context, task TaskAssignment, sendLo
 // Local paths are resolved as-is; remote URLs are cloned.
 func (h *PIHandler) prepareRepos(ctx context.Context, taskID string, repos []string, sendLog func(taskID, line string) error) (string, error) {
 	if len(repos) == 0 {
-		// No repos — use the handler's base CWD
-		return h.client.CWD(), nil
+		// No repos — create a task-specific directory so the agent has a
+		// clean, isolated working directory instead of the base CWD.
+		taskDir := filepath.Join(h.client.CWD(), "tasks", taskID)
+		if err := os.MkdirAll(taskDir, 0o755); err != nil {
+			return "", fmt.Errorf("create task dir %s: %w", taskDir, err)
+		}
+		h.log.Printf("[WORKDIR] no repos specified, using task dir: %s", taskDir)
+		return taskDir, nil
 	}
 
 	// Create a task-specific directory under the base CWD.
@@ -305,6 +311,8 @@ func (h *PIHandler) prepareRepos(ctx context.Context, taskID string, repos []str
 	if err := os.MkdirAll(taskDir, 0o755); err != nil {
 		return "", fmt.Errorf("create task dir %s: %w", taskDir, err)
 	}
+
+	var workDir string
 
 	for _, repo := range repos {
 		if isGitURL(repo) {
@@ -324,6 +332,11 @@ func (h *PIHandler) prepareRepos(ctx context.Context, taskID string, repos []str
 				return "", fmt.Errorf("git clone %s: %w (output: %s)", repo, err, string(out))
 			}
 			h.log.Printf("[GIT] cloned %s", repo)
+			if workDir == "" {
+				// Use the cloned repo as the working directory.
+				// If multiple remote repos are specified, pick the first one.
+				workDir = clonePath
+			}
 		} else {
 			// Local path — resolve relative to the task dir
 			resolved := repo
@@ -335,10 +348,21 @@ func (h *PIHandler) prepareRepos(ctx context.Context, taskID string, repos []str
 				return "", fmt.Errorf("resolve local repo path %s: %w", repo, err)
 			}
 			h.log.Printf("[REPO] using local repo: %s", absPath)
+			if workDir == "" {
+				// Use the local repo path as the working directory.
+				// If multiple local repos are specified, pick the first one.
+				workDir = absPath
+			}
 		}
 	}
 
-	return taskDir, nil
+	// If no remote repos were cloned (only local paths or none), use taskDir
+	// as the working directory so the agent can navigate to the local repos.
+	if workDir == "" {
+		workDir = taskDir
+	}
+
+	return workDir, nil
 }
 
 // resetClient restarts the pi subprocess with a new working directory.
