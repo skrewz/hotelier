@@ -28,8 +28,9 @@ FROM scratch
 
 COPY --from=builder /usr/local/bin/hotelier /hotelier
 COPY --from=builder /var/log/hotelier /var/log/hotelier
+COPY --from=builder /src/web /web
 
-WORKDIR /etc/hotelier
+WORKDIR /
 
 EXPOSE 8080
 
