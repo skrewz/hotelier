@@ -12,6 +12,7 @@ import (
 	"hotelier/pkg/config"
 	"hotelier/pkg/logstore"
 	"hotelier/pkg/queue"
+	"hotelier/pkg/rpc"
 )
 
 // TestLogPersistence_Integration verifies that task logs are persisted to disk
@@ -87,7 +88,7 @@ func TestLogPersistence_Integration(t *testing.T) {
 				Timestamp: e.Timestamp,
 			})
 		}
-		srv.hub.SendNotification("", "task.log", map[string]interface{}{
+		srv.hub.SendNotification("", rpc.ConnectionRoleBrowser, "task.log", map[string]interface{}{
 			"task_id": e.TaskID,
 			"line":    e.Line,
 			"level":   e.Level,

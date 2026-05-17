@@ -252,7 +252,7 @@ func TestSendToNonexistent(t *testing.T) {
 func TestBroadcastEmpty(t *testing.T) {
 	hub := newTestHub(t)
 
-	hub.Broadcast(&JSONRPCMessage{
+	hub.Broadcast("", &JSONRPCMessage{
 		JSONRPC: "2.0",
 		Method:  "test",
 	})
@@ -270,7 +270,7 @@ func TestSendToAgent(t *testing.T) {
 func TestSendNotification(t *testing.T) {
 	hub := newTestHub(t)
 
-	err := hub.SendNotification("nonexistent", "task.log", map[string]string{"line": "test"})
+	err := hub.SendNotification("nonexistent", "", "task.log", map[string]string{"line": "test"})
 	if err == nil {
 		t.Error("expected error for nonexistent connection, got nil")
 	}

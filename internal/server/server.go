@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -138,7 +139,15 @@ func (a *LogAccumulator) FlushAll(emit func(entry TaskLogEntry)) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 
-	for taskID, buf := range a.buffer {
+	// Sort task IDs for deterministic flush order (map iteration is non-deterministic).
+	taskIDs := make([]string, 0, len(a.buffer))
+	for taskID := range a.buffer {
+		taskIDs = append(taskIDs, taskID)
+	}
+	sort.Strings(taskIDs)
+
+	for _, taskID := range taskIDs {
+		buf := a.buffer[taskID]
 		if buf != "" {
 			a.emitNow(taskID, buf, "text", emit)
 		}
@@ -327,6 +336,7 @@ func (s *Server) handleAgentRegister(ctx context.Context, params json.RawMessage
 			// Update the connection mapping
 			if connID, ok := rpc.ConnectionIDFromContext(ctx); ok {
 				s.hub.RegisterAgentConnection(req.ID, connID)
+				s.hub.SetConnectionRole(connID, rpc.ConnectionRoleAgent)
 			}
 
 			s.log.Printf("agent re-registered: %s (tags: %v)", existing.ID, existing.Tags)
@@ -349,6 +359,7 @@ func (s *Server) handleAgentRegister(ctx context.Context, params json.RawMessage
 	// Record the agent-to-connection mapping so SendToAgent can find it
 	if connID, ok := rpc.ConnectionIDFromContext(ctx); ok {
 		s.hub.RegisterAgentConnection(req.ID, connID)
+		s.hub.SetConnectionRole(connID, rpc.ConnectionRoleAgent)
 	}
 
 	s.log.Printf("agent registered: %s (tags: %v)", agent.ID, agent.Tags)
@@ -452,7 +463,7 @@ func (s *Server) handleAgentLog(ctx context.Context, params json.RawMessage) (in
 					Timestamp: e.Timestamp,
 				})
 			}
-			s.hub.SendNotification("", "task.log", map[string]interface{}{
+			s.hub.SendNotification("", rpc.ConnectionRoleBrowser, "task.log", map[string]interface{}{
 				"task_id": e.TaskID,
 				"line":    e.Line,
 				"level":   e.Level,
@@ -495,7 +506,7 @@ func (s *Server) handleAgentResult(ctx context.Context, params json.RawMessage) 
 	// Flush any remaining accumulated logs for this task
 	s.logAccumulator.FlushAll(func(e TaskLogEntry) {
 		s.logStore.Add(e)
-		s.hub.SendNotification("", "task.log", map[string]interface{}{
+		s.hub.SendNotification("", rpc.ConnectionRoleBrowser, "task.log", map[string]interface{}{
 			"task_id": e.TaskID,
 			"line":    e.Line,
 			"level":   e.Level,
@@ -510,7 +521,7 @@ func (s *Server) handleAgentResult(ctx context.Context, params json.RawMessage) 
 	}
 
 	// Notify UI of task completion
-	s.hub.Broadcast(&rpc.JSONRPCMessage{
+	s.hub.Broadcast(rpc.ConnectionRoleBrowser, &rpc.JSONRPCMessage{
 		JSONRPC: "2.0",
 		Method:  "task.updated",
 		Params: json.RawMessage(fmt.Sprintf(`{"task_id":"%s","status":"%s"}`,
@@ -713,6 +724,8 @@ func (s *Server) HandleWebSocket(w http.ResponseWriter, r *http.Request) {
 	// Generate a unique connection ID
 	connID := fmt.Sprintf("conn-%d", time.Now().UnixNano())
 	client := s.hub.NewConnection(connID, conn)
+	// Default to browser role; agent role is set after agent.register RPC
+	s.hub.SetConnectionRole(connID, rpc.ConnectionRoleBrowser)
 	go client.ReadLoop()
 	go client.WriteLoop()
 }

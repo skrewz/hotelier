@@ -99,10 +99,19 @@ func NewTestConnection(id string, hub *Hub) *Connection {
 	}
 }
 
+// ConnectionRole identifies the type of a WebSocket connection.
+type ConnectionRole string
+
+const (
+	ConnectionRoleBrowser ConnectionRole = "browser"
+	ConnectionRoleAgent   ConnectionRole = "agent"
+)
+
 // Connection represents a connected JSON-RPC client over WebSocket.
 type Connection struct {
 	id      string
 	conn    *websocket.Conn
+	role    ConnectionRole
 	send    chan []byte
 	hub     *Hub
 	mu      sync.Mutex
@@ -401,6 +410,15 @@ func (h *Hub) GetAllConnectionIDs() []string {
 	return ids
 }
 
+// SetConnectionRole sets the role of a connection (browser or agent).
+func (h *Hub) SetConnectionRole(connID string, role ConnectionRole) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if c, ok := h.connections[connID]; ok {
+		c.role = role
+	}
+}
+
 // SendTo sends a message to a specific connection.
 func (h *Hub) SendTo(id string, msg *JSONRPCMessage) error {
 	c, ok := h.GetConnection(id)
@@ -410,12 +428,15 @@ func (h *Hub) SendTo(id string, msg *JSONRPCMessage) error {
 	return c.Send(msg)
 }
 
-// Broadcast sends a message to all connections.
-func (h *Hub) Broadcast(msg *JSONRPCMessage) {
+// Broadcast sends a message to all connections matching the given role.
+// Pass an empty string to broadcast to all roles.
+func (h *Hub) Broadcast(role ConnectionRole, msg *JSONRPCMessage) {
 	ids := h.GetAllConnectionIDs()
 	for _, id := range ids {
-		if err := h.SendTo(id, msg); err != nil {
-			h.logf("broadcast failed to %s: %v", id, err)
+		if c, ok := h.GetConnection(id); ok && c.role == role {
+			if err := h.SendTo(id, msg); err != nil {
+				h.logf("broadcast failed to %s: %v", id, err)
+			}
 		}
 	}
 }
@@ -459,8 +480,11 @@ func (h *Hub) UnregisterAgentConnection(agentID string) {
 	delete(h.agentConnections, agentID)
 }
 
-// SendNotification sends a notification (no ID) to a specific connection.
-func (h *Hub) SendNotification(connID string, method string, params interface{}) error {
+// SendNotification sends a notification (no ID) to a specific connection
+// or broadcasts to all connections matching the given role.
+// If connID is empty, the message is broadcast to all connections with the
+// specified role. Pass an empty role to broadcast to all connections.
+func (h *Hub) SendNotification(connID string, role ConnectionRole, method string, params interface{}) error {
 	data, err := json.Marshal(params)
 	if err != nil {
 		return err
@@ -472,9 +496,9 @@ func (h *Hub) SendNotification(connID string, method string, params interface{})
 		Params:  data,
 	}
 
-	// Empty connID means broadcast to all connections.
+	// Empty connID means broadcast to connections with the given role.
 	if connID == "" {
-		h.Broadcast(msg)
+		h.Broadcast(role, msg)
 		return nil
 	}
 

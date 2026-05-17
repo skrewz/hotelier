@@ -1504,6 +1504,7 @@ func TestIntegration_TaskLogBroadcast(t *testing.T) {
 
 	conn := rpc.NewTestConnection("browser-conn-1", hub)
 	hub.Register(conn)
+	hub.SetConnectionRole("browser-conn-1", rpc.ConnectionRoleBrowser)
 	time.Sleep(10 * time.Millisecond)
 
 	taskBody := map[string]interface{}{
@@ -1530,7 +1531,7 @@ func TestIntegration_TaskLogBroadcast(t *testing.T) {
 
 	srv.LogAccumulator().FlushAll(func(e TaskLogEntry) {
 		srv.LogStore().Add(e)
-		srv.hub.SendNotification("", "task.log", map[string]interface{}{
+		srv.hub.SendNotification("", rpc.ConnectionRoleBrowser, "task.log", map[string]interface{}{
 			"task_id": e.TaskID,
 			"line":    e.Line,
 			"level":   e.Level,
