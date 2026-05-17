@@ -33,6 +33,9 @@ func TestDefaultServerConfig(t *testing.T) {
 	if cfg.HeartbeatInterval != 30 {
 		t.Errorf("expected heartbeat_interval 30, got %d", cfg.HeartbeatInterval)
 	}
+	if cfg.SilenceTimeout != 1800 {
+		t.Errorf("expected silence_timeout 1800, got %d", cfg.SilenceTimeout)
+	}
 	if cfg.MaxAgents != 0 {
 		t.Errorf("expected max_agents 0, got %d", cfg.MaxAgents)
 	}

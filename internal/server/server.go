@@ -674,7 +674,10 @@ func (s *Server) tryAssignTask(agentID string) {
 	s.log.Printf("task %s assigned to agent %s", matchedTask.ID, agentID)
 }
 
-// staleAgentCleanup periodically removes stale agents.
+// staleAgentCleanup periodically removes stale agents and kills their running tasks.
+// When an agent's RPC connection has been silent for longer than SilenceTimeout,
+// the server sends a task.cancel RPC to the agent to abort the pi subprocess,
+// then marks the task as failed and re-queues it.
 func (s *Server) staleAgentCleanup() {
 	interval := time.Duration(s.cfg.HeartbeatInterval) * time.Second
 	if interval == 0 {
@@ -685,10 +688,66 @@ func (s *Server) staleAgentCleanup() {
 	defer ticker.Stop()
 
 	for {
-		time.Sleep(interval)
-		stale := s.registry.RemoveStaleAgents(time.Duration(s.cfg.HeartbeatInterval) * time.Second)
-		for _, agent := range stale {
-			s.log.Printf("stale agent removed: %s", agent.ID)
+		select {
+		case <-ticker.C:
+			// First: kill running tasks for agents that have been silent too long.
+			// This runs before stale agent removal so we can send task.cancel.
+			s.checkSilentAgents()
+
+			// Then: remove agents that have been completely silent (no heartbeat).
+			stale := s.registry.RemoveStaleAgents(time.Duration(s.cfg.HeartbeatInterval) * time.Second)
+			for _, agent := range stale {
+				s.log.Printf("stale agent removed: %s", agent.ID)
+			}
+		}
+	}
+}
+
+// checkSilentAgents finds agents that have been silent (no heartbeat) for longer
+// than the configured SilenceTimeout and kills their running tasks.
+func (s *Server) checkSilentAgents() {
+	timeout := time.Duration(s.cfg.SilenceTimeout) * time.Second
+	if timeout == 0 {
+		return // Silence detection disabled
+	}
+
+	now := time.Now()
+	for _, agent := range s.registry.GetAllAgents() {
+		if agent.TaskID == "" {
+			continue // Not running a task
+		}
+
+		if now.Sub(agent.LastHeartbeat) > timeout {
+			s.log.Printf("agent %s silent for %v, killing task %s",
+				agent.ID, now.Sub(agent.LastHeartbeat), agent.TaskID)
+
+			// Mark the task as failed in the queue
+			if err := s.taskQueue.Fail(agent.TaskID, fmt.Sprintf("agent went silent for %.0f seconds", now.Sub(agent.LastHeartbeat).Seconds())); err != nil {
+				s.log.Printf("failed to mark task %s as failed: %v", agent.TaskID, err)
+			}
+
+			// Clear the agent's task assignment
+			if err := s.registry.KillRunningAgentTask(agent.ID); err != nil {
+				s.log.Printf("failed to kill agent %s task: %v", agent.ID, err)
+			}
+
+			// Notify the UI
+			s.hub.Broadcast(rpc.ConnectionRoleBrowser, &rpc.JSONRPCMessage{
+				JSONRPC: "2.0",
+				Method:  "task.updated",
+				Params: json.RawMessage(fmt.Sprintf(`{"task_id":"%s","status":"failed"}`,
+					agent.TaskID)),
+			})
+
+			// Send task.cancel RPC to the agent to abort the pi subprocess.
+			// This is best-effort — the agent may already be disconnected.
+			cancelParams := map[string]interface{}{
+				"task_id": agent.TaskID,
+				"reason":  "agent silence timeout",
+			}
+			if err := s.hub.SendToAgent(agent.ID, "task.cancel", cancelParams); err != nil {
+				s.log.Printf("failed to send task.cancel to agent %s: %v (agent may be disconnected)", agent.ID, err)
+			}
 		}
 	}
 }

@@ -23,6 +23,10 @@ type ServerConfig struct {
 	TaskTimeout int `yaml:"task_timeout"`
 	// HeartbeatInterval is how often agents must send heartbeats (seconds).
 	HeartbeatInterval int `yaml:"heartbeat_interval"`
+	// SilenceTimeout is the duration of RPC silence before killing a running task.
+	// When an agent stops sending heartbeats for this long, the server kills its
+	// pi subprocess and marks the task as failed. Set to 0 to disable.
+	SilenceTimeout int `yaml:"silence_timeout"`
 	// MaxAgents is the maximum number of agents allowed (0 = unlimited).
 	MaxAgents int `yaml:"max_agents"`
 	// LogDir is the base directory where task logs are persisted to disk.
@@ -46,6 +50,9 @@ type AgentConfig struct {
 	TaskTimeout int `yaml:"task_timeout"`
 	// HeartbeatInterval is how often to send heartbeats (seconds, 0 = use server default).
 	HeartbeatInterval int `yaml:"heartbeat_interval"`
+	// SilenceTimeout is the duration of RPC silence before the server kills the task.
+	// 0 = use server default.
+	SilenceTimeout int `yaml:"silence_timeout"`
 	// WorkingDir is the base working directory for task execution.
 	WorkingDir string `yaml:"working_dir"`
 	// LogLevel is the logging level (debug, info, warn, error).
@@ -66,7 +73,8 @@ func DefaultServerConfig() ServerConfig {
 		MaxLogSize:        1024 * 1024, // 1MB
 		TaskTimeout:       3600,        // 1 hour
 		HeartbeatInterval: 30,
-		MaxAgents:         0, // unlimited
+		SilenceTimeout:    1800, // 30 minutes
+		MaxAgents:         0,    // unlimited
 	}
 }
 

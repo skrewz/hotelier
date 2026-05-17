@@ -152,6 +152,20 @@ func (r *AgentRegistry) Heartbeat(agentID string) error {
 	return nil
 }
 
+// SetLastHeartbeat sets the last heartbeat time for an agent (for testing).
+func (r *AgentRegistry) SetLastHeartbeat(agentID string, t time.Time) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	agent, exists := r.agents[agentID]
+	if !exists {
+		return fmt.Errorf("agent %s not found", agentID)
+	}
+
+	agent.LastHeartbeat = t
+	return nil
+}
+
 // GetAgent returns an agent by ID.
 func (r *AgentRegistry) GetAgent(agentID string) (*Agent, bool) {
 	r.mu.RLock()
@@ -232,6 +246,33 @@ func (r *AgentRegistry) ClearAgentTask(agentID string) error {
 
 	agent.TaskID = ""
 	agent.State = AgentStateIdle
+	return nil
+}
+
+// KillRunningAgentTask clears the task assignment from a running agent.
+// This is used when the server detects the agent has gone silent and needs
+// to forcibly terminate its task execution.
+func (r *AgentRegistry) KillRunningAgentTask(agentID string) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	agent, exists := r.agents[agentID]
+	if !exists {
+		return fmt.Errorf("agent %s not found", agentID)
+	}
+
+	if agent.TaskID == "" {
+		return fmt.Errorf("agent %s has no running task", agentID)
+	}
+
+	taskID := agent.TaskID
+	agent.TaskID = ""
+	agent.State = AgentStateIdle
+
+	if r.logf != nil {
+		r.logf("agent %s task killed: %s (silence)", agentID, taskID)
+	}
+
 	return nil
 }
 

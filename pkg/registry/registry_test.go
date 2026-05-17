@@ -516,6 +516,51 @@ func TestAgentStateString(t *testing.T) {
 	}
 }
 
+func TestKillRunningAgentTask(t *testing.T) {
+	reg := newTestRegistry(t)
+
+	reg.Register("agent-1", "Agent 1", []string{"tag1"})
+	reg.SetAgentTask("agent-1", "task-1")
+
+	agent, _ := reg.GetAgent("agent-1")
+	if agent.TaskID != "task-1" {
+		t.Fatalf("expected task-1, got %s", agent.TaskID)
+	}
+
+	err := reg.KillRunningAgentTask("agent-1")
+	if err != nil {
+		t.Fatalf("KillRunningAgentTask failed: %v", err)
+	}
+
+	agent, _ = reg.GetAgent("agent-1")
+	if agent.TaskID != "" {
+		t.Errorf("expected empty task_id after kill, got %s", agent.TaskID)
+	}
+	if agent.State != AgentStateIdle {
+		t.Errorf("expected IDLE state after kill, got %s", agent.State)
+	}
+}
+
+func TestKillRunningAgentTask_NoTask(t *testing.T) {
+	reg := newTestRegistry(t)
+
+	reg.Register("agent-1", "Agent 1", []string{"tag1"})
+
+	err := reg.KillRunningAgentTask("agent-1")
+	if err == nil {
+		t.Error("expected error when killing task for agent with no running task")
+	}
+}
+
+func TestKillRunningAgentTask_NonExistent(t *testing.T) {
+	reg := newTestRegistry(t)
+
+	err := reg.KillRunningAgentTask("nonexistent")
+	if err == nil {
+		t.Error("expected error for nonexistent agent")
+	}
+}
+
 func TestGetAllAgents(t *testing.T) {
 	reg := newTestRegistry(t)
 

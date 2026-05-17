@@ -1573,3 +1573,133 @@ func TestIntegration_TaskLogBroadcast(t *testing.T) {
 		t.Errorf("expected level 'text', got %v", notifParams["level"])
 	}
 }
+
+// TestCheckSilentAgents verifies that checkSilentAgents kills tasks for
+// agents that have been silent for longer than the configured SilenceTimeout.
+func TestCheckSilentAgents(t *testing.T) {
+	cfg := config.ServerConfig{
+		Host:              "127.0.0.1",
+		Port:              0,
+		HeartbeatInterval: 1, // 1 second for fast test
+		SilenceTimeout:    2, // 2 seconds
+	}
+	srv := New(cfg)
+
+	// Register an agent
+	_, err := srv.Registry().Register("silent-agent", "Silent Agent", []string{"tag"})
+	if err != nil {
+		t.Fatalf("register failed: %v", err)
+	}
+
+	// Assign a task to the agent
+	task := &queue.Task{
+		ID:     "silent-task",
+		Prompt: "Test task",
+		Tags:   []string{"tag"},
+	}
+	if err := srv.TaskQueue().Add(task); err != nil {
+		t.Fatalf("add task failed: %v", err)
+	}
+	if err := srv.TaskQueue().Assign("silent-task", "silent-agent"); err != nil {
+		t.Fatalf("assign task failed: %v", err)
+	}
+	if err := srv.TaskQueue().Start("silent-task"); err != nil {
+		t.Fatalf("start task failed: %v", err)
+	}
+	if err := srv.Registry().SetAgentTask("silent-agent", "silent-task"); err != nil {
+		t.Fatalf("set agent task failed: %v", err)
+	}
+
+	// Don't send heartbeats — the agent will be stale
+	// Wait for the task to be running
+	time.Sleep(100 * time.Millisecond)
+
+	// Manually advance the agent's LastHeartbeat to simulate silence
+	srv.Registry().SetLastHeartbeat("silent-agent", time.Now().Add(-3*time.Second))
+
+	// Run checkSilentAgents — it should kill the task
+	srv.checkSilentAgents()
+
+	// Verify the task was marked as failed
+	taskData, ok := srv.TaskQueue().Get("silent-task")
+	if !ok {
+		t.Fatal("task should still exist")
+	}
+	if taskData.Status != queue.TaskStatusFailed {
+		t.Errorf("expected task FAILED, got %s", taskData.Status)
+	}
+
+	// Verify the agent's task was cleared
+	agentAfter, _ := srv.Registry().GetAgent("silent-agent")
+	if agentAfter.TaskID != "" {
+		t.Errorf("expected empty task_id, got %s", agentAfter.TaskID)
+	}
+	if agentAfter.State != registry.AgentStateIdle {
+		t.Errorf("expected IDLE state, got %s", agentAfter.State)
+	}
+}
+
+// TestCheckSilentAgents_Disabled verifies that when SilenceTimeout is 0,
+// no tasks are killed even for silent agents.
+func TestCheckSilentAgents_Disabled(t *testing.T) {
+	cfg := config.ServerConfig{
+		Host:              "127.0.0.1",
+		Port:              0,
+		HeartbeatInterval: 1,
+		SilenceTimeout:    0, // disabled
+	}
+	srv := New(cfg)
+
+	srv.Registry().Register("silent-agent", "Silent Agent", []string{"tag"})
+
+	task := &queue.Task{
+		ID:     "silent-task",
+		Prompt: "Test task",
+		Tags:   []string{"tag"},
+	}
+	srv.TaskQueue().Add(task)
+	srv.TaskQueue().Assign("silent-task", "silent-agent")
+	srv.TaskQueue().Start("silent-task")
+	srv.Registry().SetAgentTask("silent-agent", "silent-task")
+
+	srv.checkSilentAgents()
+
+	taskData, _ := srv.TaskQueue().Get("silent-task")
+	if taskData.Status != queue.TaskStatusRunning {
+		t.Errorf("expected task RUNNING (silence detection disabled), got %s", taskData.Status)
+	}
+}
+
+// TestCheckSilentAgents_ActiveAgent verifies that agents sending heartbeats
+// are not killed even when running tasks.
+func TestCheckSilentAgents_ActiveAgent(t *testing.T) {
+	cfg := config.ServerConfig{
+		Host:              "127.0.0.1",
+		Port:              0,
+		HeartbeatInterval: 1,
+		SilenceTimeout:    10, // 10 seconds
+	}
+	srv := New(cfg)
+
+	srv.Registry().Register("active-agent", "Active Agent", []string{"tag"})
+
+	task := &queue.Task{
+		ID:     "active-task",
+		Prompt: "Test task",
+		Tags:   []string{"tag"},
+	}
+	srv.TaskQueue().Add(task)
+	srv.TaskQueue().Assign("active-task", "active-agent")
+	srv.TaskQueue().Start("active-task")
+	srv.Registry().SetAgentTask("active-agent", "active-task")
+
+	// Send a fresh heartbeat
+	srv.Registry().Heartbeat("active-agent")
+
+	srv.checkSilentAgents()
+
+	taskData, _ := srv.TaskQueue().Get("active-task")
+	if taskData.Status != queue.TaskStatusRunning {
+		t.Errorf("expected task RUNNING (agent is active), got %s", taskData.Status)
+	}
+}

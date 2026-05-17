@@ -256,7 +256,10 @@ func (h *PIHandler) ExecuteTask(ctx context.Context, task TaskAssignment, sendLo
 		}
 	}()
 
-	// Wait for completion or context cancellation
+	// Wait for completion or context cancellation.
+	// The context is driven by the agent's task timeout (configurable) or
+	// by a server-sent task.cancel RPC (via silence detection). No hardcoded
+	// timeout here — the server's silence detection replaces the old fixed limit.
 	select {
 	case <-done:
 		// Agent completed
@@ -267,14 +270,6 @@ func (h *PIHandler) ExecuteTask(ctx context.Context, task TaskAssignment, sendLo
 			TaskID:  task.TaskID,
 			Success: false,
 			Error:   "task cancelled",
-		}, nil
-	case <-time.After(10 * time.Minute): // Hard timeout
-		h.log.Printf("[PI] task %s timed out", task.TaskID)
-		_ = h.client.Abort()
-		return &TaskResult{
-			TaskID:  task.TaskID,
-			Success: false,
-			Error:   "task timed out after 10 minutes",
 		}, nil
 	}
 

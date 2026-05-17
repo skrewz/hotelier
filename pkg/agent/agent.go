@@ -63,6 +63,7 @@ type Agent struct {
 	handler  Handler
 	mu       sync.Mutex
 	running  bool
+	cancel   context.CancelFunc // cancels the current task's context
 	stopCh   chan struct{}
 	callResp chan *rpc.JSONRPCMessage
 	taskCh   chan TaskAssignment // incoming task assignments
@@ -147,6 +148,15 @@ func (a *Agent) Register() error {
 			return
 		}
 		a.log.Printf("[RPC] task %s cancelled: %s", cancel.TaskID, cancel.Reason)
+
+		// Cancel the running task's context, which will abort the pi subprocess.
+		// This is the mechanism the server uses to kill a silent agent's task.
+		a.mu.Lock()
+		if a.cancel != nil {
+			a.cancel()
+			a.cancel = nil
+		}
+		a.mu.Unlock()
 	})
 
 	a.log.Printf("registered with tags: %v", a.tags)
@@ -320,11 +330,14 @@ func (a *Agent) ExecuteTask(task TaskAssignment) (*TaskResult, error) {
 	defer func() {
 		a.mu.Lock()
 		a.running = false
+		a.cancel = nil
 		a.mu.Unlock()
 	}()
 
 	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	a.mu.Lock()
+	a.cancel = cancel
+	a.mu.Unlock()
 
 	// Set up timeout
 	if a.config.TaskTimeout > 0 {
