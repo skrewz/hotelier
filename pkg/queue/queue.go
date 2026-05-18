@@ -70,7 +70,7 @@ func (s *TaskStatus) UnmarshalJSON(data []byte) error {
 	return nil
 }
 
-// Task represents a unit of work to be executed by an agent.
+// Task represents a unit of work to be executed by a guest.
 type Task struct {
 	ID         string     `json:"id"`
 	Repos      []string   `json:"repos"`
@@ -146,8 +146,8 @@ func (q *TaskQueue) UpdateStatus(taskID string, status TaskStatus) error {
 	return nil
 }
 
-// Assign assigns a task to an agent.
-func (q *TaskQueue) Assign(taskID, agentID string) error {
+// Assign assigns a task to a guest.
+func (q *TaskQueue) Assign(taskID, guestID string) error {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 
@@ -161,8 +161,8 @@ func (q *TaskQueue) Assign(taskID, agentID string) error {
 	}
 
 	task.Status = TaskStatusAssigned
-	task.AssignedTo = agentID
-	q.logf("task %s assigned to agent %s", taskID, agentID)
+	task.AssignedTo = guestID
+	q.logf("task %s assigned to guest %s", taskID, guestID)
 	return nil
 }
 
@@ -298,8 +298,8 @@ func (q *TaskQueue) GetAllTasks() []*Task {
 	return result
 }
 
-// GetAssignedAgent returns the agent ID assigned to a task.
-func (q *TaskQueue) GetAssignedAgent(taskID string) (string, bool) {
+// GetAssignedGuest returns the guest ID assigned to a task.
+func (q *TaskQueue) GetAssignedGuest(taskID string) (string, bool) {
 	q.mu.RLock()
 	defer q.mu.RUnlock()
 
@@ -310,14 +310,14 @@ func (q *TaskQueue) GetAssignedAgent(taskID string) (string, bool) {
 	return task.AssignedTo, true
 }
 
-// GetAgentTasks returns all tasks assigned to an agent.
-func (q *TaskQueue) GetAgentTasks(agentID string) []*Task {
+// GetGuestTasks returns all tasks assigned to a guest.
+func (q *TaskQueue) GetGuestTasks(guestID string) []*Task {
 	q.mu.RLock()
 	defer q.mu.RUnlock()
 
 	var result []*Task
 	for _, task := range q.tasks {
-		if task.AssignedTo == agentID {
+		if task.AssignedTo == guestID {
 			result = append(result, task)
 		}
 	}

@@ -104,7 +104,7 @@ type ConnectionRole string
 
 const (
 	ConnectionRoleBrowser ConnectionRole = "browser"
-	ConnectionRoleAgent   ConnectionRole = "agent"
+	ConnectionRoleGuest   ConnectionRole = "guest"
 )
 
 // Connection represents a connected JSON-RPC client over WebSocket.
@@ -212,7 +212,7 @@ type Hub struct {
 	register         chan *Connection
 	unregister       chan *Connection
 	methods          map[string]Handler
-	agentConnections map[string]string // agentID -> connectionID
+	guestConnections map[string]string // guestID -> connectionID
 	mu               sync.RWMutex
 	logf             func(format string, args ...interface{})
 	nextID           atomic.Int64
@@ -225,7 +225,7 @@ func NewHub(logf func(format string, args ...interface{})) *Hub {
 		register:         make(chan *Connection),
 		unregister:       make(chan *Connection),
 		methods:          make(map[string]Handler),
-		agentConnections: make(map[string]string),
+		guestConnections: make(map[string]string),
 		logf:             logf,
 	}
 }
@@ -391,11 +391,11 @@ func (h *Hub) GetConnection(id string) (*Connection, bool) {
 	return c, ok
 }
 
-// GetAgentConnectionID returns the connection ID for an agent.
-func (h *Hub) GetAgentConnectionID(agentID string) (string, bool) {
+// GetGuestConnectionID returns the connection ID for a guest.
+func (h *Hub) GetGuestConnectionID(guestID string) (string, bool) {
 	h.mu.RLock()
 	defer h.mu.RUnlock()
-	connID, ok := h.agentConnections[agentID]
+	connID, ok := h.guestConnections[guestID]
 	return connID, ok
 }
 
@@ -410,7 +410,7 @@ func (h *Hub) GetAllConnectionIDs() []string {
 	return ids
 }
 
-// SetConnectionRole sets the role of a connection (browser or agent).
+// SetConnectionRole sets the role of a connection (browser or guest).
 func (h *Hub) SetConnectionRole(connID string, role ConnectionRole) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
@@ -441,8 +441,8 @@ func (h *Hub) Broadcast(role ConnectionRole, msg *JSONRPCMessage) {
 	}
 }
 
-// SendToAgent sends a task assignment to a specific agent.
-func (h *Hub) SendToAgent(agentID string, method string, params interface{}) error {
+// SendToGuest sends a task assignment to a specific guest.
+func (h *Hub) SendToGuest(guestID string, method string, params interface{}) error {
 	data, err := json.Marshal(params)
 	if err != nil {
 		return err
@@ -455,29 +455,29 @@ func (h *Hub) SendToAgent(agentID string, method string, params interface{}) err
 	}
 
 	h.mu.RLock()
-	connID, ok := h.agentConnections[agentID]
+	connID, ok := h.guestConnections[guestID]
 	h.mu.RUnlock()
 
 	if !ok {
-		return fmt.Errorf("connection for agent %s not found", agentID)
+		return fmt.Errorf("connection for guest %s not found", guestID)
 	}
 
 	return h.SendTo(connID, msg)
 }
 
-// RegisterAgentConnection records the mapping between an agent ID and its connection.
-func (h *Hub) RegisterAgentConnection(agentID, connID string) {
+// RegisterGuestConnection records the mapping between a guest ID and its connection.
+func (h *Hub) RegisterGuestConnection(guestID, connID string) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	h.agentConnections[agentID] = connID
-	h.logf("agent %s registered on connection %s", agentID, connID)
+	h.guestConnections[guestID] = connID
+	h.logf("guest %s registered on connection %s", guestID, connID)
 }
 
-// UnregisterAgentConnection removes the mapping for an agent.
-func (h *Hub) UnregisterAgentConnection(agentID string) {
+// UnregisterGuestConnection removes the mapping for a guest.
+func (h *Hub) UnregisterGuestConnection(guestID string) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	delete(h.agentConnections, agentID)
+	delete(h.guestConnections, guestID)
 }
 
 // SendNotification sends a notification (no ID) to a specific connection

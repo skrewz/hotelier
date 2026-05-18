@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Hotelier — Agent Queue Dashboard</title>
+    <title>Hotelier — Guest Queue Dashboard</title>
     <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
     <style>
         * { margin: 0; padding: 0; box-sizing: border-box; }
@@ -19,11 +19,11 @@
         .main { flex: 1; overflow-y: auto; padding: 1rem; }
         .panel { padding: 1rem; border-bottom: 1px solid #334155; }
         .panel h3 { font-size: 0.875rem; color: #94a3b8; margin-bottom: 0.75rem; text-transform: uppercase; letter-spacing: 0.05em; }
-        .agent-item { padding: 0.5rem; margin-bottom: 0.5rem; background: #0f172a; border-radius: 0.375rem; cursor: pointer; }
-        .agent-item:hover { background: #1e293b; }
-        .agent-name { font-weight: 600; font-size: 0.875rem; }
-        .agent-tags { font-size: 0.75rem; color: #64748b; margin-top: 0.25rem; }
-        .agent-status { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 0.5rem; }
+        .guest-item { padding: 0.5rem; margin-bottom: 0.5rem; background: #0f172a; border-radius: 0.375rem; cursor: pointer; }
+        .guest-item:hover { background: #1e293b; }
+        .guest-name { font-weight: 600; font-size: 0.875rem; }
+        .guest-tags { font-size: 0.75rem; color: #64748b; margin-top: 0.25rem; }
+        .guest-status { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 0.5rem; }
         .status-idle { background: #22c55e; }
         .status-running { background: #f59e0b; }
         .status-disconnected { background: #ef4444; }
@@ -58,28 +58,28 @@
 
         /* Streaming log messages */
         .log-msg { margin-bottom: 0.5rem; padding: 0.5rem 0.75rem; border-radius: 0.375rem; font-size: 0.85rem; line-height: 1.6; }
-        .log-msg.agent { background: #0f172a; border-left: 2px solid #22c55e; color: #e2e8f0; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; white-space: pre-wrap; }
-        .log-msg.agent .md-rendered { white-space: normal; }
-        .log-msg.agent .md-rendered h1, .log-msg.agent .md-rendered h2, .log-msg.agent .md-rendered h3, .log-msg.agent .md-rendered h4, .log-msg.agent .md-rendered h5, .log-msg.agent .md-rendered h6 { margin: 0.5em 0 0.25em; font-weight: 600; }
-        .log-msg.agent .md-rendered h1 { font-size: 1.25em; }
-        .log-msg.agent .md-rendered h2 { font-size: 1.1em; }
-        .log-msg.agent .md-rendered h3 { font-size: 1em; }
-        .log-msg.agent .md-rendered p { margin: 0.25em 0; }
-        .log-msg.agent .md-rendered code { background: #1e293b; padding: 0.125em 0.375em; border-radius: 0.25em; font-size: 0.9em; font-family: 'SF Mono', 'Fira Code', monospace; }
-        .log-msg.agent .md-rendered pre { background: #1e293b; padding: 0.75rem; border-radius: 0.375rem; overflow-x: auto; margin: 0.5em 0; }
-        .log-msg.agent .md-rendered pre code { background: none; padding: 0; }
-        .log-msg.agent .md-rendered table { border-collapse: collapse; width: 100%; margin: 0.5em 0; font-size: 0.85rem; }
-        .log-msg.agent .md-rendered th, .log-msg.agent .md-rendered td { border: 1px solid #334155; padding: 0.375rem 0.75rem; text-align: left; }
-        .log-msg.agent .md-rendered th { background: #1e293b; font-weight: 600; }
-        .log-msg.agent .md-rendered tr:nth-child(even) { background: #0f172a; }
-        .log-msg.agent .md-rendered ul, .log-msg.agent .md-rendered ol { margin: 0.25em 0; padding-left: 1.5em; }
-        .log-msg.agent .md-rendered li { margin: 0.125em 0; }
-        .log-msg.agent .md-rendered blockquote { border-left: 3px solid #38bdf8; padding-left: 0.75rem; margin: 0.5em 0; color: #94a3b8; }
-        .log-msg.agent .md-rendered a { color: #38bdf8; text-decoration: none; }
-        .log-msg.agent .md-rendered a:hover { text-decoration: underline; }
-        .log-msg.agent .md-rendered hr { border: none; border-top: 1px solid #334155; margin: 0.75em 0; }
-        .log-msg.agent .md-rendered strong { font-weight: 600; }
-        .log-msg.agent .md-rendered em { font-style: italic; }
+        .log-msg.guest { background: #0f172a; border-left: 2px solid #22c55e; color: #e2e8f0; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; white-space: pre-wrap; }
+        .log-msg.guest .md-rendered { white-space: normal; }
+        .log-msg.guest .md-rendered h1, .log-msg.guest .md-rendered h2, .log-msg.guest .md-rendered h3, .log-msg.guest .md-rendered h4, .log-msg.guest .md-rendered h5, .log-msg.guest .md-rendered h6 { margin: 0.5em 0 0.25em; font-weight: 600; }
+        .log-msg.guest .md-rendered h1 { font-size: 1.25em; }
+        .log-msg.guest .md-rendered h2 { font-size: 1.1em; }
+        .log-msg.guest .md-rendered h3 { font-size: 1em; }
+        .log-msg.guest .md-rendered p { margin: 0.25em 0; }
+        .log-msg.guest .md-rendered code { background: #1e293b; padding: 0.125em 0.375em; border-radius: 0.25em; font-size: 0.9em; font-family: 'SF Mono', 'Fira Code', monospace; }
+        .log-msg.guest .md-rendered pre { background: #1e293b; padding: 0.75rem; border-radius: 0.375rem; overflow-x: auto; margin: 0.5em 0; }
+        .log-msg.guest .md-rendered pre code { background: none; padding: 0; }
+        .log-msg.guest .md-rendered table { border-collapse: collapse; width: 100%; margin: 0.5em 0; font-size: 0.85rem; }
+        .log-msg.guest .md-rendered th, .log-msg.guest .md-rendered td { border: 1px solid #334155; padding: 0.375rem 0.75rem; text-align: left; }
+        .log-msg.guest .md-rendered th { background: #1e293b; font-weight: 600; }
+        .log-msg.guest .md-rendered tr:nth-child(even) { background: #0f172a; }
+        .log-msg.guest .md-rendered ul, .log-msg.guest .md-rendered ol { margin: 0.25em 0; padding-left: 1.5em; }
+        .log-msg.guest .md-rendered li { margin: 0.125em 0; }
+        .log-msg.guest .md-rendered blockquote { border-left: 3px solid #38bdf8; padding-left: 0.75rem; margin: 0.5em 0; color: #94a3b8; }
+        .log-msg.guest .md-rendered a { color: #38bdf8; text-decoration: none; }
+        .log-msg.guest .md-rendered a:hover { text-decoration: underline; }
+        .log-msg.guest .md-rendered hr { border: none; border-top: 1px solid #334155; margin: 0.75em 0; }
+        .log-msg.guest .md-rendered strong { font-weight: 600; }
+        .log-msg.guest .md-rendered em { font-style: italic; }
         .log-msg.system { color: #64748b; font-size: 0.75rem; font-style: italic; padding-left: 0.75rem; }
         .log-msg.error { background: #1c0a0a; border-left: 2px solid #ef4444; color: #fca5a5; }
         .log-msg.unknown-event { background: #1e293b; border-left: 2px solid #475569; color: #64748b; font-size: 0.75rem; }
@@ -153,8 +153,8 @@
         <h1>🏨 Hotelier</h1>
         <div class="stats">
             <div class="stat">
-                <div class="stat-value" id="agent-count">0</div>
-                <div class="stat-label">Agents</div>
+                <div class="stat-value" id="guest-count">0</div>
+                <div class="stat-label">Guests</div>
             </div>
             <div class="stat">
                 <div class="stat-value" id="task-count">0</div>
@@ -174,8 +174,8 @@
     <div class="container">
         <div class="sidebar">
             <div class="panel">
-                <h3>🤖 Agents</h3>
-                <div id="agent-list"></div>
+                <h3>🤖 Guests</h3>
+                <div id="guest-list"></div>
             </div>
             <div class="panel">
                 <h3>📋 Submit Task</h3>
@@ -238,15 +238,15 @@
 
         async function refresh() {
             try {
-                const [agentsRes, tasksRes] = await Promise.all([
-                    fetch('/api/agents'),
+                const [guestsRes, tasksRes] = await Promise.all([
+                    fetch('/api/guests'),
                     fetch('/api/tasks')
                 ]);
-                const agents = await agentsRes.json();
+                const guests = await guestsRes.json();
                 const tasks = await tasksRes.json();
-                renderAgents(agents);
+                renderGuests(guests);
                 renderTasks(tasks);
-                updateStats(agents, tasks);
+                updateStats(guests, tasks);
 
                 // If a task detail is open, refresh it
                 if (activeTaskId) {
@@ -257,25 +257,25 @@
             }
         }
 
-        function updateStats(agents, tasks) {
-            document.getElementById('agent-count').textContent = agents.count || 0;
+        function updateStats(guests, tasks) {
+            document.getElementById('guest-count').textContent = guests.count || 0;
             document.getElementById('task-count').textContent = tasks.count || 0;
-            document.getElementById('idle-count').textContent = (agents.agents || []).filter(a => a.state === 'IDLE').length;
-            document.getElementById('running-count').textContent = (agents.agents || []).filter(a => a.state === 'RUNNING').length;
+            document.getElementById('idle-count').textContent = (guests.guests || []).filter(a => a.state === 'IDLE').length;
+            document.getElementById('running-count').textContent = (guests.guests || []).filter(a => a.state === 'RUNNING').length;
         }
 
-        function renderAgents(data) {
-            const list = document.getElementById('agent-list');
-            const agents = data.agents || [];
-            if (agents.length === 0) {
-                list.innerHTML = '<div style="padding:0.5rem;color:#64748b;font-size:0.875rem;">No agents connected</div>';
+        function renderGuests(data) {
+            const list = document.getElementById('guest-list');
+            const guests = data.guests || [];
+            if (guests.length === 0) {
+                list.innerHTML = '<div style="padding:0.5rem;color:#64748b;font-size:0.875rem;">No guests connected</div>';
                 return;
             }
-            list.innerHTML = agents.map(a => {
+            list.innerHTML = guests.map(a => {
                 const statusClass = `status-${a.state.toLowerCase()}`;
-                return `<div class="agent-item">
-                    <div class="agent-name"><span class="agent-status ${statusClass}"></span>${a.name || a.id}</div>
-                    <div class="agent-tags">${(a.tags || []).join(', ')}</div>
+                return `<div class="guest-item">
+                    <div class="guest-name"><span class="guest-status ${statusClass}"></span>${a.name || a.id}</div>
+                    <div class="guest-tags">${(a.tags || []).join(', ')}</div>
                 </div>`;
             }).join('');
         }
@@ -436,7 +436,7 @@
             if (logs.length === 0) {
                 const emptyMsg = document.createElement('div');
                 emptyMsg.className = 'log-msg system';
-                emptyMsg.textContent = 'Waiting for agent output...';
+                emptyMsg.textContent = 'Waiting for guest output...';
                 logsFrag.appendChild(emptyMsg);
             } else {
                 const isRunning = task.status === 'RUNNING' || task.status === 'ASSIGNED';
@@ -509,7 +509,7 @@
                         msgEl.textContent = log.line;
                     } else {
                         msgEl = document.createElement('div');
-                        msgEl.className = `log-msg agent${cursorClass}`;
+                        msgEl.className = `log-msg guest${cursorClass}`;
                         const inner = document.createElement('div');
                         inner.className = 'md-rendered';
                         inner.innerHTML = renderMarkdown(log.line);
@@ -531,7 +531,7 @@
                 <div class="task-detail-header">
                     <div>
                         <div class="task-detail-id">${escapeHtml(task.id)} <span class="badge ${badgeClass}">${task.status}</span></div>
-                        <div class="task-detail-meta">${task.assigned_to ? 'Agent: ' + escapeHtml(task.assigned_to) : 'Unassigned'} · ${logs.length} log entries</div>
+                        <div class="task-detail-meta">${task.assigned_to ? 'Guest: ' + escapeHtml(task.assigned_to) : 'Unassigned'} · ${logs.length} log entries</div>
                     </div>
                     <button class="btn btn-sm btn-ghost" onclick="selectTask('')">Close</button>
                 </div>
@@ -725,7 +725,7 @@
                 msgEl.textContent = line;
             } else {
                 msgEl = document.createElement('div');
-                msgEl.className = 'log-msg agent';
+                msgEl.className = 'log-msg guest';
                 const inner = document.createElement('div');
                 inner.className = 'md-rendered';
                 inner.innerHTML = renderMarkdown(line);

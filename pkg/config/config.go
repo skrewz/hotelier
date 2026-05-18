@@ -21,30 +21,30 @@ type ServerConfig struct {
 	MaxLogSize int `yaml:"max_log_size"`
 	// TaskTimeout is the default timeout for tasks in seconds (0 = unlimited).
 	TaskTimeout int `yaml:"task_timeout"`
-	// HeartbeatInterval is how often agents must send heartbeats (seconds).
+	// HeartbeatInterval is how often guests must send heartbeats (seconds).
 	HeartbeatInterval int `yaml:"heartbeat_interval"`
 	// SilenceTimeout is the duration of RPC silence before killing a running task.
-	// When an agent stops sending heartbeats for this long, the server kills its
+	// When a guest stops sending heartbeats for this long, the server kills its
 	// pi subprocess and marks the task as failed. Set to 0 to disable.
 	SilenceTimeout int `yaml:"silence_timeout"`
-	// MaxAgents is the maximum number of agents allowed (0 = unlimited).
-	MaxAgents int `yaml:"max_agents"`
+	// MaxGuests is the maximum number of guests allowed (0 = unlimited).
+	MaxGuests int `yaml:"max_guests"`
 	// LogDir is the base directory where task logs are persisted to disk.
 	// When empty, logs are kept in memory only.
 	LogDir string `yaml:"log_dir"`
 }
 
-// AgentConfig holds the configuration for an agent.
-type AgentConfig struct {
+// GuestConfig holds the configuration for a guest.
+type GuestConfig struct {
 	// Host is the address of the Check-In Host.
 	Host string `yaml:"host"`
 	// Port is the port of the Check-In Host.
 	Port int `yaml:"port"`
-	// ID is the unique identifier for this agent.
+	// ID is the unique identifier for this guest.
 	ID string `yaml:"id"`
-	// Name is a human-readable name for this agent.
+	// Name is a human-readable name for this guest.
 	Name string `yaml:"name"`
-	// Tags are the capabilities this agent declares.
+	// Tags are the capabilities this guest declares.
 	Tags []string `yaml:"tags"`
 	// TaskTimeout is the timeout for tasks in seconds (0 = use server default).
 	TaskTimeout int `yaml:"task_timeout"`
@@ -57,9 +57,9 @@ type AgentConfig struct {
 	WorkingDir string `yaml:"working_dir"`
 	// LogLevel is the logging level (debug, info, warn, error).
 	LogLevel string `yaml:"log_level"`
-	// AutoClaimNextTask controls whether the agent automatically picks up
+	// AutoClaimNextTask controls whether the guest automatically picks up
 	// the next pending task after completing the current one. When false,
-	// the agent remains idle and waits for the host to assign a task.
+	// the guest remains idle and waits for the host to assign a task.
 	AutoClaimNextTask bool `yaml:"auto_claim_next_task"`
 }
 
@@ -74,13 +74,13 @@ func DefaultServerConfig() ServerConfig {
 		TaskTimeout:       3600,        // 1 hour
 		HeartbeatInterval: 30,
 		SilenceTimeout:    1800, // 30 minutes
-		MaxAgents:         0,    // unlimited
+		MaxGuests:         0,    // unlimited
 	}
 }
 
-// DefaultAgentConfig returns an AgentConfig with sensible defaults.
-func DefaultAgentConfig() AgentConfig {
-	return AgentConfig{
+// DefaultGuestConfig returns a GuestConfig with sensible defaults.
+func DefaultGuestConfig() GuestConfig {
+	return GuestConfig{
 		Host:              "localhost",
 		Port:              8080,
 		TaskTimeout:       0, // use server default
@@ -102,9 +102,9 @@ func LoadServerConfig(path string) (ServerConfig, error) {
 	return cfg, nil
 }
 
-// LoadAgentConfig reads and parses an agent config file.
-func LoadAgentConfig(path string) (AgentConfig, error) {
-	cfg := DefaultAgentConfig()
+// LoadGuestConfig reads and parses a guest config file.
+func LoadGuestConfig(path string) (GuestConfig, error) {
+	cfg := DefaultGuestConfig()
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return cfg, err

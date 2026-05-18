@@ -7,349 +7,349 @@ import (
 	"time"
 )
 
-// AgentState represents the state of an agent.
-type AgentState int
+// GuestState represents the state of a guest.
+type GuestState int
 
 const (
-	AgentStateDisconnected AgentState = iota
-	AgentStateRegistered
-	AgentStateIdle
-	AgentStateRunning
+	GuestStateDisconnected GuestState = iota
+	GuestStateRegistered
+	GuestStateIdle
+	GuestStateRunning
 )
 
-func (s AgentState) String() string {
+func (s GuestState) String() string {
 	switch s {
-	case AgentStateDisconnected:
+	case GuestStateDisconnected:
 		return "DISCONNECTED"
-	case AgentStateRegistered:
+	case GuestStateRegistered:
 		return "REGISTERED"
-	case AgentStateIdle:
+	case GuestStateIdle:
 		return "IDLE"
-	case AgentStateRunning:
+	case GuestStateRunning:
 		return "RUNNING"
 	default:
 		return "UNKNOWN"
 	}
 }
 
-// MarshalJSON implements json.Marshaler for AgentState.
+// MarshalJSON implements json.Marshaler for GuestState.
 // It serializes the state as a string (e.g. "IDLE") rather than an int,
 // so the frontend can use it directly without type coercion.
-func (s AgentState) MarshalJSON() ([]byte, error) {
+func (s GuestState) MarshalJSON() ([]byte, error) {
 	return json.Marshal(s.String())
 }
 
-// UnmarshalJSON implements json.Unmarshaler for AgentState.
-func (s *AgentState) UnmarshalJSON(data []byte) error {
+// UnmarshalJSON implements json.Unmarshaler for GuestState.
+func (s *GuestState) UnmarshalJSON(data []byte) error {
 	var str string
 	if err := json.Unmarshal(data, &str); err != nil {
 		return err
 	}
 	switch str {
 	case "DISCONNECTED":
-		*s = AgentStateDisconnected
+		*s = GuestStateDisconnected
 	case "REGISTERED":
-		*s = AgentStateRegistered
+		*s = GuestStateRegistered
 	case "IDLE":
-		*s = AgentStateIdle
+		*s = GuestStateIdle
 	case "RUNNING":
-		*s = AgentStateRunning
+		*s = GuestStateRunning
 	default:
 		*s = 0 // unknown state, store as zero value
 	}
 	return nil
 }
 
-// Agent represents a connected agent in the system.
-type Agent struct {
+// Guest represents a connected guest in the system.
+type Guest struct {
 	ID            string     `json:"id"`
 	Name          string     `json:"name"`
 	Tags          []string   `json:"tags"`
-	State         AgentState `json:"state"`
+	State         GuestState `json:"state"`
 	ConnectedAt   time.Time  `json:"connected_at"`
 	LastHeartbeat time.Time  `json:"last_heartbeat"`
 	TaskID        string     `json:"task_id,omitempty"`
 }
 
-// AgentRegistry manages the lifecycle of connected agents.
-type AgentRegistry struct {
-	agents    map[string]*Agent
+// GuestRegistry manages the lifecycle of connected guests.
+type GuestRegistry struct {
+	guests    map[string]*Guest
 	mu        sync.RWMutex
-	maxAgents int
+	maxGuests int
 	logf      func(format string, args ...interface{})
 }
 
-// NewAgentRegistry creates a new agent registry.
-func NewAgentRegistry(maxAgents int, logf func(format string, args ...interface{})) *AgentRegistry {
-	return &AgentRegistry{
-		agents:    make(map[string]*Agent),
-		maxAgents: maxAgents,
+// NewGuestRegistry creates a new guest registry.
+func NewGuestRegistry(maxGuests int, logf func(format string, args ...interface{})) *GuestRegistry {
+	return &GuestRegistry{
+		guests:    make(map[string]*Guest),
+		maxGuests: maxGuests,
 		logf:      logf,
 	}
 }
 
-// Register adds a new agent to the registry.
-func (r *AgentRegistry) Register(agentID, name string, tags []string) (*Agent, error) {
+// Register adds a new guest to the registry.
+func (r *GuestRegistry) Register(guestID, name string, tags []string) (*Guest, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	if r.maxAgents > 0 && len(r.agents) >= r.maxAgents {
-		return nil, fmt.Errorf("maximum number of agents (%d) reached", r.maxAgents)
+	if r.maxGuests > 0 && len(r.guests) >= r.maxGuests {
+		return nil, fmt.Errorf("maximum number of guests (%d) reached", r.maxGuests)
 	}
 
-	if _, exists := r.agents[agentID]; exists {
-		return nil, fmt.Errorf("agent %s already registered", agentID)
+	if _, exists := r.guests[guestID]; exists {
+		return nil, fmt.Errorf("guest %s already registered", guestID)
 	}
 
-	agent := &Agent{
-		ID:            agentID,
+	guest := &Guest{
+		ID:            guestID,
 		Name:          name,
 		Tags:          tags,
-		State:         AgentStateIdle,
+		State:         GuestStateIdle,
 		ConnectedAt:   time.Now(),
 		LastHeartbeat: time.Now(),
 	}
 
-	r.agents[agentID] = agent
+	r.guests[guestID] = guest
 	if r.logf != nil {
-		r.logf("agent registered: %s (name: %s, tags: %v, total: %d)", agentID, name, tags, len(r.agents))
+		r.logf("guest registered: %s (name: %s, tags: %v, total: %d)", guestID, name, tags, len(r.guests))
 	}
-	return agent, nil
+	return guest, nil
 }
 
-// Unregister removes an agent from the registry.
-func (r *AgentRegistry) Unregister(agentID string) error {
+// Unregister removes a guest from the registry.
+func (r *GuestRegistry) Unregister(guestID string) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	agent, exists := r.agents[agentID]
+	guest, exists := r.guests[guestID]
 	if !exists {
-		return fmt.Errorf("agent %s not found", agentID)
+		return fmt.Errorf("guest %s not found", guestID)
 	}
 
-	if agent.State == AgentStateRunning {
-		return fmt.Errorf("cannot unregister running agent %s (task: %s)", agentID, agent.TaskID)
+	if guest.State == GuestStateRunning {
+		return fmt.Errorf("cannot unregister running guest %s (task: %s)", guestID, guest.TaskID)
 	}
 
-	delete(r.agents, agentID)
+	delete(r.guests, guestID)
 	if r.logf != nil {
-		r.logf("agent unregistered: %s (total: %d)", agentID, len(r.agents))
+		r.logf("guest unregistered: %s (total: %d)", guestID, len(r.guests))
 	}
 	return nil
 }
 
-// Heartbeat updates the last heartbeat time for an agent.
-func (r *AgentRegistry) Heartbeat(agentID string) error {
+// Heartbeat updates the last heartbeat time for a guest.
+func (r *GuestRegistry) Heartbeat(guestID string) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	agent, exists := r.agents[agentID]
+	guest, exists := r.guests[guestID]
 	if !exists {
-		return fmt.Errorf("agent %s not found", agentID)
+		return fmt.Errorf("guest %s not found", guestID)
 	}
 
-	agent.LastHeartbeat = time.Now()
+	guest.LastHeartbeat = time.Now()
 	return nil
 }
 
-// SetLastHeartbeat sets the last heartbeat time for an agent (for testing).
-func (r *AgentRegistry) SetLastHeartbeat(agentID string, t time.Time) error {
+// SetLastHeartbeat sets the last heartbeat time for a guest (for testing).
+func (r *GuestRegistry) SetLastHeartbeat(guestID string, t time.Time) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	agent, exists := r.agents[agentID]
+	guest, exists := r.guests[guestID]
 	if !exists {
-		return fmt.Errorf("agent %s not found", agentID)
+		return fmt.Errorf("guest %s not found", guestID)
 	}
 
-	agent.LastHeartbeat = t
+	guest.LastHeartbeat = t
 	return nil
 }
 
-// GetAgent returns an agent by ID.
-func (r *AgentRegistry) GetAgent(agentID string) (*Agent, bool) {
+// GetGuest returns a guest by ID.
+func (r *GuestRegistry) GetGuest(guestID string) (*Guest, bool) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 
-	agent, exists := r.agents[agentID]
-	return agent, exists
+	guest, exists := r.guests[guestID]
+	return guest, exists
 }
 
-// GetAgents returns all agents matching the given state.
-func (r *AgentRegistry) GetAgents(state AgentState) []*Agent {
+// GetGuests returns all guests matching the given state.
+func (r *GuestRegistry) GetGuests(state GuestState) []*Guest {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 
-	var result []*Agent
-	for _, agent := range r.agents {
-		if agent.State == state {
-			result = append(result, agent)
+	var result []*Guest
+	for _, guest := range r.guests {
+		if guest.State == state {
+			result = append(result, guest)
 		}
 	}
 	return result
 }
 
-// GetAllAgents returns all agents.
-func (r *AgentRegistry) GetAllAgents() []*Agent {
+// GetAllGuests returns all guests.
+func (r *GuestRegistry) GetAllGuests() []*Guest {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 
-	result := make([]*Agent, 0, len(r.agents))
-	for _, agent := range r.agents {
-		result = append(result, agent)
+	result := make([]*Guest, 0, len(r.guests))
+	for _, guest := range r.guests {
+		result = append(result, guest)
 	}
 	return result
 }
 
-// SetAgentState updates an agent's state.
-func (r *AgentRegistry) SetAgentState(agentID string, state AgentState) error {
+// SetGuestState updates a guest's state.
+func (r *GuestRegistry) SetGuestState(guestID string, state GuestState) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	agent, exists := r.agents[agentID]
+	guest, exists := r.guests[guestID]
 	if !exists {
-		return fmt.Errorf("agent %s not found", agentID)
+		return fmt.Errorf("guest %s not found", guestID)
 	}
 
-	oldState := agent.State
-	agent.State = state
+	oldState := guest.State
+	guest.State = state
 	if r.logf != nil {
-		r.logf("agent %s state changed: %s -> %s", agentID, oldState, state)
+		r.logf("guest %s state changed: %s -> %s", guestID, oldState, state)
 	}
 	return nil
 }
 
-// SetAgentTask assigns a task to an agent.
-func (r *AgentRegistry) SetAgentTask(agentID, taskID string) error {
+// SetGuestTask assigns a task to a guest.
+func (r *GuestRegistry) SetGuestTask(guestID, taskID string) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	agent, exists := r.agents[agentID]
+	guest, exists := r.guests[guestID]
 	if !exists {
-		return fmt.Errorf("agent %s not found", agentID)
+		return fmt.Errorf("guest %s not found", guestID)
 	}
 
-	agent.TaskID = taskID
-	agent.State = AgentStateRunning
+	guest.TaskID = taskID
+	guest.State = GuestStateRunning
 	return nil
 }
 
-// ClearAgentTask clears the task assignment from an agent.
-func (r *AgentRegistry) ClearAgentTask(agentID string) error {
+// ClearGuestTask clears the task assignment from a guest.
+func (r *GuestRegistry) ClearGuestTask(guestID string) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	agent, exists := r.agents[agentID]
+	guest, exists := r.guests[guestID]
 	if !exists {
-		return fmt.Errorf("agent %s not found", agentID)
+		return fmt.Errorf("guest %s not found", guestID)
 	}
 
-	agent.TaskID = ""
-	agent.State = AgentStateIdle
+	guest.TaskID = ""
+	guest.State = GuestStateIdle
 	return nil
 }
 
-// KillRunningAgentTask clears the task assignment from a running agent.
-// This is used when the server detects the agent has gone silent and needs
+// KillRunningGuestTask clears the task assignment from a running guest.
+// This is used when the server detects the guest has gone silent and needs
 // to forcibly terminate its task execution.
-func (r *AgentRegistry) KillRunningAgentTask(agentID string) error {
+func (r *GuestRegistry) KillRunningGuestTask(guestID string) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	agent, exists := r.agents[agentID]
+	guest, exists := r.guests[guestID]
 	if !exists {
-		return fmt.Errorf("agent %s not found", agentID)
+		return fmt.Errorf("guest %s not found", guestID)
 	}
 
-	if agent.TaskID == "" {
-		return fmt.Errorf("agent %s has no running task", agentID)
+	if guest.TaskID == "" {
+		return fmt.Errorf("guest %s has no running task", guestID)
 	}
 
-	taskID := agent.TaskID
-	agent.TaskID = ""
-	agent.State = AgentStateIdle
+	taskID := guest.TaskID
+	guest.TaskID = ""
+	guest.State = GuestStateIdle
 
 	if r.logf != nil {
-		r.logf("agent %s task killed: %s (silence)", agentID, taskID)
+		r.logf("guest %s task killed: %s (silence)", guestID, taskID)
 	}
 
 	return nil
 }
 
-// FindAvailableAgents returns agents that can handle tasks with the given tags.
-func (r *AgentRegistry) FindAvailableAgents(requiredTags []string) []*Agent {
+// FindAvailableGuests returns guests that can handle tasks with the given tags.
+func (r *GuestRegistry) FindAvailableGuests(requiredTags []string) []*Guest {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 
-	var result []*Agent
-	for _, agent := range r.agents {
-		if agent.State != AgentStateIdle {
+	var result []*Guest
+	for _, guest := range r.guests {
+		if guest.State != GuestStateIdle {
 			continue
 		}
 		if len(requiredTags) == 0 {
-			result = append(result, agent)
+			result = append(result, guest)
 			continue
 		}
-		if r.matchesTags(agent.Tags, requiredTags) {
-			result = append(result, agent)
+		if r.matchesTags(guest.Tags, requiredTags) {
+			result = append(result, guest)
 		}
 	}
 	return result
 }
 
-// HasAgentWithTags checks if there's at least one available agent with the required tags.
-func (r *AgentRegistry) HasAgentWithTags(requiredTags []string) bool {
-	return len(r.FindAvailableAgents(requiredTags)) > 0
+// HasGuestWithTags checks if there's at least one available guest with the required tags.
+func (r *GuestRegistry) HasGuestWithTags(requiredTags []string) bool {
+	return len(r.FindAvailableGuests(requiredTags)) > 0
 }
 
-// Count returns the total number of registered agents.
-func (r *AgentRegistry) Count() int {
+// Count returns the total number of registered guests.
+func (r *GuestRegistry) Count() int {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
-	return len(r.agents)
+	return len(r.guests)
 }
 
-// CountByState returns the number of agents in a given state.
-func (r *AgentRegistry) CountByState(state AgentState) int {
+// CountByState returns the number of guests in a given state.
+func (r *GuestRegistry) CountByState(state GuestState) int {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 
 	count := 0
-	for _, agent := range r.agents {
-		if agent.State == state {
+	for _, guest := range r.guests {
+		if guest.State == state {
 			count++
 		}
 	}
 	return count
 }
 
-// IsStale checks if an agent is stale (hasn't sent a heartbeat in the given duration).
-func (r *AgentRegistry) IsStale(agentID string, timeout time.Duration) bool {
+// IsStale checks if a guest is stale (hasn't sent a heartbeat in the given duration).
+func (r *GuestRegistry) IsStale(guestID string, timeout time.Duration) bool {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 
-	agent, exists := r.agents[agentID]
+	guest, exists := r.guests[guestID]
 	if !exists {
 		return false
 	}
 
-	return time.Since(agent.LastHeartbeat) > timeout
+	return time.Since(guest.LastHeartbeat) > timeout
 }
 
-// RemoveStaleAgents removes agents that haven't sent a heartbeat within the timeout.
-func (r *AgentRegistry) RemoveStaleAgents(timeout time.Duration) []*Agent {
+// RemoveStaleGuests removes guests that haven't sent a heartbeat within the timeout.
+func (r *GuestRegistry) RemoveStaleGuests(timeout time.Duration) []*Guest {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	var stale []*Agent
+	var stale []*Guest
 	now := time.Now()
 
-	for id, agent := range r.agents {
-		if now.Sub(agent.LastHeartbeat) > timeout {
-			stale = append(stale, agent)
-			delete(r.agents, id)
+	for id, guest := range r.guests {
+		if now.Sub(guest.LastHeartbeat) > timeout {
+			stale = append(stale, guest)
+			delete(r.guests, id)
 			if r.logf != nil {
-				r.logf("stale agent removed: %s", id)
+				r.logf("stale guest removed: %s", id)
 			}
 		}
 	}
@@ -357,10 +357,10 @@ func (r *AgentRegistry) RemoveStaleAgents(timeout time.Duration) []*Agent {
 	return stale
 }
 
-// matchesTags checks if the agent's tags match all required tags.
-func (r *AgentRegistry) matchesTags(agentTags, requiredTags []string) bool {
-	tagSet := make(map[string]struct{}, len(agentTags))
-	for _, tag := range agentTags {
+// matchesTags checks if the guest's tags match all required tags.
+func (r *GuestRegistry) matchesTags(guestTags, requiredTags []string) bool {
+	tagSet := make(map[string]struct{}, len(guestTags))
+	for _, tag := range guestTags {
 		tagSet[tag] = struct{}{}
 	}
 

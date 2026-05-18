@@ -42,7 +42,7 @@ type PiClient struct {
 	provider      string
 	model         string
 	thinkingLevel string
-	agentDir      string
+	guestDir      string
 	debug         bool
 }
 
@@ -56,8 +56,8 @@ type PiClientConfig struct {
 	Model string
 	// ThinkingLevel is the thinking level (off, minimal, low, medium, high, xhigh).
 	ThinkingLevel string
-	// AgentDir overrides pi's config directory.
-	AgentDir string
+	// GuestDir overrides pi's config directory.
+	GuestDir string
 	// Log is the logger for pi client events.
 	Log *log.Logger
 	// Debug enables verbose RPC logging to stdout.
@@ -75,7 +75,7 @@ func NewClient(cfg PiClientConfig) *PiClient {
 		provider:      cfg.Provider,
 		model:         cfg.Model,
 		thinkingLevel: cfg.ThinkingLevel,
-		agentDir:      cfg.AgentDir,
+		guestDir:      cfg.GuestDir,
 		debug:         cfg.Debug,
 		eventCh:       make(chan Event, 256),
 		doneCh:        make(chan struct{}),
@@ -94,8 +94,8 @@ func (c *PiClient) Start(ctx context.Context) error {
 	if c.thinkingLevel != "" {
 		args = append(args, "--thinking", c.thinkingLevel)
 	}
-	if c.agentDir != "" {
-		args = append(args, "--session-dir", c.agentDir)
+	if c.guestDir != "" {
+		args = append(args, "--session-dir", c.guestDir)
 	}
 
 	c.cmd = exec.CommandContext(ctx, "pi", args...)
@@ -332,12 +332,12 @@ func IsTextDelta(event Event) bool {
 	return delta.Type == "text_delta"
 }
 
-// IsAgentEnd checks if the event is an agent completion event.
-func IsAgentEnd(event Event) bool {
-	return event.Type == "agent_end"
+// IsGuestEnd checks if the event is a guest completion event.
+func IsGuestEnd(event Event) bool {
+	return event.Type == "guest_end"
 }
 
-// FinalText extracts the final assistant message text from an agent_end event.
+// FinalText extracts the final assistant message text from an guest_end event.
 // This is the model's complete output after all tool calls and processing.
 func FinalText(event Event) string {
 	if event.Messages == nil {

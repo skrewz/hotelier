@@ -1,26 +1,26 @@
 # Hotelier
 
-Ephemeral YOLO agent queue — autonomous AI development infrastructure.
+Ephemeral YOLO guest queue — autonomous AI development infrastructure.
 
 ***Warning***: this is alpha-grade software (read: made for myself, all bugs included). Use at your own risk.
 
 ## Overview
 
-Hotelier orchestrates ephemeral AI agents ("machines") that register, receive tasks, execute them against target repositories, stream logs, and submit results. Agents are configured entirely via YAML config files.
+Hotelier orchestrates ephemeral AI guests ("machines") that register, receive tasks, execute them against target repositories, stream logs, and submit results. Guests are configured entirely via YAML config files.
 
 ## Architecture
 
 ```
 ┌──────────────┐    WebSocket     ┌───────────────┐
-│  Check-In    │◄────────────────►│    Agent      │
+│  Check-In    │◄────────────────►│    Guest      │
 │  Host        │  JSON-RPC 2.0    │  (any machine │
 │  :8080       │                  │   running the │
-│              │                  │   agent CLI)  │
+│              │                  │   guest CLI)  │
 └──────────────┘                  └───────────────┘
-  ├── REST API                      ├── agent.yaml
+  ├── REST API                      ├── guest.yaml
   ├── Web UI                        ├── Register
   ├── Task Queue                    ├── Execute tasks
-  └── Agent Registry                ├── Stream logs
+  └── Guest Registry                ├── Stream logs
                                     └── Submit results
 ```
 
@@ -31,10 +31,10 @@ make build
 
 # Copy example configs and edit to suit
 cp config/server.example.yaml config/server.yaml
-cp config/agent.example.yaml config/agent.yaml
+cp config/guest.example.yaml config/guest.yaml
 
 ./bin/hotelier    # Server on :8080
-./bin/agent       # Agent (runs tasks via the pi AI agent)
+./bin/guest       # Guest (runs tasks via the pi AI agent)
 ```
 
 ## Configuration
@@ -44,9 +44,9 @@ Sample configs are provided in `config/`:
 | File | Description |
 |------|-------------|
 | `config/server.example.yaml` | Check-In Host (server) configuration |
-| `config/agent.example.yaml` | Agent configuration |
+| `config/guest.example.yaml` | Guest configuration |
 
-Copy the examples to `config/server.yaml` and `config/agent.yaml`, then edit as needed.
+Copy the examples to `config/server.yaml` and `config/guest.yaml`, then edit as needed.
 
 ### Server (`config/server.yaml`)
 
@@ -58,16 +58,16 @@ write_timeout: 30
 max_log_size: 1048576
 task_timeout: 3600
 heartbeat_interval: 30
-max_agents: 0
+max_guests: 0
 ```
 
-### Agent (`config/agent.yaml`)
+### Guest (`config/guest.yaml`)
 
 ```yaml
 host: "localhost"
 port: 8080
-id: "agent-1"
-name: "Dev Agent #1"
+id: "guest-1"
+name: "Dev Guest #1"
 tags:
   - "business-default"
   - "frontend"
@@ -105,24 +105,24 @@ Or through the web UI dashboard.
 | `GET` | `/api/tasks` | List all tasks |
 | `POST` | `/api/tasks` | Submit a new task |
 | `GET` | `/api/tasks/:id` | Get task details |
-| `GET` | `/api/agents` | List connected agents |
-| `GET` | `/api/agents/:id` | Get agent details |
+| `GET` | `/api/guests` | List connected guests |
+| `GET` | `/api/guests/:id` | Get guest details |
 | `GET` | `/api/health` | Health check |
 | `WS` | `/ws` | WebSocket (JSON-RPC) |
 
 ## Tags
 
-Agents declare capability tags at registration. Tasks specify required tags for routing:
+Guests declare capability tags at registration. Tasks specify required tags for routing:
 
 - `business-default` — Standard development (default)
 - `android` — Android-specific tasks
-- Custom tags — Any capability your agent supports
+- Custom tags — Any capability your guest supports
 
 ## Deployment
 
 ### Container (Server Only)
 
-Hotelier ships a multi-stage `Containerfile` for building the **server-side** binary as a container image. The agent is intentionally **not** containerized — agentic coding agents expect direct access to a machine's filesystem, shell, and tools (the `pi` agent runs a persistent RPC subprocess that expects a real host environment).
+Hotelier ships a multi-stage `Containerfile` for building the **server-side** binary as a container image. The guest is intentionally **not** containerized — agentic coding agents expect direct access to a machine's filesystem, shell, and tools (the `pi` agent runs a persistent RPC subprocess that expects a real host environment).
 
 #### Build
 
@@ -133,7 +133,7 @@ make image
 This uses `podman` to build the image. The build has two stages:
 
 1. **builder** — a `golang:1.25-bookworm` image that compiles the `hotelier` binary with `-trimpath` and version ldflags.
-2. **runtime** — a minimal `debian:12-slim` image with only `ca-certificates` and `git` installed (git is needed for agents to clone repos).
+2. **runtime** — a minimal `debian:12-slim` image with only `ca-certificates` and `git` installed (git is needed for guests to clone repos).
 
 The resulting image runs as a non-root user (`hotelier`) on port 8080.
 
@@ -227,22 +227,22 @@ The container includes a built-in health check that pings the server's own binar
 podman inspect --format='{{.State.Health.Status}}' hotelier
 ```
 
-### Agent Deployment
+### Guest Deployment
 
-Agents run **natively on machines** — they are not containerized. Each agent machine needs:
+Guests run **natively on machines** — they are not containerized. Each guest machine needs:
 
-1. The `bin/agent` binary (built via `make build`)
-2. A `config/agent.yaml` pointing to the Check-In Host
+1. The `bin/guest` binary (built via `make build`)
+2. A `config/guest.yaml` pointing to the Check-In Host
 3. Go installed (for the `pi` agent subprocess)
 4. `pi` CLI installed (`go install github.com/mariozechner/pi-coding-agent@latest`)
 5. `git` installed (for cloning repos)
 
 ```bash
-# On the agent machine
+# On the guest machine
 make build
-cp config/agent.example.yaml config/agent.yaml
-# Edit config/agent.yaml with your server address
-./bin/agent
+cp config/guest.example.yaml config/guest.yaml
+# Edit config/guest.yaml with your server address
+./bin/guest
 ```
 
 ## License

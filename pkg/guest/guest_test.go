@@ -1,4 +1,4 @@
-package agent
+package guest
 
 import (
 	"context"
@@ -11,11 +11,11 @@ import (
 	"hotelier/pkg/config"
 )
 
-func newTestAgent(t *testing.T) *Agent {
+func newTestGuest(t *testing.T) *Guest {
 	t.Helper()
-	cfg := config.AgentConfig{
-		ID:   "test-agent-1",
-		Name: "Test Agent",
+	cfg := config.GuestConfig{
+		ID:   "test-guest-1",
+		Name: "Test Guest",
 		Tags: []string{"business-default", "frontend"},
 	}
 	handler := func(ctx context.Context, task TaskAssignment, _ LogCallback) (*TaskResult, error) {
@@ -24,21 +24,21 @@ func newTestAgent(t *testing.T) *Agent {
 	return New(cfg, handler)
 }
 
-func TestNewAgent(t *testing.T) {
-	ag := newTestAgent(t)
+func TestNewGuest(t *testing.T) {
+	ag := newTestGuest(t)
 	if ag == nil {
-		t.Fatal("expected non-nil agent")
+		t.Fatal("expected non-nil guest")
 	}
-	if !strings.HasPrefix(ag.id, "agent-") {
-		t.Errorf("expected ephemeral id starting with 'agent-', got %s", ag.id)
+	if !strings.HasPrefix(ag.id, "guest-") {
+		t.Errorf("expected ephemeral id starting with 'guest-', got %s", ag.id)
 	}
 	if len(ag.tags) != 2 {
 		t.Errorf("expected 2 tags, got %d", len(ag.tags))
 	}
 }
 
-func TestAgentConfig(t *testing.T) {
-	cfg := config.AgentConfig{ID: "a2", TaskTimeout: 600, HeartbeatInterval: 10}
+func TestGuestConfig(t *testing.T) {
+	cfg := config.GuestConfig{ID: "a2", TaskTimeout: 600, HeartbeatInterval: 10}
 	ag := New(cfg, func(ctx context.Context, task TaskAssignment, _ LogCallback) (*TaskResult, error) {
 		return &TaskResult{TaskID: task.TaskID, Success: true}, nil
 	})
@@ -122,11 +122,11 @@ func TestTaskCancelMarshal(t *testing.T) {
 	}
 }
 
-// Additional agent tests for coverage
-func TestNewAgentWithConfig(t *testing.T) {
-	cfg := config.AgentConfig{
-		ID:                "test-agent",
-		Name:              "Test Agent",
+// Additional guest tests for coverage
+func TestNewGuestWithConfig(t *testing.T) {
+	cfg := config.GuestConfig{
+		ID:                "test-guest",
+		Name:              "Test Guest",
 		Tags:              []string{"business-default", "android"},
 		TaskTimeout:       1800,
 		HeartbeatInterval: 15,
@@ -137,8 +137,8 @@ func TestNewAgentWithConfig(t *testing.T) {
 		return &TaskResult{TaskID: task.TaskID, Success: true, Output: "done"}, nil
 	}
 	ag := New(cfg, handler)
-	if !strings.HasPrefix(ag.id, "agent-") {
-		t.Errorf("expected ephemeral id starting with 'agent-', got %s", ag.id)
+	if !strings.HasPrefix(ag.id, "guest-") {
+		t.Errorf("expected ephemeral id starting with 'guest-', got %s", ag.id)
 	}
 	if ag.config.TaskTimeout != 1800 {
 		t.Errorf("expected task_timeout 1800, got %d", ag.config.TaskTimeout)
@@ -148,8 +148,8 @@ func TestNewAgentWithConfig(t *testing.T) {
 	}
 }
 
-func TestNewAgentWithEmptyTags(t *testing.T) {
-	cfg := config.AgentConfig{ID: "test-agent", Name: "Test Agent", Tags: []string{}}
+func TestNewGuestWithEmptyTags(t *testing.T) {
+	cfg := config.GuestConfig{ID: "test-guest", Name: "Test Guest", Tags: []string{}}
 	handler := func(ctx context.Context, task TaskAssignment, _ LogCallback) (*TaskResult, error) {
 		return &TaskResult{TaskID: task.TaskID, Success: true}, nil
 	}
@@ -285,7 +285,7 @@ func TestLogCallbackSendsLine(t *testing.T) {
 
 // TestAgentStop verifies that Stop can be called safely.
 func TestAgentStop(t *testing.T) {
-	cfg := config.AgentConfig{ID: "test-agent", Name: "Test Agent", Tags: []string{"test"}}
+	cfg := config.GuestConfig{ID: "test-guest", Name: "Test Guest", Tags: []string{"test"}}
 	handler := func(ctx context.Context, task TaskAssignment, _ LogCallback) (*TaskResult, error) {
 		return &TaskResult{TaskID: task.TaskID, Success: true}, nil
 	}
@@ -298,7 +298,7 @@ func TestAgentStop(t *testing.T) {
 
 // TestAgentStopConcurrent verifies that concurrent Stop calls are safe.
 func TestAgentStopConcurrent(t *testing.T) {
-	cfg := config.AgentConfig{ID: "test-agent", Name: "Test Agent", Tags: []string{"test"}}
+	cfg := config.GuestConfig{ID: "test-guest", Name: "Test Guest", Tags: []string{"test"}}
 	handler := func(ctx context.Context, task TaskAssignment, _ LogCallback) (*TaskResult, error) {
 		return &TaskResult{TaskID: task.TaskID, Success: true}, nil
 	}

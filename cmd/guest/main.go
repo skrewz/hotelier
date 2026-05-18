@@ -8,12 +8,12 @@ import (
 	"os/signal"
 	"syscall"
 
-	"hotelier/pkg/agent"
 	"hotelier/pkg/config"
+	"hotelier/pkg/guest"
 )
 
 func main() {
-	configPath := flag.String("config", "config/agent.yaml", "path to agent configuration file")
+	configPath := flag.String("config", "config/guest.yaml", "path to guest configuration file")
 	debug := flag.Bool("debug", false, "enable RPC debug logging to stdout")
 	flag.Parse()
 
@@ -23,58 +23,58 @@ func main() {
 	}
 
 	// Load configuration
-	cfg, err := config.LoadAgentConfig(*configPath)
+	cfg, err := config.LoadGuestConfig(*configPath)
 	if err != nil {
 		if os.IsNotExist(err) {
 			log.Printf("config file not found, using defaults")
-			cfg = config.DefaultAgentConfig()
+			cfg = config.DefaultGuestConfig()
 		} else {
 			log.Fatalf("failed to load config: %v", err)
 		}
 	}
 
-	// Create the PI handler — the only execution mode for this agent
+	// Create the PI handler — the only execution mode for this guest
 	handler, cleanup := createPIHandler(cfg, *debug)
 
-	// Create agent
-	ag := agent.New(cfg, handler)
+	// Create guest
+	g := guest.New(cfg, handler)
 
 	// Handle graceful shutdown
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 
 	go func() {
-		if err := ag.Start(); err != nil {
-			log.Fatalf("agent error: %v", err)
+		if err := g.Start(); err != nil {
+			log.Fatalf("guest error: %v", err)
 		}
 	}()
 
-	log.Println("agent started")
+	log.Println("guest started")
 
 	// Wait for shutdown signal
 	<-sigCh
-	log.Println("shutting down agent...")
+	log.Println("shutting down guest...")
 
 	// Clean up handler resources (pi subprocess)
 	cleanup()
 
-	ag.Stop()
+	g.Stop()
 
-	log.Println("agent stopped")
+	log.Println("guest stopped")
 }
 
-func createPIHandler(cfg config.AgentConfig, debug bool) (agent.Handler, func()) {
+func createPIHandler(cfg config.GuestConfig, debug bool) (guest.Handler, func()) {
 	workDir := cfg.WorkingDir
 	if workDir == "" {
 		workDir = "/tmp/hotelier"
 	}
 
-	h := agent.NewPIHandlerDebug(workDir, "", "", "", debug)
+	h := guest.NewPIHandlerDebug(workDir, "", "", "", debug)
 	if err := h.Start(context.Background()); err != nil {
 		log.Fatalf("failed to start pi handler: %v", err)
 	}
 
-	handler := func(ctx context.Context, task agent.TaskAssignment, sendLog agent.LogCallback) (*agent.TaskResult, error) {
+	handler := func(ctx context.Context, task guest.TaskAssignment, sendLog guest.LogCallback) (*guest.TaskResult, error) {
 		return h.ExecuteTask(ctx, task, sendLog)
 	}
 

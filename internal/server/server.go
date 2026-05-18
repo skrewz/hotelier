@@ -62,7 +62,7 @@ func (s *TaskLogStore) Count(taskID string) int {
 	return len(s.logs[taskID])
 }
 
-// LogAccumulator buffers agent text deltas and flushes them as complete messages.
+// LogAccumulator buffers guest text deltas and flushes them as complete messages.
 // This prevents the UI from receiving hundreds of tiny fragments per response.
 type LogAccumulator struct {
 	mu          sync.Mutex
@@ -170,10 +170,10 @@ func (a *LogAccumulator) emitNow(taskID, line, level string, emit func(TaskLogEn
 	emit(entry)
 }
 
-// Server is the Check-In Host that orchestrates agents and tasks.
+// Server is the Check-In Host that orchestrates guests and tasks.
 type Server struct {
 	cfg            config.ServerConfig
-	registry       *registry.AgentRegistry
+	registry       *registry.GuestRegistry
 	taskQueue      *queue.TaskQueue
 	hub            *rpc.Hub
 	logStore       *TaskLogStore
@@ -193,7 +193,7 @@ func New(cfg config.ServerConfig) *Server {
 
 	s := &Server{
 		cfg:            cfg,
-		registry:       registry.NewAgentRegistry(cfg.MaxAgents, logger.Printf),
+		registry:       registry.NewGuestRegistry(cfg.MaxGuests, logger.Printf),
 		taskQueue:      queue.NewTaskQueue(logger.Printf),
 		hub:            rpc.NewHub(logger.Printf),
 		logStore:       NewTaskLogStore(),
@@ -227,20 +227,20 @@ func (s *Server) Start() error {
 	// Start the hub in the background
 	go s.hub.Run()
 
-	// Start stale agent cleanup
-	go s.staleAgentCleanup()
+	// Start stale guest cleanup
+	go s.staleGuestCleanup()
 
 	// Set up HTTP routes
 	mux := http.NewServeMux()
 
-	// WebSocket endpoint for agents
+	// WebSocket endpoint for guests
 	mux.HandleFunc("/ws", s.HandleWebSocket)
 
 	// REST API endpoints
 	mux.HandleFunc("/api/tasks", s.HandleTasks)
 	mux.HandleFunc("/api/tasks/", s.HandleTaskDetail)
-	mux.HandleFunc("/api/agents", s.HandleAgents)
-	mux.HandleFunc("/api/agents/", s.HandleAgentDetail)
+	mux.HandleFunc("/api/guests", s.HandleGuests)
+	mux.HandleFunc("/api/guests/", s.HandleGuestDetail)
 	mux.HandleFunc("/api/health", s.HandleHealth)
 	mux.HandleFunc("/api/logs", s.HandleLogs)
 	mux.HandleFunc("/api/logs/", s.HandleLogEntry)
@@ -260,8 +260,8 @@ func (s *Server) Stop(ctx context.Context) error {
 	return nil
 }
 
-// Registry returns the agent registry (for testing).
-func (s *Server) Registry() *registry.AgentRegistry {
+// Registry returns the guest registry (for testing).
+func (s *Server) Registry() *registry.GuestRegistry {
 	return s.registry
 }
 
@@ -291,21 +291,21 @@ func (s *Server) DiskLogStore() *logstore.LogStore {
 }
 
 func (s *Server) registerRPCMethods() {
-	// Agent → Host methods
-	s.hub.RegisterMethod("agent.register", s.handleAgentRegister)
-	s.hub.RegisterMethod("agent.unregister", s.handleAgentUnregister)
-	s.hub.RegisterMethod("agent.heartbeat", s.handleAgentHeartbeat)
-	s.hub.RegisterMethod("agent.log", s.handleAgentLog)
-	s.hub.RegisterMethod("agent.result", s.handleAgentResult)
+	// Guest → Host methods
+	s.hub.RegisterMethod("guest.register", s.handleGuestRegister)
+	s.hub.RegisterMethod("guest.unregister", s.handleGuestUnregister)
+	s.hub.RegisterMethod("guest.heartbeat", s.handleGuestHeartbeat)
+	s.hub.RegisterMethod("guest.log", s.handleGuestLog)
+	s.hub.RegisterMethod("guest.result", s.handleGuestResult)
 	s.hub.RegisterMethod("task.claim", s.handleTaskClaim)
 
-	// Host → Agent methods (pushed by scheduler)
+	// Host → Guest methods (pushed by scheduler)
 	s.hub.RegisterMethod("task.assign", s.handleTaskAssign)
 	s.hub.RegisterMethod("task.cancel", s.handleTaskCancel)
 }
 
-// handleAgentRegister handles agent registration.
-func (s *Server) handleAgentRegister(ctx context.Context, params json.RawMessage) (interface{}, *rpc.RPCError) {
+// handleGuestRegister handles guest registration.
+func (s *Server) handleGuestRegister(ctx context.Context, params json.RawMessage) (interface{}, *rpc.RPCError) {
 	var req struct {
 		ID   string   `json:"id"`
 		Name string   `json:"name"`
@@ -317,36 +317,36 @@ func (s *Server) handleAgentRegister(ctx context.Context, params json.RawMessage
 	}
 
 	if req.ID == "" {
-		return nil, rpc.InvalidParamsError("agent id is required")
+		return nil, rpc.InvalidParamsError("guest id is required")
 	}
 
-	agent, err := s.registry.Register(req.ID, req.Name, req.Tags)
+	guest, err := s.registry.Register(req.ID, req.Name, req.Tags)
 	if err != nil {
-		// Agent is already registered — update its connection and heartbeat.
-		// This handles the case where an agent crashes and reconnects with
+		// Guest is already registered — update its connection and heartbeat.
+		// This handles the case where a guest crashes and reconnects with
 		// the same ephemeral ID, or a previous registration was missed.
-		existing, exists := s.registry.GetAgent(req.ID)
+		existing, exists := s.registry.GetGuest(req.ID)
 		if exists {
 			existing.Name = req.Name
 			existing.Tags = req.Tags
 			existing.ConnectedAt = time.Now()
 			existing.LastHeartbeat = time.Now()
-			existing.State = registry.AgentStateIdle
+			existing.State = registry.GuestStateIdle
 
 			// Update the connection mapping
 			if connID, ok := rpc.ConnectionIDFromContext(ctx); ok {
-				s.hub.RegisterAgentConnection(req.ID, connID)
-				s.hub.SetConnectionRole(connID, rpc.ConnectionRoleAgent)
+				s.hub.RegisterGuestConnection(req.ID, connID)
+				s.hub.SetConnectionRole(connID, rpc.ConnectionRoleGuest)
 			}
 
-			s.log.Printf("agent re-registered: %s (tags: %v)", existing.ID, existing.Tags)
+			s.log.Printf("guest re-registered: %s (tags: %v)", existing.ID, existing.Tags)
 
 			// Try to assign a pending task
 			s.tryAssignTask(existing.ID)
 
 			return map[string]interface{}{
 				"status": "re-registered",
-				"agent": map[string]interface{}{
+				"guest": map[string]interface{}{
 					"id":   existing.ID,
 					"name": existing.Name,
 					"tags": existing.Tags,
@@ -356,29 +356,29 @@ func (s *Server) handleAgentRegister(ctx context.Context, params json.RawMessage
 		return nil, rpc.InternalError(err.Error())
 	}
 
-	// Record the agent-to-connection mapping so SendToAgent can find it
+	// Record the guest-to-connection mapping so SendToGuest can find it
 	if connID, ok := rpc.ConnectionIDFromContext(ctx); ok {
-		s.hub.RegisterAgentConnection(req.ID, connID)
-		s.hub.SetConnectionRole(connID, rpc.ConnectionRoleAgent)
+		s.hub.RegisterGuestConnection(req.ID, connID)
+		s.hub.SetConnectionRole(connID, rpc.ConnectionRoleGuest)
 	}
 
-	s.log.Printf("agent registered: %s (tags: %v)", agent.ID, agent.Tags)
+	s.log.Printf("guest registered: %s (tags: %v)", guest.ID, guest.Tags)
 
 	// Try to assign a pending task
-	s.tryAssignTask(agent.ID)
+	s.tryAssignTask(guest.ID)
 
 	return map[string]interface{}{
 		"status": "registered",
-		"agent": map[string]interface{}{
-			"id":   agent.ID,
-			"name": agent.Name,
-			"tags": agent.Tags,
+		"guest": map[string]interface{}{
+			"id":   guest.ID,
+			"name": guest.Name,
+			"tags": guest.Tags,
 		},
 	}, nil
 }
 
-// handleAgentUnregister handles agent unregistration.
-func (s *Server) handleAgentUnregister(ctx context.Context, params json.RawMessage) (interface{}, *rpc.RPCError) {
+// handleGuestUnregister handles guest unregistration.
+func (s *Server) handleGuestUnregister(ctx context.Context, params json.RawMessage) (interface{}, *rpc.RPCError) {
 	var req struct {
 		ID string `json:"id"`
 	}
@@ -391,13 +391,13 @@ func (s *Server) handleAgentUnregister(ctx context.Context, params json.RawMessa
 		return nil, rpc.InternalError(err.Error())
 	}
 
-	// Clean up the agent-connection mapping
-	s.hub.UnregisterAgentConnection(req.ID)
+	// Clean up the guest-connection mapping
+	s.hub.UnregisterGuestConnection(req.ID)
 
-	s.log.Printf("agent unregistered: %s", req.ID)
+	s.log.Printf("guest unregistered: %s", req.ID)
 
-	// If the agent had a running task, re-queue it
-	tasks := s.taskQueue.GetAgentTasks(req.ID)
+	// If the guest had a running task, re-queue it
+	tasks := s.taskQueue.GetGuestTasks(req.ID)
 	for _, task := range tasks {
 		if task.Status == queue.TaskStatusRunning || task.Status == queue.TaskStatusAssigned {
 			if err := s.taskQueue.UpdateStatus(task.ID, queue.TaskStatusPending); err != nil {
@@ -411,8 +411,8 @@ func (s *Server) handleAgentUnregister(ctx context.Context, params json.RawMessa
 	}, nil
 }
 
-// handleAgentHeartbeat handles agent heartbeat.
-func (s *Server) handleAgentHeartbeat(ctx context.Context, params json.RawMessage) (interface{}, *rpc.RPCError) {
+// handleGuestHeartbeat handles guest heartbeat.
+func (s *Server) handleGuestHeartbeat(ctx context.Context, params json.RawMessage) (interface{}, *rpc.RPCError) {
 	var req struct {
 		ID string `json:"id"`
 	}
@@ -430,8 +430,8 @@ func (s *Server) handleAgentHeartbeat(ctx context.Context, params json.RawMessag
 	}, nil
 }
 
-// handleAgentLog handles incoming log entries from agents.
-func (s *Server) handleAgentLog(ctx context.Context, params json.RawMessage) (interface{}, *rpc.RPCError) {
+// handleGuestLog handles incoming log entries from guests.
+func (s *Server) handleGuestLog(ctx context.Context, params json.RawMessage) (interface{}, *rpc.RPCError) {
 	var entry struct {
 		TaskID string `json:"task_id"`
 		Line   string `json:"line"`
@@ -476,8 +476,8 @@ func (s *Server) handleAgentLog(ctx context.Context, params json.RawMessage) (in
 	}, nil
 }
 
-// handleAgentResult handles task results from agents.
-func (s *Server) handleAgentResult(ctx context.Context, params json.RawMessage) (interface{}, *rpc.RPCError) {
+// handleGuestResult handles task results from guests.
+func (s *Server) handleGuestResult(ctx context.Context, params json.RawMessage) (interface{}, *rpc.RPCError) {
 	var result struct {
 		TaskID  string `json:"task_id"`
 		Success bool   `json:"success"`
@@ -513,10 +513,10 @@ func (s *Server) handleAgentResult(ctx context.Context, params json.RawMessage) 
 		})
 	})
 
-	// Find the agent that submitted this result and clear its task assignment
-	if agentID, exists := s.taskQueue.GetAssignedAgent(result.TaskID); exists {
-		if err := s.registry.ClearAgentTask(agentID); err != nil {
-			s.log.Printf("failed to clear agent task for %s: %v", agentID, err)
+	// Find the guest that submitted this result and clear its task assignment
+	if guestID, exists := s.taskQueue.GetAssignedGuest(result.TaskID); exists {
+		if err := s.registry.ClearGuestTask(guestID); err != nil {
+			s.log.Printf("failed to clear guest task for %s: %v", guestID, err)
 		}
 	}
 
@@ -534,7 +534,7 @@ func (s *Server) handleAgentResult(ctx context.Context, params json.RawMessage) 
 	}, nil
 }
 
-// handleTaskClaim handles an agent voluntarily claiming a pending task.
+// handleTaskClaim handles a guest voluntarily claiming a pending task.
 func (s *Server) handleTaskClaim(ctx context.Context, params json.RawMessage) (interface{}, *rpc.RPCError) {
 	var req struct {
 		ID   string   `json:"id"`
@@ -545,10 +545,10 @@ func (s *Server) handleTaskClaim(ctx context.Context, params json.RawMessage) (i
 		return nil, rpc.InvalidParamsError("invalid request parameters")
 	}
 
-	// Find a pending task that matches the agent's tags
-	agent, exists := s.registry.GetAgent(req.ID)
+	// Find a pending task that matches the guest's tags
+	guest, exists := s.registry.GetGuest(req.ID)
 	if !exists {
-		return nil, rpc.InvalidParamsError("agent not found")
+		return nil, rpc.InvalidParamsError("guest not found")
 	}
 
 	// Get pending tasks and find the first one that matches
@@ -560,8 +560,8 @@ func (s *Server) handleTaskClaim(ctx context.Context, params json.RawMessage) (i
 			matchedTask = task
 			break
 		}
-		// Check if agent has all required tags
-		if s.matchesTags(agent.Tags, task.Tags) {
+		// Check if guest has all required tags
+		if s.matchesTags(guest.Tags, task.Tags) {
 			matchedTask = task
 			break
 		}
@@ -578,11 +578,11 @@ func (s *Server) handleTaskClaim(ctx context.Context, params json.RawMessage) (i
 		return nil, rpc.InternalError(err.Error())
 	}
 
-	if err := s.registry.SetAgentTask(req.ID, matchedTask.ID); err != nil {
+	if err := s.registry.SetGuestTask(req.ID, matchedTask.ID); err != nil {
 		return nil, rpc.InternalError(err.Error())
 	}
 
-	// Push task to agent
+	// Push task to guest
 	taskData := map[string]interface{}{
 		"id":     matchedTask.ID,
 		"repos":  matchedTask.Repos,
@@ -590,11 +590,11 @@ func (s *Server) handleTaskClaim(ctx context.Context, params json.RawMessage) (i
 		"tags":   matchedTask.Tags,
 	}
 
-	if err := s.hub.SendToAgent(req.ID, "task.assign", taskData); err != nil {
-		s.log.Printf("failed to push task to agent %s: %v", req.ID, err)
+	if err := s.hub.SendToGuest(req.ID, "task.assign", taskData); err != nil {
+		s.log.Printf("failed to push task to guest %s: %v", req.ID, err)
 	}
 
-	s.log.Printf("task %s claimed by agent %s", matchedTask.ID, req.ID)
+	s.log.Printf("task %s claimed by guest %s", matchedTask.ID, req.ID)
 
 	return map[string]interface{}{
 		"status": "claimed",
@@ -607,28 +607,28 @@ func (s *Server) handleTaskClaim(ctx context.Context, params json.RawMessage) (i
 	}, nil
 }
 
-// handleTaskAssign is registered for host→agent task.assign (for completeness).
+// handleTaskAssign is registered for host→guest task.assign (for completeness).
 func (s *Server) handleTaskAssign(ctx context.Context, params json.RawMessage) (interface{}, *rpc.RPCError) {
 	return map[string]interface{}{
 		"status": "ok",
 	}, nil
 }
 
-// handleTaskCancel is registered for host→agent task.cancel (for completeness).
+// handleTaskCancel is registered for host→guest task.cancel (for completeness).
 func (s *Server) handleTaskCancel(ctx context.Context, params json.RawMessage) (interface{}, *rpc.RPCError) {
 	return map[string]interface{}{
 		"status": "ok",
 	}, nil
 }
 
-// tryAssignTask tries to assign a pending task to the given agent.
-func (s *Server) tryAssignTask(agentID string) {
-	agent, exists := s.registry.GetAgent(agentID)
+// tryAssignTask tries to assign a pending task to the given guest.
+func (s *Server) tryAssignTask(guestID string) {
+	guest, exists := s.registry.GetGuest(guestID)
 	if !exists {
 		return
 	}
 
-	// Find a pending task that matches the agent's tags
+	// Find a pending task that matches the guest's tags
 	pending := s.taskQueue.GetPendingTasks()
 	var matchedTask *queue.Task
 
@@ -637,7 +637,7 @@ func (s *Server) tryAssignTask(agentID string) {
 			matchedTask = task
 			break
 		}
-		if s.matchesTags(agent.Tags, task.Tags) {
+		if s.matchesTags(guest.Tags, task.Tags) {
 			matchedTask = task
 			break
 		}
@@ -648,17 +648,17 @@ func (s *Server) tryAssignTask(agentID string) {
 	}
 
 	// Assign the task
-	if err := s.taskQueue.Assign(matchedTask.ID, agentID); err != nil {
-		s.log.Printf("failed to assign task %s to agent %s: %v", matchedTask.ID, agentID, err)
+	if err := s.taskQueue.Assign(matchedTask.ID, guestID); err != nil {
+		s.log.Printf("failed to assign task %s to guest %s: %v", matchedTask.ID, guestID, err)
 		return
 	}
 
-	if err := s.registry.SetAgentTask(agentID, matchedTask.ID); err != nil {
-		s.log.Printf("failed to set agent task: %v", err)
+	if err := s.registry.SetGuestTask(guestID, matchedTask.ID); err != nil {
+		s.log.Printf("failed to set guest task: %v", err)
 		return
 	}
 
-	// Push task to agent
+	// Push task to guest
 	taskData := map[string]interface{}{
 		"id":     matchedTask.ID,
 		"repos":  matchedTask.Repos,
@@ -666,19 +666,19 @@ func (s *Server) tryAssignTask(agentID string) {
 		"tags":   matchedTask.Tags,
 	}
 
-	if err := s.hub.SendToAgent(agentID, "task.assign", taskData); err != nil {
-		s.log.Printf("failed to push task to agent %s: %v", agentID, err)
+	if err := s.hub.SendToGuest(guestID, "task.assign", taskData); err != nil {
+		s.log.Printf("failed to push task to guest %s: %v", guestID, err)
 		return
 	}
 
-	s.log.Printf("task %s assigned to agent %s", matchedTask.ID, agentID)
+	s.log.Printf("task %s assigned to guest %s", matchedTask.ID, guestID)
 }
 
-// staleAgentCleanup periodically removes stale agents and kills their running tasks.
-// When an agent's RPC connection has been silent for longer than SilenceTimeout,
-// the server sends a task.cancel RPC to the agent to abort the pi subprocess,
+// staleGuestCleanup periodically removes stale guests and kills their running tasks.
+// When a guest's RPC connection has been silent for longer than SilenceTimeout,
+// the server sends a task.cancel RPC to the guest to abort the pi subprocess,
 // then marks the task as failed and re-queues it.
-func (s *Server) staleAgentCleanup() {
+func (s *Server) staleGuestCleanup() {
 	interval := time.Duration(s.cfg.HeartbeatInterval) * time.Second
 	if interval == 0 {
 		interval = 30 * time.Second
@@ -690,45 +690,45 @@ func (s *Server) staleAgentCleanup() {
 	for {
 		select {
 		case <-ticker.C:
-			// First: kill running tasks for agents that have been silent too long.
-			// This runs before stale agent removal so we can send task.cancel.
-			s.checkSilentAgents()
+			// First: kill running tasks for guests that have been silent too long.
+			// This runs before stale guest removal so we can send task.cancel.
+			s.checkSilentGuests()
 
-			// Then: remove agents that have been completely silent (no heartbeat).
-			stale := s.registry.RemoveStaleAgents(time.Duration(s.cfg.HeartbeatInterval) * time.Second)
-			for _, agent := range stale {
-				s.log.Printf("stale agent removed: %s", agent.ID)
+			// Then: Remove guests that have been completely silent (no heartbeat).
+			stale := s.registry.RemoveStaleGuests(time.Duration(s.cfg.HeartbeatInterval) * time.Second)
+			for _, guest := range stale {
+				s.log.Printf("stale guest removed: %s", guest.ID)
 			}
 		}
 	}
 }
 
-// checkSilentAgents finds agents that have been silent (no heartbeat) for longer
+// checkSilentGuests finds guests that have been silent (no heartbeat) for longer
 // than the configured SilenceTimeout and kills their running tasks.
-func (s *Server) checkSilentAgents() {
+func (s *Server) checkSilentGuests() {
 	timeout := time.Duration(s.cfg.SilenceTimeout) * time.Second
 	if timeout == 0 {
 		return // Silence detection disabled
 	}
 
 	now := time.Now()
-	for _, agent := range s.registry.GetAllAgents() {
-		if agent.TaskID == "" {
+	for _, guest := range s.registry.GetAllGuests() {
+		if guest.TaskID == "" {
 			continue // Not running a task
 		}
 
-		if now.Sub(agent.LastHeartbeat) > timeout {
-			s.log.Printf("agent %s silent for %v, killing task %s",
-				agent.ID, now.Sub(agent.LastHeartbeat), agent.TaskID)
+		if now.Sub(guest.LastHeartbeat) > timeout {
+			s.log.Printf("guest %s silent for %v, killing task %s",
+				guest.ID, now.Sub(guest.LastHeartbeat), guest.TaskID)
 
 			// Mark the task as failed in the queue
-			if err := s.taskQueue.Fail(agent.TaskID, fmt.Sprintf("agent went silent for %.0f seconds", now.Sub(agent.LastHeartbeat).Seconds())); err != nil {
-				s.log.Printf("failed to mark task %s as failed: %v", agent.TaskID, err)
+			if err := s.taskQueue.Fail(guest.TaskID, fmt.Sprintf("guest went silent for %.0f seconds", now.Sub(guest.LastHeartbeat).Seconds())); err != nil {
+				s.log.Printf("failed to mark task %s as failed: %v", guest.TaskID, err)
 			}
 
-			// Clear the agent's task assignment
-			if err := s.registry.KillRunningAgentTask(agent.ID); err != nil {
-				s.log.Printf("failed to kill agent %s task: %v", agent.ID, err)
+			// Clear the guest's task assignment
+			if err := s.registry.KillRunningGuestTask(guest.ID); err != nil {
+				s.log.Printf("failed to kill guest %s task: %v", guest.ID, err)
 			}
 
 			// Notify the UI
@@ -736,30 +736,30 @@ func (s *Server) checkSilentAgents() {
 				JSONRPC: "2.0",
 				Method:  "task.updated",
 				Params: json.RawMessage(fmt.Sprintf(`{"task_id":"%s","status":"failed"}`,
-					agent.TaskID)),
+					guest.TaskID)),
 			})
 
-			// Send task.cancel RPC to the agent to abort the pi subprocess.
-			// This is best-effort — the agent may already be disconnected.
+			// Send task.cancel RPC to the guest to abort the pi subprocess.
+			// This is best-effort — the guest may already be disconnected.
 			cancelParams := map[string]interface{}{
-				"task_id": agent.TaskID,
-				"reason":  "agent silence timeout",
+				"task_id": guest.TaskID,
+				"reason":  "guest silence timeout",
 			}
-			if err := s.hub.SendToAgent(agent.ID, "task.cancel", cancelParams); err != nil {
-				s.log.Printf("failed to send task.cancel to agent %s: %v (agent may be disconnected)", agent.ID, err)
+			if err := s.hub.SendToGuest(guest.ID, "task.cancel", cancelParams); err != nil {
+				s.log.Printf("failed to send task.cancel to guest %s: %v (guest may be disconnected)", guest.ID, err)
 			}
 		}
 	}
 }
 
-// matchesTags checks if agent tags match required tags.
-func (s *Server) matchesTags(agentTags, requiredTags []string) bool {
+// matchesTags checks if guest tags match required tags.
+func (s *Server) matchesTags(guestTags, requiredTags []string) bool {
 	if len(requiredTags) == 0 {
 		return true
 	}
 
-	tagSet := make(map[string]struct{}, len(agentTags))
-	for _, tag := range agentTags {
+	tagSet := make(map[string]struct{}, len(guestTags))
+	for _, tag := range guestTags {
 		tagSet[tag] = struct{}{}
 	}
 
@@ -783,7 +783,7 @@ func (s *Server) HandleWebSocket(w http.ResponseWriter, r *http.Request) {
 	// Generate a unique connection ID
 	connID := fmt.Sprintf("conn-%d", time.Now().UnixNano())
 	client := s.hub.NewConnection(connID, conn)
-	// Default to browser role; agent role is set after agent.register RPC
+	// Default to browser role; guest role is set after guest.register RPC
 	s.hub.SetConnectionRole(connID, rpc.ConnectionRoleBrowser)
 	go client.ReadLoop()
 	go client.WriteLoop()
@@ -817,7 +817,7 @@ func (s *Server) HandleHealth(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]interface{}{
 		"status": "healthy",
-		"agents": s.registry.Count(),
+		"guests": s.registry.Count(),
 		"tasks":  s.taskQueue.Count(),
 	})
 }
@@ -861,10 +861,10 @@ func (s *Server) handleCreateTask(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Try to assign to an available agent
-	agents := s.registry.FindAvailableAgents(task.Tags)
-	if len(agents) > 0 {
-		s.tryAssignTask(agents[0].ID)
+	// Try to assign to an available guest
+	guests := s.registry.FindAvailableGuests(task.Tags)
+	if len(guests) > 0 {
+		s.tryAssignTask(guests[0].ID)
 	}
 
 	w.Header().Set("Content-Type", "application/json")
@@ -897,40 +897,40 @@ func (s *Server) HandleTaskDetail(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// handleAgents handles the /api/agents endpoint.
-// HandleAgents handles the /api/agents endpoint.
-func (s *Server) HandleAgents(w http.ResponseWriter, r *http.Request) {
+// handleGuests handles the /api/guests endpoint.
+// HandleGuests handles the /api/guests endpoint.
+func (s *Server) HandleGuests(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 
 	switch r.Method {
 	case http.MethodGet:
-		agents := s.registry.GetAllAgents()
+		guests := s.registry.GetAllGuests()
 		json.NewEncoder(w).Encode(map[string]interface{}{
-			"agents": agents,
-			"count":  len(agents),
+			"guests": guests,
+			"count":  len(guests),
 		})
 	default:
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 	}
 }
 
-// handleAgentDetail handles the /api/agents/:id endpoint.
-// HandleAgentDetail handles the /api/agents/:id endpoint.
-func (s *Server) HandleAgentDetail(w http.ResponseWriter, r *http.Request) {
-	agentID := r.URL.Path[len("/api/agents/"):]
-	if agentID == "" {
-		http.Error(w, "agent id required", http.StatusBadRequest)
+// handleGuestDetail handles the /api/guests/:id endpoint.
+// HandleGuestDetail handles the /api/guests/:id endpoint.
+func (s *Server) HandleGuestDetail(w http.ResponseWriter, r *http.Request) {
+	guestID := r.URL.Path[len("/api/guests/"):]
+	if guestID == "" {
+		http.Error(w, "guest id required", http.StatusBadRequest)
 		return
 	}
 
-	agent, exists := s.registry.GetAgent(agentID)
+	guest, exists := s.registry.GetGuest(guestID)
 	if !exists {
-		http.Error(w, "agent not found", http.StatusNotFound)
+		http.Error(w, "guest not found", http.StatusNotFound)
 		return
 	}
 
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(agent)
+	json.NewEncoder(w).Encode(guest)
 }
 
 // HandleLogs handles the /api/logs endpoint — returns a list of date directories.

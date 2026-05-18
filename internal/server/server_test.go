@@ -315,39 +315,39 @@ func TestHandleTaskDetail_EmptyID(t *testing.T) {
 	}
 }
 
-// Agent listing tests
-func TestHandleAgents_GET(t *testing.T) {
+// Guest listing tests
+func TestHandleGuests_GET(t *testing.T) {
 	srv := newTestServer(t)
 
-	// Register some agents
-	srv.Registry().Register("agent-1", "Agent One", []string{"tag1"})
-	srv.Registry().Register("agent-2", "Agent Two", []string{"tag2"})
+	// Register some guests
+	srv.Registry().Register("guest-1", "Guest One", []string{"tag1"})
+	srv.Registry().Register("guest-2", "Guest Two", []string{"tag2"})
 
-	req := httptest.NewRequest(http.MethodGet, "/api/agents", nil)
+	req := httptest.NewRequest(http.MethodGet, "/api/guests", nil)
 	w := httptest.NewRecorder()
-	srv.HandleAgents(w, req)
+	srv.HandleGuests(w, req)
 
 	if w.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d", w.Code)
 	}
 
 	var response struct {
-		Agents []registry.Agent `json:"agents"`
+		Guests []registry.Guest `json:"guests"`
 		Count  int              `json:"count"`
 	}
 	json.Unmarshal(w.Body.Bytes(), &response)
 
 	if response.Count != 2 {
-		t.Errorf("expected 2 agents, got %d", response.Count)
+		t.Errorf("expected 2 guests, got %d", response.Count)
 	}
 }
 
-func TestHandleAgents_GET_Empty(t *testing.T) {
+func TestHandleGuests_GET_Empty(t *testing.T) {
 	srv := newTestServer(t)
 
-	req := httptest.NewRequest(http.MethodGet, "/api/agents", nil)
+	req := httptest.NewRequest(http.MethodGet, "/api/guests", nil)
 	w := httptest.NewRecorder()
-	srv.HandleAgents(w, req)
+	srv.HandleGuests(w, req)
 
 	if w.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d", w.Code)
@@ -359,52 +359,52 @@ func TestHandleAgents_GET_Empty(t *testing.T) {
 	json.Unmarshal(w.Body.Bytes(), &response)
 
 	if response.Count != 0 {
-		t.Errorf("expected 0 agents, got %d", response.Count)
+		t.Errorf("expected 0 guests, got %d", response.Count)
 	}
 }
 
-// Agent detail tests
-func TestHandleAgentDetail(t *testing.T) {
+// Guest detail tests
+func TestHandleGuestDetail(t *testing.T) {
 	srv := newTestServer(t)
 
-	srv.Registry().Register("agent-1", "Agent One", []string{"tag1"})
+	srv.Registry().Register("guest-1", "Guest One", []string{"tag1"})
 
-	req := httptest.NewRequest(http.MethodGet, "/api/agents/agent-1", nil)
+	req := httptest.NewRequest(http.MethodGet, "/api/guests/guest-1", nil)
 	w := httptest.NewRecorder()
-	srv.HandleAgentDetail(w, req)
+	srv.HandleGuestDetail(w, req)
 
 	if w.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d", w.Code)
 	}
 
-	var agent registry.Agent
-	if err := json.Unmarshal(w.Body.Bytes(), &agent); err != nil {
+	var guest registry.Guest
+	if err := json.Unmarshal(w.Body.Bytes(), &guest); err != nil {
 		t.Fatalf("failed to unmarshal: %v", err)
 	}
 
-	if agent.ID != "agent-1" {
-		t.Errorf("expected agent ID 'agent-1', got %s", agent.ID)
+	if guest.ID != "guest-1" {
+		t.Errorf("expected guest ID 'guest-1', got %s", guest.ID)
 	}
 }
 
-func TestHandleAgentDetail_NotFound(t *testing.T) {
+func TestHandleGuestDetail_NotFound(t *testing.T) {
 	srv := newTestServer(t)
 
-	req := httptest.NewRequest(http.MethodGet, "/api/agents/nonexistent", nil)
+	req := httptest.NewRequest(http.MethodGet, "/api/guests/nonexistent", nil)
 	w := httptest.NewRecorder()
-	srv.HandleAgentDetail(w, req)
+	srv.HandleGuestDetail(w, req)
 
 	if w.Code != http.StatusNotFound {
 		t.Errorf("expected 404, got %d", w.Code)
 	}
 }
 
-func TestHandleAgentDetail_EmptyID(t *testing.T) {
+func TestHandleGuestDetail_EmptyID(t *testing.T) {
 	srv := newTestServer(t)
 
-	req := httptest.NewRequest(http.MethodGet, "/api/agents/", nil)
+	req := httptest.NewRequest(http.MethodGet, "/api/guests/", nil)
 	w := httptest.NewRecorder()
-	srv.HandleAgentDetail(w, req)
+	srv.HandleGuestDetail(w, req)
 
 	if w.Code != http.StatusBadRequest {
 		t.Errorf("expected 400, got %d", w.Code)
@@ -426,16 +426,16 @@ func TestHandleTasks_MethodNotAllowed(t *testing.T) {
 	}
 }
 
-func TestHandleAgents_MethodNotAllowed(t *testing.T) {
+func TestHandleGuests_MethodNotAllowed(t *testing.T) {
 	srv := newTestServer(t)
 
 	for _, method := range []string{"PUT", "DELETE", "PATCH", "POST"} {
-		req := httptest.NewRequest(method, "/api/agents", nil)
+		req := httptest.NewRequest(method, "/api/guests", nil)
 		w := httptest.NewRecorder()
-		srv.HandleAgents(w, req)
+		srv.HandleGuests(w, req)
 
 		if w.Code != http.StatusMethodNotAllowed {
-			t.Errorf("%s /api/agents: expected 405, got %d", method, w.Code)
+			t.Errorf("%s /api/guests: expected 405, got %d", method, w.Code)
 		}
 	}
 }
@@ -459,7 +459,7 @@ func TestHandleTasks_TaskAssignment(t *testing.T) {
 	json.Unmarshal(w.Body.Bytes(), &createdTask)
 
 	// Assign the task
-	err := srv.TaskQueue().Assign(createdTask.ID, "agent-1")
+	err := srv.TaskQueue().Assign(createdTask.ID, "guest-1")
 	if err != nil {
 		t.Fatalf("assign failed: %v", err)
 	}
@@ -468,8 +468,8 @@ func TestHandleTasks_TaskAssignment(t *testing.T) {
 	if taskData.Status != queue.TaskStatusAssigned {
 		t.Errorf("expected ASSIGNED, got %s", taskData.Status)
 	}
-	if taskData.AssignedTo != "agent-1" {
-		t.Errorf("expected assigned to agent-1, got %s", taskData.AssignedTo)
+	if taskData.AssignedTo != "guest-1" {
+		t.Errorf("expected assigned to guest-1, got %s", taskData.AssignedTo)
 	}
 }
 
@@ -490,7 +490,7 @@ func TestHandleTasks_TaskCompletion(t *testing.T) {
 	var createdTask queue.Task
 	json.Unmarshal(w.Body.Bytes(), &createdTask)
 
-	srv.TaskQueue().Assign(createdTask.ID, "agent-1")
+	srv.TaskQueue().Assign(createdTask.ID, "guest-1")
 	srv.TaskQueue().Start(createdTask.ID)
 	srv.TaskQueue().Complete(createdTask.ID, "all tests pass")
 
@@ -519,7 +519,7 @@ func TestHandleTasks_TaskFailure(t *testing.T) {
 	var createdTask queue.Task
 	json.Unmarshal(w.Body.Bytes(), &createdTask)
 
-	srv.TaskQueue().Assign(createdTask.ID, "agent-1")
+	srv.TaskQueue().Assign(createdTask.ID, "guest-1")
 	srv.TaskQueue().Start(createdTask.ID)
 	srv.TaskQueue().Fail(createdTask.ID, "build failed")
 
@@ -532,160 +532,160 @@ func TestHandleTasks_TaskFailure(t *testing.T) {
 	}
 }
 
-// Agent lifecycle tests
-func TestRegistry_RegisterAgent(t *testing.T) {
+// Guest lifecycle tests
+func TestRegistry_RegisterGuest(t *testing.T) {
 	srv := newTestServer(t)
 
-	agent, err := srv.Registry().Register("test-agent", "Test Agent", []string{"business-default"})
+	guest, err := srv.Registry().Register("test-guest", "Test Guest", []string{"business-default"})
 	if err != nil {
 		t.Fatalf("register failed: %v", err)
 	}
 
-	if agent.ID != "test-agent" {
-		t.Errorf("expected id 'test-agent', got %s", agent.ID)
+	if guest.ID != "test-guest" {
+		t.Errorf("expected id 'test-guest', got %s", guest.ID)
 	}
-	if agent.Name != "Test Agent" {
-		t.Errorf("expected name 'Test Agent', got %s", agent.Name)
+	if guest.Name != "Test Guest" {
+		t.Errorf("expected name 'Test Guest', got %s", guest.Name)
 	}
-	if agent.State != registry.AgentStateIdle {
-		t.Errorf("expected IDLE state, got %s", agent.State)
+	if guest.State != registry.GuestStateIdle {
+		t.Errorf("expected IDLE state, got %s", guest.State)
 	}
 }
 
-func TestRegistry_DuplicateAgent(t *testing.T) {
+func TestRegistry_DuplicateGuest(t *testing.T) {
 	srv := newTestServer(t)
 
-	_, err := srv.Registry().Register("dup-agent", "Agent", []string{"tag"})
+	_, err := srv.Registry().Register("dup-guest", "Guest", []string{"tag"})
 	if err != nil {
 		t.Fatalf("first register failed: %v", err)
 	}
 
-	_, err = srv.Registry().Register("dup-agent", "Agent 2", []string{"tag2"})
+	_, err = srv.Registry().Register("dup-guest", "Guest 2", []string{"tag2"})
 	if err == nil {
-		t.Error("expected error for duplicate agent ID")
+		t.Error("expected error for duplicate guest ID")
 	}
 }
 
-func TestRegistry_MaxAgents(t *testing.T) {
-	cfg := config.ServerConfig{Host: "127.0.0.1", Port: 0, MaxAgents: 2}
+func TestRegistry_MaxGuests(t *testing.T) {
+	cfg := config.ServerConfig{Host: "127.0.0.1", Port: 0, MaxGuests: 2}
 	srv := New(cfg)
 
-	_, err := srv.Registry().Register("agent-1", "Agent 1", []string{"tag"})
+	_, err := srv.Registry().Register("guest-1", "Guest 1", []string{"tag"})
 	if err != nil {
 		t.Fatalf("first register failed: %v", err)
 	}
 
-	_, err = srv.Registry().Register("agent-2", "Agent 2", []string{"tag"})
+	_, err = srv.Registry().Register("guest-2", "Guest 2", []string{"tag"})
 	if err != nil {
 		t.Fatalf("second register failed: %v", err)
 	}
 
-	_, err = srv.Registry().Register("agent-3", "Agent 3", []string{"tag"})
+	_, err = srv.Registry().Register("guest-3", "Guest 3", []string{"tag"})
 	if err == nil {
-		t.Error("expected error when max agents reached")
+		t.Error("expected error when max guests reached")
 	}
 }
 
 func TestRegistry_Heartbeat(t *testing.T) {
 	srv := newTestServer(t)
 
-	srv.Registry().Register("hb-agent", "HB Agent", []string{"tag"})
+	srv.Registry().Register("hb-guest", "HB Guest", []string{"tag"})
 
-	err := srv.Registry().Heartbeat("hb-agent")
+	err := srv.Registry().Heartbeat("hb-guest")
 	if err != nil {
 		t.Fatalf("heartbeat failed: %v", err)
 	}
 
-	agent, ok := srv.Registry().GetAgent("hb-agent")
+	guest, ok := srv.Registry().GetGuest("hb-guest")
 	if !ok {
-		t.Fatal("agent not found after heartbeat")
+		t.Fatal("guest not found after heartbeat")
 	}
-	if agent.State != registry.AgentStateIdle {
-		t.Errorf("expected IDLE, got %s", agent.State)
+	if guest.State != registry.GuestStateIdle {
+		t.Errorf("expected IDLE, got %s", guest.State)
 	}
 }
 
-func TestRegistry_UnregisterAgent(t *testing.T) {
+func TestRegistry_UnregisterGuest(t *testing.T) {
 	srv := newTestServer(t)
 
-	srv.Registry().Register("unreg-agent", "Unreg Agent", []string{"tag"})
+	srv.Registry().Register("unreg-guest", "Unreg Guest", []string{"tag"})
 
-	err := srv.Registry().Unregister("unreg-agent")
+	err := srv.Registry().Unregister("unreg-guest")
 	if err != nil {
 		t.Fatalf("unregister failed: %v", err)
 	}
 
-	_, ok := srv.Registry().GetAgent("unreg-agent")
+	_, ok := srv.Registry().GetGuest("unreg-guest")
 	if ok {
-		t.Error("agent should not exist after unregister")
+		t.Error("guest should not exist after unregister")
 	}
 }
 
-func TestRegistry_UnregisterRunningAgent(t *testing.T) {
+func TestRegistry_UnregisterRunningGuest(t *testing.T) {
 	srv := newTestServer(t)
 
-	srv.Registry().Register("running-agent", "Running Agent", []string{"tag"})
-	srv.Registry().SetAgentTask("running-agent", "task-1")
+	srv.Registry().Register("running-guest", "Running Guest", []string{"tag"})
+	srv.Registry().SetGuestTask("running-guest", "task-1")
 
-	err := srv.Registry().Unregister("running-agent")
+	err := srv.Registry().Unregister("running-guest")
 	if err == nil {
-		t.Error("expected error when unregistering running agent")
+		t.Error("expected error when unregistering running guest")
 	}
 }
 
-func TestRegistry_FindAvailableAgents(t *testing.T) {
+func TestRegistry_FindAvailableGuests(t *testing.T) {
 	srv := newTestServer(t)
 
-	srv.Registry().Register("agent-1", "Agent 1", []string{"business-default", "frontend"})
-	srv.Registry().Register("agent-2", "Agent 2", []string{"android"})
-	srv.Registry().Register("agent-3", "Agent 3", []string{"business-default"})
+	srv.Registry().Register("guest-1", "Guest 1", []string{"business-default", "frontend"})
+	srv.Registry().Register("guest-2", "Guest 2", []string{"android"})
+	srv.Registry().Register("guest-3", "Guest 3", []string{"business-default"})
 
-	// Find agents with business-default tag
-	agents := srv.Registry().FindAvailableAgents([]string{"business-default"})
-	if len(agents) != 2 {
-		t.Errorf("expected 2 agents with business-default, got %d", len(agents))
+	// Find guests with business-default tag
+	guests := srv.Registry().FindAvailableGuests([]string{"business-default"})
+	if len(guests) != 2 {
+		t.Errorf("expected 2 guests with business-default, got %d", len(guests))
 	}
 
-	// Find agents with android tag
-	agents = srv.Registry().FindAvailableAgents([]string{"android"})
-	if len(agents) != 1 {
-		t.Errorf("expected 1 agent with android, got %d", len(agents))
+	// Find guests with android tag
+	guests = srv.Registry().FindAvailableGuests([]string{"android"})
+	if len(guests) != 1 {
+		t.Errorf("expected 1 guest with android, got %d", len(guests))
 	}
 
-	// No agents match nonexistent tag
-	agents = srv.Registry().FindAvailableAgents([]string{"nonexistent"})
-	if len(agents) != 0 {
-		t.Errorf("expected 0 agents for nonexistent tag, got %d", len(agents))
+	// No guests match nonexistent tag
+	guests = srv.Registry().FindAvailableGuests([]string{"nonexistent"})
+	if len(guests) != 0 {
+		t.Errorf("expected 0 guests for nonexistent tag, got %d", len(guests))
 	}
 }
 
-func TestRegistry_HasAgentWithTags(t *testing.T) {
+func TestRegistry_HasGuestWithTags(t *testing.T) {
 	srv := newTestServer(t)
 
-	srv.Registry().Register("agent-1", "Agent 1", []string{"business-default"})
+	srv.Registry().Register("guest-1", "Guest 1", []string{"business-default"})
 
-	if !srv.Registry().HasAgentWithTags([]string{"business-default"}) {
-		t.Error("expected to have agent with business-default")
+	if !srv.Registry().HasGuestWithTags([]string{"business-default"}) {
+		t.Error("expected to have guest with business-default")
 	}
 
-	if srv.Registry().HasAgentWithTags([]string{"android"}) {
-		t.Error("expected not to have agent with android")
+	if srv.Registry().HasGuestWithTags([]string{"android"}) {
+		t.Error("expected not to have guest with android")
 	}
 }
 
-func TestRegistry_RemoveStaleAgents(t *testing.T) {
+func TestRegistry_RemoveStaleGuests(t *testing.T) {
 	srv := newTestServer(t)
 
-	srv.Registry().Register("stale-agent", "Stale Agent", []string{"tag"})
+	srv.Registry().Register("stale-guest", "Stale Guest", []string{"tag"})
 	time.Sleep(20 * time.Millisecond)
-	srv.Registry().Register("fresh-agent", "Fresh Agent", []string{"tag"})
+	srv.Registry().Register("fresh-guest", "Fresh Guest", []string{"tag"})
 
-	stale := srv.Registry().RemoveStaleAgents(10 * time.Millisecond)
+	stale := srv.Registry().RemoveStaleGuests(10 * time.Millisecond)
 	if len(stale) != 1 {
-		t.Errorf("expected 1 stale agent, got %d", len(stale))
+		t.Errorf("expected 1 stale guest, got %d", len(stale))
 	}
-	if len(stale) > 0 && stale[0].ID != "stale-agent" {
-		t.Errorf("expected stale-agent, got %s", stale[0].ID)
+	if len(stale) > 0 && stale[0].ID != "stale-guest" {
+		t.Errorf("expected stale-guest, got %s", stale[0].ID)
 	}
 }
 
@@ -730,7 +730,7 @@ func TestTaskQueue_GetPendingTasks(t *testing.T) {
 
 	srv.TaskQueue().Add(&queue.Task{ID: "task-1", Prompt: "Task 1"})
 	srv.TaskQueue().Add(&queue.Task{ID: "task-2", Prompt: "Task 2"})
-	srv.TaskQueue().Assign("task-1", "agent-1")
+	srv.TaskQueue().Assign("task-1", "guest-1")
 
 	pending := srv.TaskQueue().GetPendingTasks()
 	if len(pending) != 1 {
@@ -761,7 +761,7 @@ func TestTaskQueue_NextPendingTaskForTags(t *testing.T) {
 	}
 
 	// Assign task-1 so it's no longer pending
-	srv.TaskQueue().Assign("task-1", "agent-1")
+	srv.TaskQueue().Assign("task-1", "guest-1")
 
 	// Require frontend - should get task-2
 	task = srv.TaskQueue().NextPendingTaskForTags([]string{"frontend"})
@@ -782,8 +782,8 @@ func TestTaskQueue_CountByStatus(t *testing.T) {
 	srv.TaskQueue().Add(&queue.Task{ID: "task-1", Prompt: "Task 1"})
 	srv.TaskQueue().Add(&queue.Task{ID: "task-2", Prompt: "Task 2"})
 	srv.TaskQueue().Add(&queue.Task{ID: "task-3", Prompt: "Task 3"})
-	srv.TaskQueue().Assign("task-1", "agent-1")
-	srv.TaskQueue().Assign("task-2", "agent-1")
+	srv.TaskQueue().Assign("task-1", "guest-1")
+	srv.TaskQueue().Assign("task-2", "guest-1")
 	srv.TaskQueue().Start("task-2")
 
 	if srv.TaskQueue().CountByStatus(queue.TaskStatusPending) != 1 {
@@ -887,26 +887,26 @@ func TestHandleTasks_GET_StatusIsString(t *testing.T) {
 	}
 }
 
-// Agent state serialization tests
-func TestHandleAgents_GET_StateIsString(t *testing.T) {
+// Guest state serialization tests
+func TestHandleGuests_GET_StateIsString(t *testing.T) {
 	srv := newTestServer(t)
 
-	// Register agents with different states
-	srv.Registry().Register("agent-1", "Idle Agent", []string{"tag1"})
-	srv.Registry().Register("agent-2", "Running Agent", []string{"tag2"})
-	srv.Registry().SetAgentState("agent-2", registry.AgentStateRunning)
+	// Register guests with different states
+	srv.Registry().Register("guest-1", "Idle Guest", []string{"tag1"})
+	srv.Registry().Register("guest-2", "Running Guest", []string{"tag2"})
+	srv.Registry().SetGuestState("guest-2", registry.GuestStateRunning)
 
-	// List agents
-	req := httptest.NewRequest(http.MethodGet, "/api/agents", nil)
+	// List guests
+	req := httptest.NewRequest(http.MethodGet, "/api/guests", nil)
 	w := httptest.NewRecorder()
-	srv.HandleAgents(w, req)
+	srv.HandleGuests(w, req)
 
 	if w.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d", w.Code)
 	}
 
 	var response struct {
-		Agents []map[string]interface{} `json:"agents"`
+		Guests []map[string]interface{} `json:"guests"`
 		Count  int                      `json:"count"`
 	}
 	if err := json.Unmarshal(w.Body.Bytes(), &response); err != nil {
@@ -914,43 +914,43 @@ func TestHandleAgents_GET_StateIsString(t *testing.T) {
 	}
 
 	if response.Count != 2 {
-		t.Fatalf("expected 2 agents, got %d", response.Count)
+		t.Fatalf("expected 2 guests, got %d", response.Count)
 	}
 
-	// Each agent's state must be a string, not an integer
-	for i, agent := range response.Agents {
-		state, ok := agent["state"]
+	// Each guest's state must be a string, not an integer
+	for i, guest := range response.Guests {
+		state, ok := guest["state"]
 		if !ok {
-			t.Fatalf("agent %d: expected 'state' field", i)
+			t.Fatalf("guest %d: expected 'state' field", i)
 		}
 		if _, isString := state.(string); !isString {
-			t.Errorf("agent %d: expected state to be a string, got %T: %v", i, state, state)
+			t.Errorf("guest %d: expected state to be a string, got %T: %v", i, state, state)
 		}
 	}
 }
 
-func TestHandleAgentDetail_StateIsString(t *testing.T) {
+func TestHandleGuestDetail_StateIsString(t *testing.T) {
 	srv := newTestServer(t)
 
-	srv.Registry().Register("detail-agent", "Detail Agent", []string{"tag1"})
-	srv.Registry().SetAgentState("detail-agent", registry.AgentStateRunning)
+	srv.Registry().Register("detail-guest", "Detail Guest", []string{"tag1"})
+	srv.Registry().SetGuestState("detail-guest", registry.GuestStateRunning)
 
-	req := httptest.NewRequest(http.MethodGet, "/api/agents/detail-agent", nil)
+	req := httptest.NewRequest(http.MethodGet, "/api/guests/detail-guest", nil)
 	w := httptest.NewRecorder()
-	srv.HandleAgentDetail(w, req)
+	srv.HandleGuestDetail(w, req)
 
 	if w.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d", w.Code)
 	}
 
-	var agent map[string]interface{}
-	if err := json.Unmarshal(w.Body.Bytes(), &agent); err != nil {
+	var guest map[string]interface{}
+	if err := json.Unmarshal(w.Body.Bytes(), &guest); err != nil {
 		t.Fatalf("failed to unmarshal: %v", err)
 	}
 
-	state, ok := agent["state"]
+	state, ok := guest["state"]
 	if !ok {
-		t.Fatal("expected 'state' field in agent detail")
+		t.Fatal("expected 'state' field in guest detail")
 	}
 	if _, isString := state.(string); !isString {
 		t.Errorf("expected state to be a string, got %T: %v", state, state)
@@ -986,14 +986,14 @@ func TestHandleWebSocket(t *testing.T) {
 	}
 }
 
-// Agent connection mapping tests
-func TestHandleAgentRegister_ConnectionMapping(t *testing.T) {
+// Guest connection mapping tests
+func TestHandleGuestRegister_ConnectionMapping(t *testing.T) {
 	srv := newTestServer(t)
 	hub := srv.Hub()
 
 	go hub.Run()
 
-	// Simulate agent.register via a real WebSocket connection
+	// Simulate guest.register via a real WebSocket connection
 	// We need to register a connection first, then dispatch
 	// Since Dispatch() doesn't have a connection context, we need to
 	// use the hub's internal mechanism. Let's create a mock connection.
@@ -1003,19 +1003,19 @@ func TestHandleAgentRegister_ConnectionMapping(t *testing.T) {
 	hub.Register(conn)
 	time.Sleep(10 * time.Millisecond)
 
-	// Now dispatch agent.register — this should record the mapping
+	// Now dispatch guest.register — this should record the mapping
 	params, _ := json.Marshal(map[string]interface{}{
-		"id":   "map-test-agent",
-		"name": "Map Test Agent",
+		"id":   "map-test-guest",
+		"name": "Map Test Guest",
 		"tags": []string{"business-default"},
 	})
 
 	// We need to call the handler through the hub's handleMessage
 	// which sets the connection ID in context. Since we can't easily
 	// do that with Dispatch(), let's test via the hub directly.
-	resp, err := hub.Dispatch("agent.register", params)
+	resp, err := hub.Dispatch("guest.register", params)
 	if err != nil {
-		t.Fatalf("agent.register failed: %v", err)
+		t.Fatalf("guest.register failed: %v", err)
 	}
 
 	result := resp.(map[string]interface{})
@@ -1023,33 +1023,33 @@ func TestHandleAgentRegister_ConnectionMapping(t *testing.T) {
 		t.Errorf("expected status 'registered', got %v", result["status"])
 	}
 
-	// Verify the agent was registered
-	agent, ok := srv.Registry().GetAgent("map-test-agent")
+	// Verify the guest was registered
+	guest, ok := srv.Registry().GetGuest("map-test-guest")
 	if !ok {
-		t.Fatal("agent not found in registry")
+		t.Fatal("guest not found in registry")
 	}
-	if agent.ID != "map-test-agent" {
-		t.Errorf("expected agent ID 'map-test-agent', got %s", agent.ID)
+	if guest.ID != "map-test-guest" {
+		t.Errorf("expected guest ID 'map-test-guest', got %s", guest.ID)
 	}
 
 	// The connection mapping test requires a real WebSocket context,
 	// which is covered by the integration test below.
-	_ = agent
+	_ = guest
 }
 
-func TestHandleAgentRegister_ReRegistration(t *testing.T) {
+func TestHandleGuestRegister_ReRegistration(t *testing.T) {
 	srv := newTestServer(t)
 	hub := srv.Hub()
 	go hub.Run()
 
 	// First registration
 	params1, _ := json.Marshal(map[string]interface{}{
-		"id":   "reconnect-agent",
-		"name": "Reconnect Agent",
+		"id":   "reconnect-guest",
+		"name": "Reconnect Guest",
 		"tags": []string{"tag1"},
 	})
 
-	resp1, err := hub.Dispatch("agent.register", params1)
+	resp1, err := hub.Dispatch("guest.register", params1)
 	if err != nil {
 		t.Fatalf("first register failed: %v", err)
 	}
@@ -1060,12 +1060,12 @@ func TestHandleAgentRegister_ReRegistration(t *testing.T) {
 
 	// Second registration with the same ID (simulates reconnect)
 	params2, _ := json.Marshal(map[string]interface{}{
-		"id":   "reconnect-agent",
-		"name": "Reconnect Agent Updated",
+		"id":   "reconnect-guest",
+		"name": "Reconnect Guest Updated",
 		"tags": []string{"tag1", "tag2"},
 	})
 
-	resp2, err := hub.Dispatch("agent.register", params2)
+	resp2, err := hub.Dispatch("guest.register", params2)
 	if err != nil {
 		t.Fatalf("second register failed: %v", err)
 	}
@@ -1074,20 +1074,20 @@ func TestHandleAgentRegister_ReRegistration(t *testing.T) {
 		t.Errorf("expected status 're-registered', got %v", result2["status"])
 	}
 
-	// Verify the agent was updated
-	agent, ok := srv.Registry().GetAgent("reconnect-agent")
+	// Verify the guest was updated
+	guest, ok := srv.Registry().GetGuest("reconnect-guest")
 	if !ok {
-		t.Fatal("agent not found in registry")
+		t.Fatal("guest not found in registry")
 	}
-	if agent.Name != "Reconnect Agent Updated" {
-		t.Errorf("expected name 'Reconnect Agent Updated', got %s", agent.Name)
+	if guest.Name != "Reconnect Guest Updated" {
+		t.Errorf("expected name 'Reconnect Guest Updated', got %s", guest.Name)
 	}
-	if len(agent.Tags) != 2 {
-		t.Errorf("expected 2 tags, got %d", len(agent.Tags))
+	if len(guest.Tags) != 2 {
+		t.Errorf("expected 2 tags, got %d", len(guest.Tags))
 	}
 }
 
-func TestHub_SendToAgent_WithMapping(t *testing.T) {
+func TestHub_SendToGuest_WithMapping(t *testing.T) {
 	hub := rpc.NewHub(t.Logf)
 	go hub.Run()
 
@@ -1097,13 +1097,13 @@ func TestHub_SendToAgent_WithMapping(t *testing.T) {
 	hub.Register(conn)
 	time.Sleep(10 * time.Millisecond)
 
-	// Register the agent-connection mapping
-	hub.RegisterAgentConnection("agent-1", "conn-1")
+	// Register the guest-connection mapping
+	hub.RegisterGuestConnection("guest-1", "conn-1")
 
-	// SendToAgent should find the connection
-	err := hub.SendToAgent("agent-1", "task.assign", map[string]interface{}{"id": "task-1"})
+	// SendToGuest should find the connection
+	err := hub.SendToGuest("guest-1", "task.assign", map[string]interface{}{"id": "task-1"})
 	if err != nil {
-		t.Fatalf("SendToAgent failed: %v", err)
+		t.Fatalf("SendToGuest failed: %v", err)
 	}
 
 	// Verify the message was sent
@@ -1120,48 +1120,48 @@ func TestHub_SendToAgent_WithMapping(t *testing.T) {
 	}
 }
 
-func TestHub_SendToAgent_NoMapping(t *testing.T) {
+func TestHub_SendToGuest_NoMapping(t *testing.T) {
 	hub := rpc.NewHub(t.Logf)
 	go hub.Run()
 
 	// Don't register any mapping
-	err := hub.SendToAgent("nonexistent-agent", "task.assign", nil)
+	err := hub.SendToGuest("nonexistent-guest", "task.assign", nil)
 	if err == nil {
-		t.Fatal("expected error for unmapped agent, got nil")
+		t.Fatal("expected error for unmapped guest, got nil")
 	}
-	expectedMsg := "connection for agent nonexistent-agent not found"
+	expectedMsg := "connection for guest nonexistent-guest not found"
 	if err.Error() != expectedMsg {
 		t.Errorf("expected error %q, got %q", expectedMsg, err.Error())
 	}
 }
 
-func TestHub_UnregisterAgentConnection(t *testing.T) {
+func TestHub_UnregisterGuestConnection(t *testing.T) {
 	hub := rpc.NewHub(t.Logf)
 
-	hub.RegisterAgentConnection("agent-1", "conn-1")
+	hub.RegisterGuestConnection("guest-1", "conn-1")
 
 	// Verify mapping exists
-	connID, ok := hub.GetAgentConnectionID("agent-1")
+	connID, ok := hub.GetGuestConnectionID("guest-1")
 	if !ok || connID != "conn-1" {
 		t.Errorf("expected conn-1, got %s (ok=%v)", connID, ok)
 	}
 
 	// Unregister
-	hub.UnregisterAgentConnection("agent-1")
+	hub.UnregisterGuestConnection("guest-1")
 
 	// Verify mapping is gone
-	_, ok = hub.GetAgentConnectionID("agent-1")
+	_, ok = hub.GetGuestConnectionID("guest-1")
 	if ok {
 		t.Error("expected mapping to be removed after unregister")
 	}
 }
 
-func TestIntegration_AgentRegisterAndTaskAssignment(t *testing.T) {
+func TestIntegration_GuestRegisterAndTaskAssignment(t *testing.T) {
 	// This test simulates the full flow:
-	// 1. Agent connects via WebSocket
-	// 2. Agent calls agent.register (which records connection mapping)
+	// 1. Guest connects via WebSocket
+	// 2. Guest calls guest.register (which records connection mapping)
 	// 3. A task is created and the server tries to assign it
-	// 4. SendToAgent should succeed because the mapping exists
+	// 4. SendToGuest should succeed because the mapping exists
 
 	srv := newTestServer(t)
 	hub := srv.Hub()
@@ -1173,18 +1173,18 @@ func TestIntegration_AgentRegisterAndTaskAssignment(t *testing.T) {
 	hub.Register(conn)
 	time.Sleep(10 * time.Millisecond)
 
-	// Register an agent via RPC (this should record the agent-connection mapping)
+	// Register a guest via RPC (this should record the guest-connection mapping)
 	// Since Dispatch() doesn't have connection context, we manually register the mapping
-	// to simulate what handleAgentRegister does when called via WebSocket
+	// to simulate what handleGuestRegister does when called via WebSocket
 
-	// Manually register the agent and connection mapping (simulating the handler)
-	_, err := srv.Registry().Register("integration-agent", "Integration Agent", []string{"business-default"})
+	// Manually register the guest and connection mapping (simulating the handler)
+	_, err := srv.Registry().Register("integration-guest", "Integration Guest", []string{"business-default"})
 	if err != nil {
 		t.Fatalf("register failed: %v", err)
 	}
 
-	// This is what handleAgentRegister does after registering the agent
-	hub.RegisterAgentConnection("integration-agent", conn.ID())
+	// This is what handleGuestRegister does after registering the guest
+	hub.RegisterGuestConnection("integration-guest", conn.ID())
 
 	// Create a task
 	task := map[string]interface{}{
@@ -1204,22 +1204,22 @@ func TestIntegration_AgentRegisterAndTaskAssignment(t *testing.T) {
 	var createdTask queue.Task
 	json.Unmarshal(w.Body.Bytes(), &createdTask)
 
-	// Now try to assign the task to the agent via SendToAgent
+	// Now try to assign the task to the guest via SendToGuest
 	// This is what tryAssignTask does internally
-	err = hub.SendToAgent("integration-agent", "task.assign", map[string]interface{}{
+	err = hub.SendToGuest("integration-guest", "task.assign", map[string]interface{}{
 		"id":     createdTask.ID,
 		"repos":  createdTask.Repos,
 		"prompt": createdTask.Prompt,
 		"tags":   createdTask.Tags,
 	})
 	if err != nil {
-		t.Fatalf("SendToAgent should succeed after agent registration, got: %v", err)
+		t.Fatalf("SendToGuest should succeed after guest registration, got: %v", err)
 	}
 
 	// Verify the message was delivered to the connection
 	data, ok := conn.Recv()
 	if !ok {
-		t.Fatal("expected task.assign message to be sent to the agent's connection")
+		t.Fatal("expected task.assign message to be sent to the guest's connection")
 	}
 	var msg rpc.JSONRPCMessage
 	if err := json.Unmarshal(data, &msg); err != nil {
@@ -1229,13 +1229,13 @@ func TestIntegration_AgentRegisterAndTaskAssignment(t *testing.T) {
 		t.Errorf("expected method 'task.assign', got %s", msg.Method)
 	}
 
-	// Verify the task was assigned (the agent state update is handled by SetAgentTask in tryAssignTask)
-	regAgent, ok := srv.Registry().GetAgent("integration-agent")
+	// Verify the task was assigned (the guest state update is handled by SetGuestTask in tryAssignTask)
+	regGuest, ok := srv.Registry().GetGuest("integration-guest")
 	if !ok {
-		t.Fatal("agent should still exist")
+		t.Fatal("guest should still exist")
 	}
-	if regAgent.TaskID != createdTask.ID {
-		t.Errorf("expected agent to have task %s, got %s", createdTask.ID, regAgent.TaskID)
+	if regGuest.TaskID != createdTask.ID {
+		t.Errorf("expected guest to have task %s, got %s", createdTask.ID, regGuest.TaskID)
 	}
 
 	// Verify the task was assigned
@@ -1246,8 +1246,8 @@ func TestIntegration_AgentRegisterAndTaskAssignment(t *testing.T) {
 	if taskData.Status != queue.TaskStatusAssigned {
 		t.Errorf("expected task status ASSIGNED, got %s", taskData.Status)
 	}
-	if taskData.AssignedTo != "integration-agent" {
-		t.Errorf("expected task assigned to 'integration-agent', got %s", taskData.AssignedTo)
+	if taskData.AssignedTo != "integration-guest" {
+		t.Errorf("expected task assigned to 'integration-guest', got %s", taskData.AssignedTo)
 	}
 }
 
@@ -1296,7 +1296,7 @@ func TestLogAccumulator_BatchesTextDeltas(t *testing.T) {
 		emitted = append(emitted, e)
 	}
 
-	// Text deltas with "info" level (as the agent sends) should accumulate
+	// Text deltas with "info" level (as the guest sends) should accumulate
 	acc.Feed("task-2", "Hello ", "info", emit)
 	acc.Feed("task-2", "World", "info", emit)
 
@@ -1412,7 +1412,7 @@ func TestLogAccumulator_MixedToolAndText(t *testing.T) {
 
 // TestLogAccumulator_ToolMessagesWithoutLevel verifies that tool messages
 // are sent immediately even when no level is provided (empty string).
-// This is the common case: the agent's sendLog callback doesn't pass a level.
+// This is the common case: the guest's sendLog callback doesn't pass a level.
 func TestLogAccumulator_ToolMessagesWithoutLevel(t *testing.T) {
 	logger := log.New(io.Discard, "", 0)
 	acc := NewLogAccumulator(logger)
@@ -1422,7 +1422,7 @@ func TestLogAccumulator_ToolMessagesWithoutLevel(t *testing.T) {
 		emitted = append(emitted, e)
 	}
 
-	// Simulate the agent sending tool messages with empty level.
+	// Simulate the guest sending tool messages with empty level.
 	// These should NOT be batched — they must go through immediately.
 	acc.Feed("task-1", "", "", emit) // empty line, should be ignored
 	acc.Feed("task-1", "[TOOL_START] read: /etc/passwd (id: t1)", "", emit)
@@ -1469,7 +1469,7 @@ func TestLogAccumulator_TextBufferFlushedBeforeTool(t *testing.T) {
 	}
 
 	// Text deltas accumulate
-	acc.Feed("task-1", "Agent is thinking ", "info", emit)
+	acc.Feed("task-1", "Guest is thinking ", "info", emit)
 	acc.Feed("task-1", "about the problem", "info", emit)
 
 	// Tool message with empty level should flush the text buffer first,
@@ -1479,7 +1479,7 @@ func TestLogAccumulator_TextBufferFlushedBeforeTool(t *testing.T) {
 	if len(emitted) != 2 {
 		t.Fatalf("expected 2 emitted entries, got %d", len(emitted))
 	}
-	if emitted[0].Line != "Agent is thinking about the problem" {
+	if emitted[0].Line != "Guest is thinking about the problem" {
 		t.Errorf("entry 0: expected text delta flush, got %q", emitted[0].Line)
 	}
 	if emitted[0].Level != "text" {
@@ -1493,7 +1493,7 @@ func TestLogAccumulator_TextBufferFlushedBeforeTool(t *testing.T) {
 	}
 }
 
-// TestIntegration_TaskLogBroadcast verifies that when an agent sends a task.log
+// TestIntegration_TaskLogBroadcast verifies that when a guest sends a task.log
 // notification via RPC, the server stores it, broadcasts it via WebSocket, and
 // the receiving connection gets the notification.
 func TestIntegration_TaskLogBroadcast(t *testing.T) {
@@ -1527,7 +1527,7 @@ func TestIntegration_TaskLogBroadcast(t *testing.T) {
 		"level":   "text",
 	}
 	rawParams, _ := json.Marshal(params)
-	hub.Dispatch("agent.log", rawParams)
+	hub.Dispatch("guest.log", rawParams)
 
 	srv.LogAccumulator().FlushAll(func(e TaskLogEntry) {
 		srv.LogStore().Add(e)
@@ -1574,9 +1574,9 @@ func TestIntegration_TaskLogBroadcast(t *testing.T) {
 	}
 }
 
-// TestCheckSilentAgents verifies that checkSilentAgents kills tasks for
-// agents that have been silent for longer than the configured SilenceTimeout.
-func TestCheckSilentAgents(t *testing.T) {
+// TestCheckSilentGuests verifies that checkSilentGuests kills tasks for
+// guests that have been silent for longer than the configured SilenceTimeout.
+func TestCheckSilentGuests(t *testing.T) {
 	cfg := config.ServerConfig{
 		Host:              "127.0.0.1",
 		Port:              0,
@@ -1585,13 +1585,13 @@ func TestCheckSilentAgents(t *testing.T) {
 	}
 	srv := New(cfg)
 
-	// Register an agent
-	_, err := srv.Registry().Register("silent-agent", "Silent Agent", []string{"tag"})
+	// Register a guest
+	_, err := srv.Registry().Register("silent-guest", "Silent Guest", []string{"tag"})
 	if err != nil {
 		t.Fatalf("register failed: %v", err)
 	}
 
-	// Assign a task to the agent
+	// Assign a task to the guest
 	task := &queue.Task{
 		ID:     "silent-task",
 		Prompt: "Test task",
@@ -1600,25 +1600,25 @@ func TestCheckSilentAgents(t *testing.T) {
 	if err := srv.TaskQueue().Add(task); err != nil {
 		t.Fatalf("add task failed: %v", err)
 	}
-	if err := srv.TaskQueue().Assign("silent-task", "silent-agent"); err != nil {
+	if err := srv.TaskQueue().Assign("silent-task", "silent-guest"); err != nil {
 		t.Fatalf("assign task failed: %v", err)
 	}
 	if err := srv.TaskQueue().Start("silent-task"); err != nil {
 		t.Fatalf("start task failed: %v", err)
 	}
-	if err := srv.Registry().SetAgentTask("silent-agent", "silent-task"); err != nil {
-		t.Fatalf("set agent task failed: %v", err)
+	if err := srv.Registry().SetGuestTask("silent-guest", "silent-task"); err != nil {
+		t.Fatalf("set guest task failed: %v", err)
 	}
 
-	// Don't send heartbeats — the agent will be stale
+	// Don't send heartbeats — the guest will be stale
 	// Wait for the task to be running
 	time.Sleep(100 * time.Millisecond)
 
-	// Manually advance the agent's LastHeartbeat to simulate silence
-	srv.Registry().SetLastHeartbeat("silent-agent", time.Now().Add(-3*time.Second))
+	// Manually advance the guest's LastHeartbeat to simulate silence
+	srv.Registry().SetLastHeartbeat("silent-guest", time.Now().Add(-3*time.Second))
 
-	// Run checkSilentAgents — it should kill the task
-	srv.checkSilentAgents()
+	// Run checkSilentGuests — it should kill the task
+	srv.checkSilentGuests()
 
 	// Verify the task was marked as failed
 	taskData, ok := srv.TaskQueue().Get("silent-task")
@@ -1629,19 +1629,19 @@ func TestCheckSilentAgents(t *testing.T) {
 		t.Errorf("expected task FAILED, got %s", taskData.Status)
 	}
 
-	// Verify the agent's task was cleared
-	agentAfter, _ := srv.Registry().GetAgent("silent-agent")
-	if agentAfter.TaskID != "" {
-		t.Errorf("expected empty task_id, got %s", agentAfter.TaskID)
+	// Verify the guest's task was cleared
+	guestAfter, _ := srv.Registry().GetGuest("silent-guest")
+	if guestAfter.TaskID != "" {
+		t.Errorf("expected empty task_id, got %s", guestAfter.TaskID)
 	}
-	if agentAfter.State != registry.AgentStateIdle {
-		t.Errorf("expected IDLE state, got %s", agentAfter.State)
+	if guestAfter.State != registry.GuestStateIdle {
+		t.Errorf("expected IDLE state, got %s", guestAfter.State)
 	}
 }
 
-// TestCheckSilentAgents_Disabled verifies that when SilenceTimeout is 0,
-// no tasks are killed even for silent agents.
-func TestCheckSilentAgents_Disabled(t *testing.T) {
+// TestCheckSilentGuests_Disabled verifies that when SilenceTimeout is 0,
+// no tasks are killed even for silent guests.
+func TestCheckSilentGuests_Disabled(t *testing.T) {
 	cfg := config.ServerConfig{
 		Host:              "127.0.0.1",
 		Port:              0,
@@ -1650,7 +1650,7 @@ func TestCheckSilentAgents_Disabled(t *testing.T) {
 	}
 	srv := New(cfg)
 
-	srv.Registry().Register("silent-agent", "Silent Agent", []string{"tag"})
+	srv.Registry().Register("silent-guest", "Silent Guest", []string{"tag"})
 
 	task := &queue.Task{
 		ID:     "silent-task",
@@ -1658,11 +1658,11 @@ func TestCheckSilentAgents_Disabled(t *testing.T) {
 		Tags:   []string{"tag"},
 	}
 	srv.TaskQueue().Add(task)
-	srv.TaskQueue().Assign("silent-task", "silent-agent")
+	srv.TaskQueue().Assign("silent-task", "silent-guest")
 	srv.TaskQueue().Start("silent-task")
-	srv.Registry().SetAgentTask("silent-agent", "silent-task")
+	srv.Registry().SetGuestTask("silent-guest", "silent-task")
 
-	srv.checkSilentAgents()
+	srv.checkSilentGuests()
 
 	taskData, _ := srv.TaskQueue().Get("silent-task")
 	if taskData.Status != queue.TaskStatusRunning {
@@ -1670,9 +1670,9 @@ func TestCheckSilentAgents_Disabled(t *testing.T) {
 	}
 }
 
-// TestCheckSilentAgents_ActiveAgent verifies that agents sending heartbeats
+// TestCheckSilentGuests_ActiveGuest verifies that guests sending heartbeats
 // are not killed even when running tasks.
-func TestCheckSilentAgents_ActiveAgent(t *testing.T) {
+func TestCheckSilentGuests_ActiveGuest(t *testing.T) {
 	cfg := config.ServerConfig{
 		Host:              "127.0.0.1",
 		Port:              0,
@@ -1681,7 +1681,7 @@ func TestCheckSilentAgents_ActiveAgent(t *testing.T) {
 	}
 	srv := New(cfg)
 
-	srv.Registry().Register("active-agent", "Active Agent", []string{"tag"})
+	srv.Registry().Register("active-guest", "Active Guest", []string{"tag"})
 
 	task := &queue.Task{
 		ID:     "active-task",
@@ -1689,17 +1689,17 @@ func TestCheckSilentAgents_ActiveAgent(t *testing.T) {
 		Tags:   []string{"tag"},
 	}
 	srv.TaskQueue().Add(task)
-	srv.TaskQueue().Assign("active-task", "active-agent")
+	srv.TaskQueue().Assign("active-task", "active-guest")
 	srv.TaskQueue().Start("active-task")
-	srv.Registry().SetAgentTask("active-agent", "active-task")
+	srv.Registry().SetGuestTask("active-guest", "active-task")
 
 	// Send a fresh heartbeat
-	srv.Registry().Heartbeat("active-agent")
+	srv.Registry().Heartbeat("active-guest")
 
-	srv.checkSilentAgents()
+	srv.checkSilentGuests()
 
 	taskData, _ := srv.TaskQueue().Get("active-task")
 	if taskData.Status != queue.TaskStatusRunning {
-		t.Errorf("expected task RUNNING (agent is active), got %s", taskData.Status)
+		t.Errorf("expected task RUNNING (guest is active), got %s", taskData.Status)
 	}
 }

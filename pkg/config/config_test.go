@@ -36,13 +36,13 @@ func TestDefaultServerConfig(t *testing.T) {
 	if cfg.SilenceTimeout != 1800 {
 		t.Errorf("expected silence_timeout 1800, got %d", cfg.SilenceTimeout)
 	}
-	if cfg.MaxAgents != 0 {
-		t.Errorf("expected max_agents 0, got %d", cfg.MaxAgents)
+	if cfg.MaxGuests != 0 {
+		t.Errorf("expected max_guests 0, got %d", cfg.MaxGuests)
 	}
 }
 
-func TestDefaultAgentConfig(t *testing.T) {
-	cfg := DefaultAgentConfig()
+func TestDefaultGuestConfig(t *testing.T) {
+	cfg := DefaultGuestConfig()
 
 	if cfg.Host != "localhost" {
 		t.Errorf("expected host localhost, got %s", cfg.Host)
@@ -70,7 +70,7 @@ write_timeout: 60
 max_log_size: 2097152
 task_timeout: 7200
 heartbeat_interval: 15
-max_agents: 10
+max_guests: 10
 `
 	if err := os.WriteFile(configPath, []byte(content), 0o644); err != nil {
 		t.Fatalf("failed to write config file: %v", err)
@@ -102,8 +102,8 @@ max_agents: 10
 	if cfg.HeartbeatInterval != 15 {
 		t.Errorf("expected heartbeat_interval 15, got %d", cfg.HeartbeatInterval)
 	}
-	if cfg.MaxAgents != 10 {
-		t.Errorf("expected max_agents 10, got %d", cfg.MaxAgents)
+	if cfg.MaxGuests != 10 {
+		t.Errorf("expected max_guests 10, got %d", cfg.MaxGuests)
 	}
 }
 
@@ -132,15 +132,15 @@ invalid: [unclosed
 	}
 }
 
-func TestLoadAgentConfig(t *testing.T) {
+func TestLoadGuestConfig(t *testing.T) {
 	tmpDir := t.TempDir()
-	configPath := filepath.Join(tmpDir, "agent.yaml")
+	configPath := filepath.Join(tmpDir, "guest.yaml")
 
 	content := `
 host: "192.168.1.100"
 port: 3000
-id: "test-agent-1"
-name: "Test Agent"
+id: "test-guest-1"
+name: "Test Guest"
 tags:
   - "business-default"
   - "android"
@@ -153,9 +153,9 @@ log_level: "debug"
 		t.Fatalf("failed to write config file: %v", err)
 	}
 
-	cfg, err := LoadAgentConfig(configPath)
+	cfg, err := LoadGuestConfig(configPath)
 	if err != nil {
-		t.Fatalf("LoadAgentConfig failed: %v", err)
+		t.Fatalf("LoadGuestConfig failed: %v", err)
 	}
 
 	if cfg.Host != "192.168.1.100" {
@@ -164,11 +164,11 @@ log_level: "debug"
 	if cfg.Port != 3000 {
 		t.Errorf("expected port 3000, got %d", cfg.Port)
 	}
-	if cfg.ID != "test-agent-1" {
-		t.Errorf("expected id test-agent-1, got %s", cfg.ID)
+	if cfg.ID != "test-guest-1" {
+		t.Errorf("expected id test-guest-1, got %s", cfg.ID)
 	}
-	if cfg.Name != "Test Agent" {
-		t.Errorf("expected name Test Agent, got %s", cfg.Name)
+	if cfg.Name != "Test Guest" {
+		t.Errorf("expected name Test Guest, got %s", cfg.Name)
 	}
 	if len(cfg.Tags) != 2 {
 		t.Errorf("expected 2 tags, got %d", len(cfg.Tags))
@@ -259,21 +259,21 @@ func TestConfigStoreConcurrency(t *testing.T) {
 	}
 }
 
-func TestDefaultAgentConfig_AutoClaimNextTask(t *testing.T) {
-	cfg := DefaultAgentConfig()
+func TestDefaultGuestConfig_AutoClaimNextTask(t *testing.T) {
+	cfg := DefaultGuestConfig()
 	if cfg.AutoClaimNextTask {
 		t.Error("expected AutoClaimNextTask to default to false")
 	}
 }
 
-func TestLoadAgentConfig_AutoClaimNextTask(t *testing.T) {
+func TestLoadGuestConfig_AutoClaimNextTask(t *testing.T) {
 	tmpDir := t.TempDir()
-	configPath := tmpDir + "/agent.yaml"
+	configPath := tmpDir + "/guest.yaml"
 
 	data := `host: localhost
 port: 9090
-id: test-agent
-name: Test Agent
+id: test-guest
+name: Test Guest
 tags:
   - test
 auto_claim_next_task: true
@@ -282,7 +282,7 @@ auto_claim_next_task: true
 		t.Fatal(err)
 	}
 
-	cfg, err := LoadAgentConfig(configPath)
+	cfg, err := LoadGuestConfig(configPath)
 	if err != nil {
 		t.Fatalf("load config: %v", err)
 	}

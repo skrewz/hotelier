@@ -339,7 +339,7 @@ func TestHubBroadcast_RoleFilter(t *testing.T) {
 
 	go hub.Run()
 
-	// Register a browser connection and an agent connection
+	// Register a browser connection and an guest connection
 	browserConn := &Connection{
 		id:      "browser-conn",
 		role:    ConnectionRoleBrowser,
@@ -347,15 +347,15 @@ func TestHubBroadcast_RoleFilter(t *testing.T) {
 		closeCh: make(chan struct{}),
 		hub:     hub,
 	}
-	agentConn := &Connection{
-		id:      "agent-conn",
-		role:    ConnectionRoleAgent,
+	guestConn := &Connection{
+		id:      "guest-conn",
+		role:    ConnectionRoleGuest,
 		send:    make(chan []byte, 256),
 		closeCh: make(chan struct{}),
 		hub:     hub,
 	}
 	hub.Register(browserConn)
-	hub.Register(agentConn)
+	hub.Register(guestConn)
 	time.Sleep(10 * time.Millisecond)
 
 	msg := &JSONRPCMessage{
@@ -364,7 +364,7 @@ func TestHubBroadcast_RoleFilter(t *testing.T) {
 		Params:  json.RawMessage(`{"task_id":"t1","line":"hello"}`),
 	}
 
-	// Broadcast to browser role only — agent should NOT receive it
+	// Broadcast to browser role only — guest should NOT receive it
 	hub.Broadcast(ConnectionRoleBrowser, msg)
 
 	// Browser should receive the message
@@ -381,16 +381,16 @@ func TestHubBroadcast_RoleFilter(t *testing.T) {
 		t.Fatal("browser connection did not receive broadcast")
 	}
 
-	// Agent should NOT receive the message
+	// Guest should NOT receive the message
 	select {
-	case data := <-agentConn.send:
-		t.Fatalf("agent connection should not have received broadcast, got: %s", string(data))
+	case data := <-guestConn.send:
+		t.Fatalf("guest connection should not have received broadcast, got: %s", string(data))
 	case <-time.After(50 * time.Millisecond):
 		// Expected: no message
 	}
 }
 
-func TestHubBroadcast_ToAgentOnly(t *testing.T) {
+func TestHubBroadcast_ToGuestOnly(t *testing.T) {
 	hub := NewHub(t.Logf)
 
 	go hub.Run()
@@ -402,15 +402,15 @@ func TestHubBroadcast_ToAgentOnly(t *testing.T) {
 		closeCh: make(chan struct{}),
 		hub:     hub,
 	}
-	agentConn := &Connection{
-		id:      "agent-conn",
-		role:    ConnectionRoleAgent,
+	guestConn := &Connection{
+		id:      "guest-conn",
+		role:    ConnectionRoleGuest,
 		send:    make(chan []byte, 256),
 		closeCh: make(chan struct{}),
 		hub:     hub,
 	}
 	hub.Register(browserConn)
-	hub.Register(agentConn)
+	hub.Register(guestConn)
 	time.Sleep(10 * time.Millisecond)
 
 	msg := &JSONRPCMessage{
@@ -419,12 +419,12 @@ func TestHubBroadcast_ToAgentOnly(t *testing.T) {
 		Params:  json.RawMessage(`{"id":"t1"}`),
 	}
 
-	// Broadcast to agent role only — browser should NOT receive it
-	hub.Broadcast(ConnectionRoleAgent, msg)
+	// Broadcast to guest role only — browser should NOT receive it
+	hub.Broadcast(ConnectionRoleGuest, msg)
 
-	// Agent should receive the message
+	// Guest should receive the message
 	select {
-	case data := <-agentConn.send:
+	case data := <-guestConn.send:
 		var received JSONRPCMessage
 		if err := json.Unmarshal(data, &received); err != nil {
 			t.Fatalf("failed to unmarshal: %v", err)
@@ -433,7 +433,7 @@ func TestHubBroadcast_ToAgentOnly(t *testing.T) {
 			t.Errorf("expected method task.assign, got %s", received.Method)
 		}
 	case <-time.After(100 * time.Millisecond):
-		t.Fatal("agent connection did not receive broadcast")
+		t.Fatal("guest connection did not receive broadcast")
 	}
 
 	// Browser should NOT receive the message

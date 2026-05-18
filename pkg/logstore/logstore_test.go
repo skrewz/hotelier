@@ -28,7 +28,7 @@ func TestLogStore_AppendAndRead(t *testing.T) {
 	entries := []Entry{
 		{TaskID: "task-1", Line: "Hello **world**", Level: "text", Timestamp: time.Date(2026, 5, 10, 12, 0, 0, 0, time.UTC)},
 		{TaskID: "task-1", Line: "[TOOL_START] read: file.txt (id: t1)", Level: "tool", Timestamp: time.Date(2026, 5, 10, 12, 0, 1, 0, time.UTC)},
-		{TaskID: "task-1", Line: "Agent output", Level: "info", Timestamp: time.Date(2026, 5, 10, 12, 0, 2, 0, time.UTC)},
+		{TaskID: "task-1", Line: "Guest output", Level: "info", Timestamp: time.Date(2026, 5, 10, 12, 0, 2, 0, time.UTC)},
 	}
 
 	for _, e := range entries {

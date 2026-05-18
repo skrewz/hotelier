@@ -8,130 +8,130 @@ import (
 	"time"
 )
 
-func newTestRegistry(t *testing.T) *AgentRegistry {
+func newTestRegistry(t *testing.T) *GuestRegistry {
 	t.Helper()
-	return NewAgentRegistry(0, func(format string, args ...interface{}) {})
+	return NewGuestRegistry(0, func(format string, args ...interface{}) {})
 }
 
-func TestNewAgentRegistry(t *testing.T) {
-	reg := NewAgentRegistry(0, nil)
+func TestNewGuestRegistry(t *testing.T) {
+	reg := NewGuestRegistry(0, nil)
 	if reg == nil {
 		t.Fatal("expected non-nil registry")
 	}
 	if reg.Count() != 0 {
-		t.Errorf("expected 0 agents, got %d", reg.Count())
+		t.Errorf("expected 0 guests, got %d", reg.Count())
 	}
 }
 
-func TestRegisterAgent(t *testing.T) {
+func TestRegisterGuest(t *testing.T) {
 	reg := newTestRegistry(t)
 
-	agent, err := reg.Register("agent-1", "Test Agent", []string{"business-default", "frontend"})
+	guest, err := reg.Register("guest-1", "Test Guest", []string{"business-default", "frontend"})
 	if err != nil {
 		t.Fatalf("Register failed: %v", err)
 	}
 
-	if agent.ID != "agent-1" {
-		t.Errorf("expected id agent-1, got %s", agent.ID)
+	if guest.ID != "guest-1" {
+		t.Errorf("expected id guest-1, got %s", guest.ID)
 	}
-	if agent.Name != "Test Agent" {
-		t.Errorf("expected name Test Agent, got %s", agent.Name)
+	if guest.Name != "Test Guest" {
+		t.Errorf("expected name Test Guest, got %s", guest.Name)
 	}
-	if len(agent.Tags) != 2 {
-		t.Errorf("expected 2 tags, got %d", len(agent.Tags))
+	if len(guest.Tags) != 2 {
+		t.Errorf("expected 2 tags, got %d", len(guest.Tags))
 	}
-	if agent.State != AgentStateIdle {
-		t.Errorf("expected state IDLE, got %s", agent.State)
+	if guest.State != GuestStateIdle {
+		t.Errorf("expected state IDLE, got %s", guest.State)
 	}
 	if reg.Count() != 1 {
-		t.Errorf("expected 1 agent, got %d", reg.Count())
+		t.Errorf("expected 1 guest, got %d", reg.Count())
 	}
 }
 
-func TestRegisterDuplicateAgent(t *testing.T) {
+func TestRegisterDuplicateGuest(t *testing.T) {
 	reg := newTestRegistry(t)
 
-	_, err := reg.Register("agent-1", "Test Agent", []string{"tag1"})
+	_, err := reg.Register("guest-1", "Test Guest", []string{"tag1"})
 	if err != nil {
 		t.Fatalf("first register failed: %v", err)
 	}
 
-	_, err = reg.Register("agent-1", "Another Agent", []string{"tag2"})
+	_, err = reg.Register("guest-1", "Another Guest", []string{"tag2"})
 	if err == nil {
-		t.Error("expected error for duplicate agent ID, got nil")
+		t.Error("expected error for duplicate Guest ID, got nil")
 	}
 }
 
-func TestRegisterMaxAgents(t *testing.T) {
-	reg := NewAgentRegistry(2, nil)
+func TestRegisterMaxGuests(t *testing.T) {
+	reg := NewGuestRegistry(2, nil)
 
-	_, err := reg.Register("agent-1", "Agent 1", []string{"tag1"})
+	_, err := reg.Register("guest-1", "Guest 1", []string{"tag1"})
 	if err != nil {
 		t.Fatalf("first register failed: %v", err)
 	}
 
-	_, err = reg.Register("agent-2", "Agent 2", []string{"tag2"})
+	_, err = reg.Register("guest-2", "Guest 2", []string{"tag2"})
 	if err != nil {
 		t.Fatalf("second register failed: %v", err)
 	}
 
-	_, err = reg.Register("agent-3", "Agent 3", []string{"tag3"})
+	_, err = reg.Register("guest-3", "Guest 3", []string{"tag3"})
 	if err == nil {
-		t.Error("expected error when max agents reached, got nil")
+		t.Error("expected error when max guests reached, got nil")
 	}
 	if reg.Count() != 2 {
-		t.Errorf("expected 2 agents, got %d", reg.Count())
+		t.Errorf("expected 2 guests, got %d", reg.Count())
 	}
 }
 
-func TestUnregisterAgent(t *testing.T) {
+func TestUnregisterGuest(t *testing.T) {
 	reg := newTestRegistry(t)
 
-	_, err := reg.Register("agent-1", "Test Agent", []string{"tag1"})
+	_, err := reg.Register("guest-1", "Test Guest", []string{"tag1"})
 	if err != nil {
 		t.Fatalf("register failed: %v", err)
 	}
 
-	err = reg.Unregister("agent-1")
+	err = reg.Unregister("guest-1")
 	if err != nil {
 		t.Fatalf("unregister failed: %v", err)
 	}
 
 	if reg.Count() != 0 {
-		t.Errorf("expected 0 agents, got %d", reg.Count())
+		t.Errorf("expected 0 guests, got %d", reg.Count())
 	}
 }
 
-func TestUnregisterNonExistentAgent(t *testing.T) {
+func TestUnregisterNonExistentGuest(t *testing.T) {
 	reg := newTestRegistry(t)
 	err := reg.Unregister("nonexistent")
 	if err == nil {
-		t.Error("expected error for nonexistent agent, got nil")
+		t.Error("expected error for nonexistent guest, got nil")
 	}
 }
 
-func TestUnregisterRunningAgent(t *testing.T) {
+func TestUnregisterRunningGuest(t *testing.T) {
 	reg := newTestRegistry(t)
 
-	_, err := reg.Register("agent-1", "Test Agent", []string{"tag1"})
+	_, err := reg.Register("guest-1", "Test Guest", []string{"tag1"})
 	if err != nil {
 		t.Fatalf("register failed: %v", err)
 	}
 
-	if err := reg.SetAgentTask("agent-1", "task-1"); err != nil {
-		t.Fatalf("set agent task failed: %v", err)
+	if err := reg.SetGuestTask("guest-1", "task-1"); err != nil {
+		t.Fatalf("set guest task failed: %v", err)
 	}
 
-	err = reg.Unregister("agent-1")
+	err = reg.Unregister("guest-1")
 	if err == nil {
-		t.Error("expected error for unregistering running agent, got nil")
+		t.Error("expected error for unregistering running guest, got nil")
 	}
 }
 
 func TestHeartbeat(t *testing.T) {
 	reg := newTestRegistry(t)
 
-	_, err := reg.Register("agent-1", "Test Agent", []string{"tag1"})
+	_, err := reg.Register("guest-1", "Test Guest", []string{"tag1"})
 	if err != nil {
 		t.Fatalf("register failed: %v", err)
 	}
@@ -139,278 +139,278 @@ func TestHeartbeat(t *testing.T) {
 	initialHeartbeat := time.Now()
 	time.Sleep(10 * time.Millisecond)
 
-	err = reg.Heartbeat("agent-1")
+	err = reg.Heartbeat("guest-1")
 	if err != nil {
 		t.Fatalf("heartbeat failed: %v", err)
 	}
 
-	agent, ok := reg.GetAgent("agent-1")
+	guest, ok := reg.GetGuest("guest-1")
 	if !ok {
-		t.Fatal("agent not found after heartbeat")
+		t.Fatal("guest not found after heartbeat")
 	}
-	if agent.LastHeartbeat.Before(initialHeartbeat) {
+	if guest.LastHeartbeat.Before(initialHeartbeat) {
 		t.Error("heartbeat should update last heartbeat time")
 	}
 }
 
-func TestHeartbeatNonExistentAgent(t *testing.T) {
+func TestHeartbeatNonExistentGuest(t *testing.T) {
 	reg := newTestRegistry(t)
 	err := reg.Heartbeat("nonexistent")
 	if err == nil {
-		t.Error("expected error for nonexistent agent heartbeat, got nil")
+		t.Error("expected error for nonexistent guest heartbeat, got nil")
 	}
 }
 
-func TestGetAgent(t *testing.T) {
+func TestGetGuest(t *testing.T) {
 	reg := newTestRegistry(t)
 
-	_, err := reg.Register("agent-1", "Test Agent", []string{"tag1", "tag2"})
+	_, err := reg.Register("guest-1", "Test Guest", []string{"tag1", "tag2"})
 	if err != nil {
 		t.Fatalf("register failed: %v", err)
 	}
 
-	agent, ok := reg.GetAgent("agent-1")
+	guest, ok := reg.GetGuest("guest-1")
 	if !ok {
-		t.Fatal("expected agent to exist")
+		t.Fatal("expected guest to exist")
 	}
-	if agent.ID != "agent-1" {
-		t.Errorf("expected id agent-1, got %s", agent.ID)
+	if guest.ID != "guest-1" {
+		t.Errorf("expected id guest-1, got %s", guest.ID)
 	}
 
-	_, ok = reg.GetAgent("nonexistent")
+	_, ok = reg.GetGuest("nonexistent")
 	if ok {
-		t.Error("expected nonexistent agent to not exist")
+		t.Error("expected nonexistent guest to not exist")
 	}
 }
 
-func TestGetAgentsByState(t *testing.T) {
+func TestGetGuestsByState(t *testing.T) {
 	reg := newTestRegistry(t)
 
-	reg.Register("agent-1", "Agent 1", []string{"tag1"})
-	reg.Register("agent-2", "Agent 2", []string{"tag2"})
-	reg.Register("agent-3", "Agent 3", []string{"tag3"})
+	reg.Register("guest-1", "Guest 1", []string{"tag1"})
+	reg.Register("guest-2", "Guest 2", []string{"tag2"})
+	reg.Register("guest-3", "Guest 3", []string{"tag3"})
 
-	agents := reg.GetAgents(AgentStateIdle)
-	if len(agents) != 3 {
-		t.Errorf("expected 3 idle agents, got %d", len(agents))
+	guests := reg.GetGuests(GuestStateIdle)
+	if len(guests) != 3 {
+		t.Errorf("expected 3 idle guests, got %d", len(guests))
 	}
 
-	reg.SetAgentState("agent-1", AgentStateRunning)
+	reg.SetGuestState("guest-1", GuestStateRunning)
 
-	running := reg.GetAgents(AgentStateRunning)
+	running := reg.GetGuests(GuestStateRunning)
 	if len(running) != 1 {
-		t.Errorf("expected 1 running agent, got %d", len(running))
+		t.Errorf("expected 1 running guest, got %d", len(running))
 	}
-	if running[0].ID != "agent-1" {
-		t.Errorf("expected running agent-1, got %s", running[0].ID)
+	if running[0].ID != "guest-1" {
+		t.Errorf("expected running guest-1, got %s", running[0].ID)
 	}
 
-	idle := reg.GetAgents(AgentStateIdle)
+	idle := reg.GetGuests(GuestStateIdle)
 	if len(idle) != 2 {
-		t.Errorf("expected 2 idle agents, got %d", len(idle))
+		t.Errorf("expected 2 idle guests, got %d", len(idle))
 	}
 }
 
-func TestSetAgentState(t *testing.T) {
+func TestSetGuestState(t *testing.T) {
 	reg := newTestRegistry(t)
 
-	_, err := reg.Register("agent-1", "Test Agent", []string{"tag1"})
+	_, err := reg.Register("guest-1", "Test Guest", []string{"tag1"})
 	if err != nil {
 		t.Fatalf("register failed: %v", err)
 	}
 
-	err = reg.SetAgentState("agent-1", AgentStateRunning)
+	err = reg.SetGuestState("guest-1", GuestStateRunning)
 	if err != nil {
 		t.Fatalf("set state failed: %v", err)
 	}
 
-	agent, _ := reg.GetAgent("agent-1")
-	if agent.State != AgentStateRunning {
-		t.Errorf("expected state RUNNING, got %s", agent.State)
+	guest, _ := reg.GetGuest("guest-1")
+	if guest.State != GuestStateRunning {
+		t.Errorf("expected state RUNNING, got %s", guest.State)
 	}
 
-	err = reg.SetAgentState("nonexistent", AgentStateIdle)
+	err = reg.SetGuestState("nonexistent", GuestStateIdle)
 	if err == nil {
-		t.Error("expected error for nonexistent agent, got nil")
+		t.Error("expected error for nonexistent guest, got nil")
 	}
 }
 
-func TestSetAgentTask(t *testing.T) {
+func TestSetGuestTask(t *testing.T) {
 	reg := newTestRegistry(t)
 
-	_, err := reg.Register("agent-1", "Test Agent", []string{"tag1"})
+	_, err := reg.Register("guest-1", "Test Guest", []string{"tag1"})
 	if err != nil {
 		t.Fatalf("register failed: %v", err)
 	}
 
-	err = reg.SetAgentTask("agent-1", "task-1")
+	err = reg.SetGuestTask("guest-1", "task-1")
 	if err != nil {
 		t.Fatalf("set task failed: %v", err)
 	}
 
-	agent, _ := reg.GetAgent("agent-1")
-	if agent.TaskID != "task-1" {
-		t.Errorf("expected task_id task-1, got %s", agent.TaskID)
+	guest, _ := reg.GetGuest("guest-1")
+	if guest.TaskID != "task-1" {
+		t.Errorf("expected task_id task-1, got %s", guest.TaskID)
 	}
-	if agent.State != AgentStateRunning {
-		t.Errorf("expected state RUNNING, got %s", agent.State)
+	if guest.State != GuestStateRunning {
+		t.Errorf("expected state RUNNING, got %s", guest.State)
 	}
 
-	err = reg.SetAgentTask("nonexistent", "task-2")
+	err = reg.SetGuestTask("nonexistent", "task-2")
 	if err == nil {
-		t.Error("expected error for nonexistent agent, got nil")
+		t.Error("expected error for nonexistent guest, got nil")
 	}
 }
 
-func TestClearAgentTask(t *testing.T) {
+func TestClearGuestTask(t *testing.T) {
 	reg := newTestRegistry(t)
 
-	_, err := reg.Register("agent-1", "Test Agent", []string{"tag1"})
+	_, err := reg.Register("guest-1", "Test Guest", []string{"tag1"})
 	if err != nil {
 		t.Fatalf("register failed: %v", err)
 	}
 
-	reg.SetAgentTask("agent-1", "task-1")
-	err = reg.ClearAgentTask("agent-1")
+	reg.SetGuestTask("guest-1", "task-1")
+	err = reg.ClearGuestTask("guest-1")
 	if err != nil {
 		t.Fatalf("clear task failed: %v", err)
 	}
 
-	agent, _ := reg.GetAgent("agent-1")
-	if agent.TaskID != "" {
-		t.Errorf("expected empty task_id, got %s", agent.TaskID)
+	guest, _ := reg.GetGuest("guest-1")
+	if guest.TaskID != "" {
+		t.Errorf("expected empty task_id, got %s", guest.TaskID)
 	}
-	if agent.State != AgentStateIdle {
-		t.Errorf("expected state IDLE, got %s", agent.State)
-	}
-}
-
-func TestFindAvailableAgents(t *testing.T) {
-	reg := newTestRegistry(t)
-
-	reg.Register("agent-1", "Agent 1", []string{"business-default", "frontend"})
-	reg.Register("agent-2", "Agent 2", []string{"business-default", "android"})
-	reg.Register("agent-3", "Agent 3", []string{"frontend"})
-
-	reg.SetAgentState("agent-2", AgentStateRunning)
-
-	agents := reg.FindAvailableAgents([]string{"business-default"})
-	if len(agents) != 1 {
-		t.Errorf("expected 1 available agent with business-default, got %d", len(agents))
-	}
-	if agents[0].ID != "agent-1" {
-		t.Errorf("expected agent-1, got %s", agents[0].ID)
-	}
-
-	agents = reg.FindAvailableAgents([]string{})
-	if len(agents) != 2 {
-		t.Errorf("expected 2 available agents with no tag requirements, got %d", len(agents))
-	}
-
-	agents = reg.FindAvailableAgents([]string{"nonexistent"})
-	if len(agents) != 0 {
-		t.Errorf("expected 0 available agents with nonexistent tag, got %d", len(agents))
-	}
-
-	agents = reg.FindAvailableAgents([]string{"business-default", "frontend"})
-	if len(agents) != 1 {
-		t.Errorf("expected 1 agent with both tags, got %d", len(agents))
-	}
-	if agents[0].ID != "agent-1" {
-		t.Errorf("expected agent-1, got %s", agents[0].ID)
+	if guest.State != GuestStateIdle {
+		t.Errorf("expected state IDLE, got %s", guest.State)
 	}
 }
 
-func TestHasAgentWithTags(t *testing.T) {
+func TestFindAvailableGuests(t *testing.T) {
 	reg := newTestRegistry(t)
 
-	reg.Register("agent-1", "Agent 1", []string{"business-default"})
+	reg.Register("guest-1", "Guest 1", []string{"business-default", "frontend"})
+	reg.Register("guest-2", "Guest 2", []string{"business-default", "android"})
+	reg.Register("guest-3", "Guest 3", []string{"frontend"})
 
-	if !reg.HasAgentWithTags([]string{"business-default"}) {
-		t.Error("expected to have agent with business-default tag")
+	reg.SetGuestState("guest-2", GuestStateRunning)
+
+	guests := reg.FindAvailableGuests([]string{"business-default"})
+	if len(guests) != 1 {
+		t.Errorf("expected 1 available guest with business-default, got %d", len(guests))
+	}
+	if guests[0].ID != "guest-1" {
+		t.Errorf("expected guest-1, got %s", guests[0].ID)
 	}
 
-	if reg.HasAgentWithTags([]string{"android"}) {
-		t.Error("expected not to have agent with android tag")
+	guests = reg.FindAvailableGuests([]string{})
+	if len(guests) != 2 {
+		t.Errorf("expected 2 available guests with no tag requirements, got %d", len(guests))
+	}
+
+	guests = reg.FindAvailableGuests([]string{"nonexistent"})
+	if len(guests) != 0 {
+		t.Errorf("expected 0 available guests with nonexistent tag, got %d", len(guests))
+	}
+
+	guests = reg.FindAvailableGuests([]string{"business-default", "frontend"})
+	if len(guests) != 1 {
+		t.Errorf("expected 1 guest with both tags, got %d", len(guests))
+	}
+	if guests[0].ID != "guest-1" {
+		t.Errorf("expected guest-1, got %s", guests[0].ID)
+	}
+}
+
+func TestHasGuestWithTags(t *testing.T) {
+	reg := newTestRegistry(t)
+
+	reg.Register("guest-1", "Guest 1", []string{"business-default"})
+
+	if !reg.HasGuestWithTags([]string{"business-default"}) {
+		t.Error("expected to have guest with business-default tag")
+	}
+
+	if reg.HasGuestWithTags([]string{"android"}) {
+		t.Error("expected not to have guest with android tag")
 	}
 }
 
 func TestIsStale(t *testing.T) {
 	reg := newTestRegistry(t)
 
-	reg.Register("agent-1", "Test Agent", []string{"tag1"})
+	reg.Register("guest-1", "Test Guest", []string{"tag1"})
 
-	if reg.IsStale("agent-1", 5*time.Second) {
-		t.Error("expected agent not to be stale immediately")
+	if reg.IsStale("guest-1", 5*time.Second) {
+		t.Error("expected guest not to be stale immediately")
 	}
 
-	// Wait for agent to become stale
+	// Wait for guest to become stale
 	time.Sleep(50 * time.Millisecond)
-	if !reg.IsStale("agent-1", 10*time.Millisecond) {
-		t.Error("expected agent to be stale with 10ms timeout")
+	if !reg.IsStale("guest-1", 10*time.Millisecond) {
+		t.Error("expected guest to be stale with 10ms timeout")
 	}
 
 	if reg.IsStale("nonexistent", 5*time.Second) {
-		t.Error("expected nonexistent agent not to be stale")
+		t.Error("expected nonexistent guest not to be stale")
 	}
 }
 
-func TestRemoveStaleAgents(t *testing.T) {
+func TestRemoveStaleGuests(t *testing.T) {
 	reg := newTestRegistry(t)
 
-	reg.Register("agent-1", "Agent 1", []string{"tag1"})
+	reg.Register("guest-1", "Guest 1", []string{"tag1"})
 	time.Sleep(50 * time.Millisecond)
-	reg.Register("agent-2", "Agent 2", []string{"tag2"})
+	reg.Register("guest-2", "Guest 2", []string{"tag2"})
 
-	stale := reg.RemoveStaleAgents(20 * time.Millisecond)
+	stale := reg.RemoveStaleGuests(20 * time.Millisecond)
 	if len(stale) != 1 {
-		t.Errorf("expected 1 stale agent, got %d", len(stale))
+		t.Errorf("expected 1 stale guest, got %d", len(stale))
 	}
-	if len(stale) > 0 && stale[0].ID != "agent-1" {
-		t.Errorf("expected stale agent-1, got %s", stale[0].ID)
+	if len(stale) > 0 && stale[0].ID != "guest-1" {
+		t.Errorf("expected stale guest-1, got %s", stale[0].ID)
 	}
 
 	if reg.Count() != 1 {
-		t.Errorf("expected 1 agent remaining, got %d", reg.Count())
+		t.Errorf("expected 1 guest remaining, got %d", reg.Count())
 	}
 }
 
 func TestCountByState(t *testing.T) {
 	reg := newTestRegistry(t)
 
-	reg.Register("agent-1", "Agent 1", []string{"tag1"})
-	reg.Register("agent-2", "Agent 2", []string{"tag2"})
-	reg.Register("agent-3", "Agent 3", []string{"tag3"})
+	reg.Register("guest-1", "Guest 1", []string{"tag1"})
+	reg.Register("guest-2", "Guest 2", []string{"tag2"})
+	reg.Register("guest-3", "Guest 3", []string{"tag3"})
 
-	if reg.CountByState(AgentStateIdle) != 3 {
-		t.Errorf("expected 3 idle agents, got %d", reg.CountByState(AgentStateIdle))
+	if reg.CountByState(GuestStateIdle) != 3 {
+		t.Errorf("expected 3 idle guests, got %d", reg.CountByState(GuestStateIdle))
 	}
-	if reg.CountByState(AgentStateRunning) != 0 {
-		t.Errorf("expected 0 running agents, got %d", reg.CountByState(AgentStateRunning))
+	if reg.CountByState(GuestStateRunning) != 0 {
+		t.Errorf("expected 0 running guests, got %d", reg.CountByState(GuestStateRunning))
 	}
 
-	reg.SetAgentState("agent-1", AgentStateRunning)
-	reg.SetAgentState("agent-2", AgentStateRunning)
+	reg.SetGuestState("guest-1", GuestStateRunning)
+	reg.SetGuestState("guest-2", GuestStateRunning)
 
-	if reg.CountByState(AgentStateIdle) != 1 {
-		t.Errorf("expected 1 idle agent, got %d", reg.CountByState(AgentStateIdle))
+	if reg.CountByState(GuestStateIdle) != 1 {
+		t.Errorf("expected 1 idle guest, got %d", reg.CountByState(GuestStateIdle))
 	}
-	if reg.CountByState(AgentStateRunning) != 2 {
-		t.Errorf("expected 2 running agents, got %d", reg.CountByState(AgentStateRunning))
+	if reg.CountByState(GuestStateRunning) != 2 {
+		t.Errorf("expected 2 running guests, got %d", reg.CountByState(GuestStateRunning))
 	}
 }
 
-func TestAgentStateMarshalJSON(t *testing.T) {
+func TestGuestStateMarshalJSON(t *testing.T) {
 	tests := []struct {
 		name     string
-		state    AgentState
+		state    GuestState
 		expected string
 	}{
-		{"Disconnected", AgentStateDisconnected, `"DISCONNECTED"`},
-		{"Registered", AgentStateRegistered, `"REGISTERED"`},
-		{"Idle", AgentStateIdle, `"IDLE"`},
-		{"Running", AgentStateRunning, `"RUNNING"`},
-		{"Unknown (99)", AgentState(99), `"UNKNOWN"`},
+		{"Disconnected", GuestStateDisconnected, `"DISCONNECTED"`},
+		{"Registered", GuestStateRegistered, `"REGISTERED"`},
+		{"Idle", GuestStateIdle, `"IDLE"`},
+		{"Running", GuestStateRunning, `"RUNNING"`},
+		{"Unknown (99)", GuestState(99), `"UNKNOWN"`},
 	}
 
 	for _, tt := range tests {
@@ -426,22 +426,22 @@ func TestAgentStateMarshalJSON(t *testing.T) {
 	}
 }
 
-func TestAgentStateUnmarshalJSON(t *testing.T) {
+func TestGuestStateUnmarshalJSON(t *testing.T) {
 	tests := []struct {
 		name     string
 		input    string
-		expected AgentState
+		expected GuestState
 	}{
-		{"DISCONNECTED", `"DISCONNECTED"`, AgentStateDisconnected},
-		{"REGISTERED", `"REGISTERED"`, AgentStateRegistered},
-		{"IDLE", `"IDLE"`, AgentStateIdle},
-		{"RUNNING", `"RUNNING"`, AgentStateRunning},
-		{"Unknown string", `"UNKNOWN"`, AgentState(0)},
+		{"DISCONNECTED", `"DISCONNECTED"`, GuestStateDisconnected},
+		{"REGISTERED", `"REGISTERED"`, GuestStateRegistered},
+		{"IDLE", `"IDLE"`, GuestStateIdle},
+		{"RUNNING", `"RUNNING"`, GuestStateRunning},
+		{"Unknown string", `"UNKNOWN"`, GuestState(0)},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			var state AgentState
+			var state GuestState
 			if err := json.Unmarshal([]byte(tt.input), &state); err != nil {
 				t.Fatalf("UnmarshalJSON failed: %v", err)
 			}
@@ -452,12 +452,12 @@ func TestAgentStateUnmarshalJSON(t *testing.T) {
 	}
 }
 
-func TestAgentStateRoundTrip(t *testing.T) {
-	states := []AgentState{
-		AgentStateDisconnected,
-		AgentStateRegistered,
-		AgentStateIdle,
-		AgentStateRunning,
+func TestGuestStateRoundTrip(t *testing.T) {
+	states := []GuestState{
+		GuestStateDisconnected,
+		GuestStateRegistered,
+		GuestStateIdle,
+		GuestStateRunning,
 	}
 
 	for _, original := range states {
@@ -466,7 +466,7 @@ func TestAgentStateRoundTrip(t *testing.T) {
 			t.Fatalf("Marshal failed for %s: %v", original, err)
 		}
 
-		var decoded AgentState
+		var decoded GuestState
 		if err := json.Unmarshal(data, &decoded); err != nil {
 			t.Fatalf("Unmarshal failed for %s: %v", string(data), err)
 		}
@@ -477,112 +477,112 @@ func TestAgentStateRoundTrip(t *testing.T) {
 	}
 }
 
-func TestAgentStateUnmarshalJSON_Invalid(t *testing.T) {
-	var state AgentState
+func TestGuestStateUnmarshalJSON_Invalid(t *testing.T) {
+	var state GuestState
 	err := json.Unmarshal([]byte(`"INVALID_STATE"`), &state)
 	if err != nil {
 		t.Fatalf("expected no error for invalid string, got: %v", err)
 	}
 	// Unknown strings should fall through to zero value
-	if state != AgentState(0) {
+	if state != GuestState(0) {
 		t.Errorf("expected state 0 for unknown string, got %d", state)
 	}
 }
 
-func TestAgentStateUnmarshalJSON_NonString(t *testing.T) {
-	var state AgentState
+func TestGuestStateUnmarshalJSON_NonString(t *testing.T) {
+	var state GuestState
 	err := json.Unmarshal([]byte("42"), &state)
 	if err == nil {
 		t.Error("expected error for non-string JSON value, got nil")
 	}
 }
 
-func TestAgentStateString(t *testing.T) {
+func TestGuestStateString(t *testing.T) {
 	tests := []struct {
-		state    AgentState
+		state    GuestState
 		expected string
 	}{
-		{AgentStateDisconnected, "DISCONNECTED"},
-		{AgentStateRegistered, "REGISTERED"},
-		{AgentStateIdle, "IDLE"},
-		{AgentStateRunning, "RUNNING"},
-		{AgentState(99), "UNKNOWN"},
+		{GuestStateDisconnected, "DISCONNECTED"},
+		{GuestStateRegistered, "REGISTERED"},
+		{GuestStateIdle, "IDLE"},
+		{GuestStateRunning, "RUNNING"},
+		{GuestState(99), "UNKNOWN"},
 	}
 
 	for _, tt := range tests {
 		if tt.state.String() != tt.expected {
-			t.Errorf("AgentState(%d).String() = %s, want %s", tt.state, tt.state.String(), tt.expected)
+			t.Errorf("GuestState(%d).String() = %s, want %s", tt.state, tt.state.String(), tt.expected)
 		}
 	}
 }
 
-func TestKillRunningAgentTask(t *testing.T) {
+func TestKillRunningGuestTask(t *testing.T) {
 	reg := newTestRegistry(t)
 
-	reg.Register("agent-1", "Agent 1", []string{"tag1"})
-	reg.SetAgentTask("agent-1", "task-1")
+	reg.Register("guest-1", "Guest 1", []string{"tag1"})
+	reg.SetGuestTask("guest-1", "task-1")
 
-	agent, _ := reg.GetAgent("agent-1")
-	if agent.TaskID != "task-1" {
-		t.Fatalf("expected task-1, got %s", agent.TaskID)
+	guest, _ := reg.GetGuest("guest-1")
+	if guest.TaskID != "task-1" {
+		t.Fatalf("expected task-1, got %s", guest.TaskID)
 	}
 
-	err := reg.KillRunningAgentTask("agent-1")
+	err := reg.KillRunningGuestTask("guest-1")
 	if err != nil {
-		t.Fatalf("KillRunningAgentTask failed: %v", err)
+		t.Fatalf("KillRunningGuestTask failed: %v", err)
 	}
 
-	agent, _ = reg.GetAgent("agent-1")
-	if agent.TaskID != "" {
-		t.Errorf("expected empty task_id after kill, got %s", agent.TaskID)
+	guest, _ = reg.GetGuest("guest-1")
+	if guest.TaskID != "" {
+		t.Errorf("expected empty task_id after kill, got %s", guest.TaskID)
 	}
-	if agent.State != AgentStateIdle {
-		t.Errorf("expected IDLE state after kill, got %s", agent.State)
+	if guest.State != GuestStateIdle {
+		t.Errorf("expected IDLE state after kill, got %s", guest.State)
 	}
 }
 
-func TestKillRunningAgentTask_NoTask(t *testing.T) {
+func TestKillRunningGuestTask_NoTask(t *testing.T) {
 	reg := newTestRegistry(t)
 
-	reg.Register("agent-1", "Agent 1", []string{"tag1"})
+	reg.Register("guest-1", "Guest 1", []string{"tag1"})
 
-	err := reg.KillRunningAgentTask("agent-1")
+	err := reg.KillRunningGuestTask("guest-1")
 	if err == nil {
-		t.Error("expected error when killing task for agent with no running task")
+		t.Error("expected error when killing task for guest with no running task")
 	}
 }
 
-func TestKillRunningAgentTask_NonExistent(t *testing.T) {
+func TestKillRunningGuestTask_NonExistent(t *testing.T) {
 	reg := newTestRegistry(t)
 
-	err := reg.KillRunningAgentTask("nonexistent")
+	err := reg.KillRunningGuestTask("nonexistent")
 	if err == nil {
-		t.Error("expected error for nonexistent agent")
+		t.Error("expected error for nonexistent guest")
 	}
 }
 
-func TestGetAllAgents(t *testing.T) {
+func TestGetAllGuests(t *testing.T) {
 	reg := newTestRegistry(t)
 
-	reg.Register("agent-1", "Agent 1", []string{"tag1"})
-	reg.Register("agent-2", "Agent 2", []string{"tag2"})
-	reg.Register("agent-3", "Agent 3", []string{"tag3"})
+	reg.Register("guest-1", "Guest 1", []string{"tag1"})
+	reg.Register("guest-2", "Guest 2", []string{"tag2"})
+	reg.Register("guest-3", "Guest 3", []string{"tag3"})
 
-	agents := reg.GetAllAgents()
-	if len(agents) != 3 {
-		t.Errorf("expected 3 agents, got %d", len(agents))
+	guests := reg.GetAllGuests()
+	if len(guests) != 3 {
+		t.Errorf("expected 3 guests, got %d", len(guests))
 	}
 }
 
 func TestRegistryConcurrency(t *testing.T) {
-	reg := NewAgentRegistry(100, nil)
+	reg := NewGuestRegistry(100, nil)
 	var wg sync.WaitGroup
 
 	for i := 0; i < 50; i++ {
 		wg.Add(1)
 		go func(id int) {
 			defer wg.Done()
-			reg.Register(fmt.Sprintf("agent-%d", id), fmt.Sprintf("Agent %d", id), []string{"tag"})
+			reg.Register(fmt.Sprintf("guest-%d", id), fmt.Sprintf("Guest %d", id), []string{"tag"})
 		}(i)
 	}
 
@@ -590,7 +590,7 @@ func TestRegistryConcurrency(t *testing.T) {
 		wg.Add(1)
 		go func(id int) {
 			defer wg.Done()
-			reg.Heartbeat(fmt.Sprintf("agent-%d", id))
+			reg.Heartbeat(fmt.Sprintf("guest-%d", id))
 		}(i)
 	}
 
@@ -598,13 +598,13 @@ func TestRegistryConcurrency(t *testing.T) {
 		wg.Add(1)
 		go func(id int) {
 			defer wg.Done()
-			reg.SetAgentState(fmt.Sprintf("agent-%d", id), AgentStateRunning)
+			reg.SetGuestState(fmt.Sprintf("guest-%d", id), GuestStateRunning)
 		}(i)
 	}
 
 	wg.Wait()
 
 	if reg.Count() != 50 {
-		t.Errorf("expected 50 agents, got %d", reg.Count())
+		t.Errorf("expected 50 guests, got %d", reg.Count())
 	}
 }

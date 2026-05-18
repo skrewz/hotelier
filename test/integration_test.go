@@ -22,27 +22,27 @@ func newTestServer(t *testing.T) *server.Server {
 	cfg := config.ServerConfig{
 		Host:      "127.0.0.1",
 		Port:      0,
-		MaxAgents: 0,
+		MaxGuests: 0,
 	}
 	return server.New(cfg)
 }
 
-func TestFullLifecycle_RegisterAgent(t *testing.T) {
+func TestFullLifecycle_RegisterGuest(t *testing.T) {
 	srv := newTestServer(t)
 	hub := srv.Hub()
 
 	go hub.Run()
 
-	// Simulate agent.register RPC
+	// Simulate guest.register RPC
 	params, _ := json.Marshal(map[string]interface{}{
-		"id":   "test-agent-1",
-		"name": "Test Agent",
+		"id":   "test-guest-1",
+		"name": "Test Guest",
 		"tags": []string{"business-default", "frontend"},
 	})
 
-	resp, err := hub.Dispatch("agent.register", params)
+	resp, err := hub.Dispatch("guest.register", params)
 	if err != nil {
-		t.Fatalf("agent.register failed: %v", err)
+		t.Fatalf("guest.register failed: %v", err)
 	}
 
 	result, ok := resp.(map[string]interface{})
@@ -180,7 +180,7 @@ func TestFullLifecycle_TaskStatusTransitions(t *testing.T) {
 	json.Unmarshal(w.Body.Bytes(), &createdTask)
 
 	// Assign the task
-	err := srv.TaskQueue().Assign(createdTask.ID, "agent-1")
+	err := srv.TaskQueue().Assign(createdTask.ID, "guest-1")
 	if err != nil {
 		t.Fatalf("assign failed: %v", err)
 	}
@@ -192,8 +192,8 @@ func TestFullLifecycle_TaskStatusTransitions(t *testing.T) {
 	if taskData.Status != queue.TaskStatusAssigned {
 		t.Errorf("expected ASSIGNED, got %s", taskData.Status)
 	}
-	if taskData.AssignedTo != "agent-1" {
-		t.Errorf("expected assigned to agent-1, got %s", taskData.AssignedTo)
+	if taskData.AssignedTo != "guest-1" {
+		t.Errorf("expected assigned to guest-1, got %s", taskData.AssignedTo)
 	}
 
 	// Start the task
@@ -239,7 +239,7 @@ func TestFullLifecycle_TaskFailure(t *testing.T) {
 	var createdTask queue.Task
 	json.Unmarshal(w.Body.Bytes(), &createdTask)
 
-	srv.TaskQueue().Assign(createdTask.ID, "agent-1")
+	srv.TaskQueue().Assign(createdTask.ID, "guest-1")
 	srv.TaskQueue().Start(createdTask.ID)
 
 	// Fail the task
@@ -319,70 +319,70 @@ func TestFullLifecycle_HealthCheck(t *testing.T) {
 	}
 }
 
-func TestFullLifecycle_AgentRegistrationViaREST(t *testing.T) {
+func TestFullLifecycle_GuestRegistrationViaREST(t *testing.T) {
 	srv := newTestServer(t)
 
-	// Register an agent
-	agent, err := srv.Registry().Register("test-agent-1", "Test Agent", []string{"business-default"})
+	// Register a guest
+	guest, err := srv.Registry().Register("test-guest-1", "Test Guest", []string{"business-default"})
 	if err != nil {
 		t.Fatalf("register failed: %v", err)
 	}
 
-	if agent.ID != "test-agent-1" {
-		t.Errorf("expected id test-agent-1, got %s", agent.ID)
+	if guest.ID != "test-guest-1" {
+		t.Errorf("expected id test-guest-1, got %s", guest.ID)
 	}
-	if agent.State != registry.AgentStateIdle {
-		t.Errorf("expected IDLE state, got %s", agent.State)
+	if guest.State != registry.GuestStateIdle {
+		t.Errorf("expected IDLE state, got %s", guest.State)
 	}
 
-	// List agents via REST
-	req := httptest.NewRequest(http.MethodGet, "/api/agents", nil)
+	// List guests via REST
+	req := httptest.NewRequest(http.MethodGet, "/api/guests", nil)
 	w := httptest.NewRecorder()
-	srv.HandleAgents(w, req)
+	srv.HandleGuests(w, req)
 
 	if w.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d", w.Code)
 	}
 
 	var response struct {
-		Agents []registry.Agent `json:"agents"`
+		Guests []registry.Guest `json:"guests"`
 		Count  int              `json:"count"`
 	}
 	json.Unmarshal(w.Body.Bytes(), &response)
 
 	if response.Count != 1 {
-		t.Errorf("expected 1 agent, got %d", response.Count)
+		t.Errorf("expected 1 guest, got %d", response.Count)
 	}
 }
 
 func TestFullLifecycle_TagBasedScheduling(t *testing.T) {
 	srv := newTestServer(t)
 
-	// Register two agents with different tags
-	srv.Registry().Register("android-agent", "Android Agent", []string{"android"})
-	srv.Registry().Register("frontend-agent", "Frontend Agent", []string{"frontend"})
+	// Register two guests with different tags
+	srv.Registry().Register("android-guest", "Android Guest", []string{"android"})
+	srv.Registry().Register("frontend-guest", "Frontend Guest", []string{"frontend"})
 
-	// Verify tag-based agent lookup works
-	agents := srv.Registry().FindAvailableAgents([]string{"android"})
-	if len(agents) != 1 {
-		t.Errorf("expected 1 android agent, got %d", len(agents))
+	// Verify tag-based guest lookup works
+	guests := srv.Registry().FindAvailableGuests([]string{"android"})
+	if len(guests) != 1 {
+		t.Errorf("expected 1 android guest, got %d", len(guests))
 	}
-	if len(agents) > 0 && agents[0].ID != "android-agent" {
-		t.Errorf("expected android-agent, got %s", agents[0].ID)
-	}
-
-	agents = srv.Registry().FindAvailableAgents([]string{"frontend"})
-	if len(agents) != 1 {
-		t.Errorf("expected 1 frontend agent, got %d", len(agents))
-	}
-	if len(agents) > 0 && agents[0].ID != "frontend-agent" {
-		t.Errorf("expected frontend-agent, got %s", agents[0].ID)
+	if len(guests) > 0 && guests[0].ID != "android-guest" {
+		t.Errorf("expected android-guest, got %s", guests[0].ID)
 	}
 
-	// No agents match nonexistent tag
-	agents = srv.Registry().FindAvailableAgents([]string{"nonexistent"})
-	if len(agents) != 0 {
-		t.Errorf("expected 0 agents for nonexistent tag, got %d", len(agents))
+	guests = srv.Registry().FindAvailableGuests([]string{"frontend"})
+	if len(guests) != 1 {
+		t.Errorf("expected 1 frontend guest, got %d", len(guests))
+	}
+	if len(guests) > 0 && guests[0].ID != "frontend-guest" {
+		t.Errorf("expected frontend-guest, got %s", guests[0].ID)
+	}
+
+	// No guests match nonexistent tag
+	guests = srv.Registry().FindAvailableGuests([]string{"nonexistent"})
+	if len(guests) != 0 {
+		t.Errorf("expected 0 guests for nonexistent tag, got %d", len(guests))
 	}
 
 	// Submit a task with no tag requirements
@@ -496,12 +496,12 @@ func TestFullLifecycle_TaskNotFound(t *testing.T) {
 	}
 }
 
-func TestFullLifecycle_AgentNotFound(t *testing.T) {
+func TestFullLifecycle_GuestNotFound(t *testing.T) {
 	srv := newTestServer(t)
 
-	req := httptest.NewRequest(http.MethodGet, "/api/agents/nonexistent", nil)
+	req := httptest.NewRequest(http.MethodGet, "/api/guests/nonexistent", nil)
 	w := httptest.NewRecorder()
-	srv.HandleAgentDetail(w, req)
+	srv.HandleGuestDetail(w, req)
 
 	if w.Code != http.StatusNotFound {
 		t.Errorf("expected 404, got %d", w.Code)
@@ -520,10 +520,10 @@ func TestFullLifecycle_MethodNotAllowed(t *testing.T) {
 		t.Errorf("expected 405, got %d", w.Code)
 	}
 
-	// DELETE to /api/agents should return 405
-	req2 := httptest.NewRequest(http.MethodDelete, "/api/agents", nil)
+	// DELETE to /api/guests should return 405
+	req2 := httptest.NewRequest(http.MethodDelete, "/api/guests", nil)
 	w2 := httptest.NewRecorder()
-	srv.HandleAgents(w2, req2)
+	srv.HandleGuests(w2, req2)
 
 	if w2.Code != http.StatusMethodNotAllowed {
 		t.Errorf("expected 405, got %d", w2.Code)
@@ -533,73 +533,73 @@ func TestFullLifecycle_MethodNotAllowed(t *testing.T) {
 func TestFullLifecycle_Heartbeat(t *testing.T) {
 	srv := newTestServer(t)
 
-	// Register an agent
-	srv.Registry().Register("heartbeat-agent", "Heartbeat Agent", []string{"test"})
+	// Register a guest
+	srv.Registry().Register("heartbeat-guest", "Heartbeat Guest", []string{"test"})
 
 	// Send heartbeat
-	err := srv.Registry().Heartbeat("heartbeat-agent")
+	err := srv.Registry().Heartbeat("heartbeat-guest")
 	if err != nil {
 		t.Fatalf("heartbeat failed: %v", err)
 	}
 
-	// Verify agent still exists
-	agent, ok := srv.Registry().GetAgent("heartbeat-agent")
+	// Verify guest still exists
+	guest, ok := srv.Registry().GetGuest("heartbeat-guest")
 	if !ok {
-		t.Fatal("agent disappeared after heartbeat")
+		t.Fatal("guest disappeared after heartbeat")
 	}
-	if agent.State != registry.AgentStateIdle {
-		t.Errorf("expected IDLE, got %s", agent.State)
+	if guest.State != registry.GuestStateIdle {
+		t.Errorf("expected IDLE, got %s", guest.State)
 	}
 }
 
-func TestFullLifecycle_UnregisterAgent(t *testing.T) {
+func TestFullLifecycle_UnregisterGuest(t *testing.T) {
 	srv := newTestServer(t)
 
-	// Register an agent
-	srv.Registry().Register("unreg-agent", "Unregister Agent", []string{"test"})
+	// Register a guest
+	srv.Registry().Register("unreg-guest", "Unregister Guest", []string{"test"})
 
 	// Unregister
-	err := srv.Registry().Unregister("unreg-agent")
+	err := srv.Registry().Unregister("unreg-guest")
 	if err != nil {
 		t.Fatalf("unregister failed: %v", err)
 	}
 
-	// Verify agent is gone
-	_, ok := srv.Registry().GetAgent("unreg-agent")
+	// Verify guest is gone
+	_, ok := srv.Registry().GetGuest("unreg-guest")
 	if ok {
-		t.Error("agent should not exist after unregister")
+		t.Error("guest should not exist after unregister")
 	}
 }
 
-func TestFullLifecycle_UnregisterRunningAgent(t *testing.T) {
+func TestFullLifecycle_UnregisterRunningGuest(t *testing.T) {
 	srv := newTestServer(t)
 
-	// Register and assign a task to an agent
-	srv.Registry().Register("running-agent", "Running Agent", []string{"test"})
-	srv.Registry().SetAgentTask("running-agent", "task-1")
+	// Register and assign a task to a guest
+	srv.Registry().Register("running-guest", "Running Guest", []string{"test"})
+	srv.Registry().SetGuestTask("running-guest", "task-1")
 
-	// Try to unregister a running agent - should fail
-	err := srv.Registry().Unregister("running-agent")
+	// Try to unregister a running guest - should fail
+	err := srv.Registry().Unregister("running-guest")
 	if err == nil {
-		t.Error("expected error when unregistering running agent")
+		t.Error("expected error when unregistering running guest")
 	}
 }
 
-func TestFullLifecycle_StaleAgentDetection(t *testing.T) {
+func TestFullLifecycle_StaleGuestDetection(t *testing.T) {
 	srv := newTestServer(t)
 
-	// Register agents
-	srv.Registry().Register("stale-agent", "Stale Agent", []string{"test"})
+	// Register guests
+	srv.Registry().Register("stale-guest", "Stale Guest", []string{"test"})
 	time.Sleep(10 * time.Millisecond)
-	srv.Registry().Register("fresh-agent", "Fresh Agent", []string{"test"})
+	srv.Registry().Register("fresh-guest", "Fresh Guest", []string{"test"})
 
-	// Remove stale agents with very short timeout
-	stale := srv.Registry().RemoveStaleAgents(5 * time.Millisecond)
+	// Remove stale guests with very short timeout
+	stale := srv.Registry().RemoveStaleGuests(5 * time.Millisecond)
 	if len(stale) != 1 {
-		t.Errorf("expected 1 stale agent, got %d", len(stale))
+		t.Errorf("expected 1 stale guest, got %d", len(stale))
 	}
-	if len(stale) > 0 && stale[0].ID != "stale-agent" {
-		t.Errorf("expected stale-agent to be stale, got %s", stale[0].ID)
+	if len(stale) > 0 && stale[0].ID != "stale-guest" {
+		t.Errorf("expected stale-guest to be stale, got %s", stale[0].ID)
 	}
 }
 
@@ -649,26 +649,26 @@ func TestFullLifecycle_RPCDispatch(t *testing.T) {
 
 	go hub.Run()
 
-	// Test agent.register
+	// Test guest.register
 	params, _ := json.Marshal(map[string]interface{}{
-		"id":   "rpc-agent-1",
-		"name": "RPC Agent",
+		"id":   "rpc-guest-1",
+		"name": "RPC Guest",
 		"tags": []string{"test"},
 	})
-	resp, err := hub.Dispatch("agent.register", params)
+	resp, err := hub.Dispatch("guest.register", params)
 	if err != nil {
-		t.Fatalf("agent.register failed: %v", err)
+		t.Fatalf("guest.register failed: %v", err)
 	}
 	result := resp.(map[string]interface{})
 	if result["status"] != "registered" {
 		t.Errorf("expected registered, got %v", result["status"])
 	}
 
-	// Test agent.heartbeat
-	params, _ = json.Marshal(map[string]interface{}{"id": "rpc-agent-1"})
-	resp, err = hub.Dispatch("agent.heartbeat", params)
+	// Test guest.heartbeat
+	params, _ = json.Marshal(map[string]interface{}{"id": "rpc-guest-1"})
+	resp, err = hub.Dispatch("guest.heartbeat", params)
 	if err != nil {
-		t.Fatalf("agent.heartbeat failed: %v", err)
+		t.Fatalf("guest.heartbeat failed: %v", err)
 	}
 	if result, _ := resp.(map[string]interface{}); result["status"] != "ok" {
 		t.Errorf("expected ok, got %v", result["status"])
@@ -685,32 +685,32 @@ func TestFullLifecycle_RPCDispatch(t *testing.T) {
 
 	// Test invalid params
 	params, _ = json.Marshal(map[string]interface{}{})
-	_, err = hub.Dispatch("agent.register", params)
+	_, err = hub.Dispatch("guest.register", params)
 	if err == nil {
 		t.Error("expected error for missing id")
 	}
 }
 
-func TestFullLifecycle_AgentUnregister(t *testing.T) {
+func TestFullLifecycle_GuestUnregister(t *testing.T) {
 	srv := newTestServer(t)
 	hub := srv.Hub()
 
 	go hub.Run()
 
-	// Register an agent
+	// Register a guest
 	params, _ := json.Marshal(map[string]interface{}{
-		"id":   "unreg-agent",
-		"name": "Unregister Agent",
+		"id":   "unreg-guest",
+		"name": "Unregister Guest",
 		"tags": []string{"test"},
 	})
-	_, err := hub.Dispatch("agent.register", params)
+	_, err := hub.Dispatch("guest.register", params)
 	if err != nil {
 		t.Fatalf("register failed: %v", err)
 	}
 
-	// Unregister the agent
-	params, _ = json.Marshal(map[string]interface{}{"id": "unreg-agent"})
-	resp, err := hub.Dispatch("agent.unregister", params)
+	// Unregister the guest
+	params, _ = json.Marshal(map[string]interface{}{"id": "unreg-guest"})
+	resp, err := hub.Dispatch("guest.unregister", params)
 	if err != nil {
 		t.Fatalf("unregister failed: %v", err)
 	}
@@ -720,7 +720,7 @@ func TestFullLifecycle_AgentUnregister(t *testing.T) {
 	}
 }
 
-func TestFullLifecycle_AgentLog(t *testing.T) {
+func TestFullLifecycle_GuestLog(t *testing.T) {
 	srv := newTestServer(t)
 	hub := srv.Hub()
 
@@ -732,9 +732,9 @@ func TestFullLifecycle_AgentLog(t *testing.T) {
 		"line":    "Building project...",
 		"level":   "info",
 	})
-	resp, err := hub.Dispatch("agent.log", params)
+	resp, err := hub.Dispatch("guest.log", params)
 	if err != nil {
-		t.Fatalf("agent.log failed: %v", err)
+		t.Fatalf("guest.log failed: %v", err)
 	}
 	result := resp.(map[string]interface{})
 	if result["status"] != "accepted" {
@@ -742,25 +742,25 @@ func TestFullLifecycle_AgentLog(t *testing.T) {
 	}
 }
 
-func TestFullLifecycle_AgentStateIsString(t *testing.T) {
+func TestFullLifecycle_GuestStateIsString(t *testing.T) {
 	srv := newTestServer(t)
 
-	// Register agents with different states
-	srv.Registry().Register("idle-agent", "Idle Agent", []string{"business-default"})
-	srv.Registry().Register("running-agent", "Running Agent", []string{"android"})
-	srv.Registry().SetAgentState("running-agent", registry.AgentStateRunning)
+	// Register guests with different states
+	srv.Registry().Register("idle-guest", "Idle Guest", []string{"business-default"})
+	srv.Registry().Register("running-guest", "Running Guest", []string{"android"})
+	srv.Registry().SetGuestState("running-guest", registry.GuestStateRunning)
 
-	// List agents via REST
-	req := httptest.NewRequest(http.MethodGet, "/api/agents", nil)
+	// List guests via REST
+	req := httptest.NewRequest(http.MethodGet, "/api/guests", nil)
 	w := httptest.NewRecorder()
-	srv.HandleAgents(w, req)
+	srv.HandleGuests(w, req)
 
 	if w.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d", w.Code)
 	}
 
 	var response struct {
-		Agents []map[string]interface{} `json:"agents"`
+		Guests []map[string]interface{} `json:"guests"`
 		Count  int                      `json:"count"`
 	}
 	if err := json.Unmarshal(w.Body.Bytes(), &response); err != nil {
@@ -768,49 +768,49 @@ func TestFullLifecycle_AgentStateIsString(t *testing.T) {
 	}
 
 	if response.Count != 2 {
-		t.Fatalf("expected 2 agents, got %d", response.Count)
+		t.Fatalf("expected 2 guests, got %d", response.Count)
 	}
 
-	// Build a map keyed by agent ID for deterministic lookups
-	agentMap := make(map[string]map[string]interface{})
-	for _, agent := range response.Agents {
-		agentMap[agent["id"].(string)] = agent
+	// Build a map keyed by guest ID for deterministic lookups
+	guestMap := make(map[string]map[string]interface{})
+	for _, guest := range response.Guests {
+		guestMap[guest["id"].(string)] = guest
 	}
 
-	// Verify each agent's state is a string (not an integer)
-	for id, agent := range agentMap {
-		state, ok := agent["state"]
+	// Verify each guest's state is a string (not an integer)
+	for id, g := range guestMap {
+		state, ok := g["state"]
 		if !ok {
-			t.Fatalf("agent %s: expected 'state' field", id)
+			t.Fatalf("guest %s: expected 'state' field", id)
 		}
 		if _, isString := state.(string); !isString {
-			t.Errorf("agent %s: expected state to be a string, got %T: %v", id, state, state)
+			t.Errorf("guest %s: expected state to be a string, got %T: %v", id, state, state)
 		}
 	}
 
-	// Verify the running agent specifically has state "RUNNING"
-	runningAgent, ok := agentMap["running-agent"]
+	// Verify the running guest specifically has state "RUNNING"
+	runningGuest, ok := guestMap["running-guest"]
 	if !ok {
-		t.Fatal("expected running-agent in response")
+		t.Fatal("expected running-guest in response")
 	}
-	if runningAgent["state"] != "RUNNING" {
-		t.Errorf("expected running agent state 'RUNNING', got %v", runningAgent["state"])
+	if runningGuest["state"] != "RUNNING" {
+		t.Errorf("expected running guest state 'RUNNING', got %v", runningGuest["state"])
 	}
 
-	// Verify the idle agent has a valid state string
-	idleAgent, ok := agentMap["idle-agent"]
+	// Verify the idle guest has a valid state string
+	idleGuest, ok := guestMap["idle-guest"]
 	if !ok {
-		t.Fatal("expected idle-agent in response")
+		t.Fatal("expected idle-guest in response")
 	}
-	idleState, ok := idleAgent["state"].(string)
+	idleState, ok := idleGuest["state"].(string)
 	if !ok {
-		t.Fatalf("expected idle agent state to be a string, got %T", idleAgent["state"])
+		t.Fatalf("expected idle guest state to be a string, got %T", idleGuest["state"])
 	}
 	switch idleState {
 	case "IDLE", "DISCONNECTED", "REGISTERED":
 		// valid initial states
 	default:
-		t.Errorf("unexpected idle agent state: %s", idleState)
+		t.Errorf("unexpected idle guest state: %s", idleState)
 	}
 }
 
@@ -891,7 +891,7 @@ func TestFullLifecycle_SubmitTaskThenList(t *testing.T) {
 	}
 }
 
-func TestFullLifecycle_AgentResult(t *testing.T) {
+func TestFullLifecycle_GuestResult(t *testing.T) {
 	srv := newTestServer(t)
 
 	// Create a task first
@@ -909,7 +909,7 @@ func TestFullLifecycle_AgentResult(t *testing.T) {
 	json.Unmarshal(w.Body.Bytes(), &createdTask)
 
 	// Assign and start the task
-	srv.TaskQueue().Assign(createdTask.ID, "agent-1")
+	srv.TaskQueue().Assign(createdTask.ID, "guest-1")
 	srv.TaskQueue().Start(createdTask.ID)
 
 	// Submit success result
@@ -920,9 +920,9 @@ func TestFullLifecycle_AgentResult(t *testing.T) {
 		"success": true,
 		"output":  "Build successful",
 	})
-	_, err := hub.Dispatch("agent.result", params)
+	_, err := hub.Dispatch("guest.result", params)
 	if err != nil {
-		t.Fatalf("agent.result failed: %v", err)
+		t.Fatalf("guest.result failed: %v", err)
 	}
 
 	// Verify task is completed

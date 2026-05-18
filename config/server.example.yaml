@@ -6,5 +6,5 @@ write_timeout: 30
 max_log_size: 1048576
 task_timeout: 3600
 heartbeat_interval: 30
-max_agents: 0
+max_guests: 0
 # log_dir: "/var/log/hotelier"  # Persist task logs to disk (empty = in-memory only)

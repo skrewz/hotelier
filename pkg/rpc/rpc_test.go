@@ -79,11 +79,11 @@ func TestStandardErrorCodes(t *testing.T) {
 }
 
 func TestMethodNotFoundError(t *testing.T) {
-	err := MethodNotFoundError("agent.register")
+	err := MethodNotFoundError("guest.register")
 	if err.Code != CodeMethodNotFound {
 		t.Errorf("expected code %d, got %d", CodeMethodNotFound, err.Code)
 	}
-	if err.Message != "Method \"agent.register\" not found" {
+	if err.Message != "Method \"guest.register\" not found" {
 		t.Errorf("expected method not found message, got %s", err.Message)
 	}
 }
@@ -258,12 +258,12 @@ func TestBroadcastEmpty(t *testing.T) {
 	})
 }
 
-func TestSendToAgent(t *testing.T) {
+func TestSendToGuest(t *testing.T) {
 	hub := newTestHub(t)
 
-	err := hub.SendToAgent("nonexistent", "task.assign", map[string]string{"id": "task-1"})
+	err := hub.SendToGuest("nonexistent", "task.assign", map[string]string{"id": "task-1"})
 	if err == nil {
-		t.Error("expected error for nonexistent agent, got nil")
+		t.Error("expected error for nonexistent guest, got nil")
 	}
 }
 
@@ -498,7 +498,7 @@ func TestJSONRPCMessageWithEmptyError(t *testing.T) {
 
 func TestJSONRPCMessageWithLongMethod(t *testing.T) {
 	idBytes := json.RawMessage([]byte(`1`))
-	method := "agent.register.with.very.long.method.name.that.goes.on.and.on"
+	method := "guest.register.with.very.long.method.name.that.goes.on.and.on"
 	msg := &JSONRPCMessage{
 		JSONRPC: "2.0",
 		ID:      (*json.RawMessage)(&idBytes),
@@ -584,7 +584,7 @@ func TestJSONRPCMessageWithSpecialCharsInMethod(t *testing.T) {
 	msg := &JSONRPCMessage{
 		JSONRPC: "2.0",
 		ID:      (*json.RawMessage)(&idBytes),
-		Method:  "agent.register.with.dots",
+		Method:  "guest.register.with.dots",
 	}
 	data, err := json.Marshal(msg)
 	if err != nil {
@@ -594,7 +594,7 @@ func TestJSONRPCMessageWithSpecialCharsInMethod(t *testing.T) {
 	if err := json.Unmarshal(data, &parsed); err != nil {
 		t.Fatalf("unmarshal failed: %v", err)
 	}
-	if parsed.Method != "agent.register.with.dots" {
+	if parsed.Method != "guest.register.with.dots" {
 		t.Error("method mismatch")
 	}
 }
@@ -624,7 +624,7 @@ func TestJSONRPCMessageWithUnicodeInMethod(t *testing.T) {
 	msg := &JSONRPCMessage{
 		JSONRPC: "2.0",
 		ID:      (*json.RawMessage)(&idBytes),
-		Method:  "agent.register.中文",
+		Method:  "guest.register.中文",
 	}
 	data, err := json.Marshal(msg)
 	if err != nil {
@@ -634,7 +634,7 @@ func TestJSONRPCMessageWithUnicodeInMethod(t *testing.T) {
 	if err := json.Unmarshal(data, &parsed); err != nil {
 		t.Fatalf("unmarshal failed: %v", err)
 	}
-	if parsed.Method != "agent.register.中文" {
+	if parsed.Method != "guest.register.中文" {
 		t.Error("method mismatch")
 	}
 }

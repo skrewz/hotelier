@@ -1,4 +1,4 @@
-.PHONY: build test test-coverage test-race lint check-format clean run-server run-agent image
+.PHONY: build test test-coverage test-race lint check-format clean run-server run-guest image
 
 MODULE  := hotelier
 GO      := go
@@ -7,9 +7,9 @@ LDFLAGS := -s -w -X main.Version=$(VERSION)
 
 all: build
 
-build: ## Build hotelier server and agent binaries
+build: ## Build hotelier server and guest binaries
 	$(GO) build -trimpath -ldflags "$(LDFLAGS)" -o bin/hotelier ./cmd/hotelier
-	$(GO) build -trimpath -ldflags "$(LDFLAGS)" -o bin/agent ./cmd/agent
+	$(GO) build -trimpath -ldflags "$(LDFLAGS)" -o bin/guest ./cmd/guest
 
 test: lint test-coverage test-race ## Run all tests (after linting)
 	@echo "All test targets passed"
@@ -37,8 +37,8 @@ clean: ## Remove build artifacts and container image
 run-server: ## Run the hotelier server
 	$(GO) run ./cmd/hotelier
 
-run-agent: ## Run the hotelier agent
-	$(GO) run ./cmd/agent
+run-guest: ## Run the hotelier guest
+	$(GO) run ./cmd/guest
 
 check-format: ## Check Go code formatting with gofumpt (fails if not formatted)
 	@if [ -n "$$($(GO) env GOPATH)" ]; then \
@@ -55,7 +55,7 @@ check-format: ## Check Go code formatting with gofumpt (fails if not formatted)
 
 install: ## Install binaries to $GOPATH/bin
 	$(GO) install -trimpath -ldflags "$(LDFLAGS)" ./cmd/hotelier
-	$(GO) install -trimpath -ldflags "$(LDFLAGS)" ./cmd/agent
+	$(GO) install -trimpath -ldflags "$(LDFLAGS)" ./cmd/guest
 
 image: ## Build the hotelier container image
 	podman build \

@@ -1,4 +1,4 @@
-package agent
+package guest
 
 import (
 	"context"
@@ -62,7 +62,7 @@ func isGitURL(s string) bool {
 	return false
 }
 
-// PIHandler executes tasks using the pi AI agent via RPC subprocess.
+// PIHandler executes tasks using the pi AI guest via RPC subprocess.
 type PIHandler struct {
 	client  *pi.PiClient
 	log     *log.Logger
@@ -142,7 +142,7 @@ func (h *PIHandler) GetClient() *pi.PiClient {
 	return h.client
 }
 
-// ExecuteTask runs a task through the pi agent and streams logs back via the callback.
+// ExecuteTask runs a task through the pi guest and streams logs back via the callback.
 // It clones any remote repos into a per-task working directory, sets that as the
 // CWD for the pi subprocess, and logs all commands it spawns.
 func (h *PIHandler) ExecuteTask(ctx context.Context, task TaskAssignment, sendLog func(taskID, line string) error) (*TaskResult, error) {
@@ -190,7 +190,7 @@ func (h *PIHandler) ExecuteTask(ctx context.Context, task TaskAssignment, sendLo
 	go func() {
 		defer close(done)
 		for event := range eventCh {
-			if pi.IsAgentEnd(event) {
+			if pi.IsGuestEnd(event) {
 				// Text deltas have already been streamed via sendLog.
 				// No need to re-send the final text — it would duplicate.
 				return
@@ -257,7 +257,7 @@ func (h *PIHandler) ExecuteTask(ctx context.Context, task TaskAssignment, sendLo
 	}()
 
 	// Wait for completion or context cancellation.
-	// The context is driven by the agent's task timeout (configurable) or
+	// The context is driven by the guest's task timeout (configurable) or
 	// by a server-sent task.cancel RPC (via silence detection). No hardcoded
 	// timeout here — the server's silence detection replaces the old fixed limit.
 	select {
@@ -291,7 +291,7 @@ func (h *PIHandler) ExecuteTask(ctx context.Context, task TaskAssignment, sendLo
 // Local paths are resolved as-is; remote URLs are cloned.
 func (h *PIHandler) prepareRepos(ctx context.Context, taskID string, repos []string, sendLog func(taskID, line string) error) (string, error) {
 	if len(repos) == 0 {
-		// No repos — create a task-specific directory so the agent has a
+		// No repos — create a task-specific directory so the guest has a
 		// clean, isolated working directory instead of the base CWD.
 		taskDir := filepath.Join(h.client.CWD(), "tasks", taskID)
 		if err := os.MkdirAll(taskDir, 0o755); err != nil {
@@ -352,7 +352,7 @@ func (h *PIHandler) prepareRepos(ctx context.Context, taskID string, repos []str
 	}
 
 	// If no remote repos were cloned (only local paths or none), use taskDir
-	// as the working directory so the agent can navigate to the local repos.
+	// as the working directory so the guest can navigate to the local repos.
 	if workDir == "" {
 		workDir = taskDir
 	}
@@ -361,7 +361,7 @@ func (h *PIHandler) prepareRepos(ctx context.Context, taskID string, repos []str
 }
 
 // resetClient restarts the pi subprocess with a new working directory.
-// This is needed per-task so the agent operates inside the cloned repo tree.
+// This is needed per-task so the guest operates inside the cloned repo tree.
 func (h *PIHandler) resetClient(ctx context.Context, workDir string) error {
 	h.mu.Lock()
 	defer h.mu.Unlock()

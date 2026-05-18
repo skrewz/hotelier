@@ -88,7 +88,7 @@ func TestValidStatusTransitions(t *testing.T) {
 	q.Add(task)
 
 	// PENDING → ASSIGNED
-	err := q.Assign("task-1", "agent-1")
+	err := q.Assign("task-1", "guest-1")
 	if err != nil {
 		t.Fatalf("assign failed: %v", err)
 	}
@@ -123,12 +123,12 @@ func TestInvalidStatusTransition(t *testing.T) {
 	}
 
 	// PENDING → ASSIGNED (valid)
-	err = q.Assign("task-1", "agent-1")
+	err = q.Assign("task-1", "guest-1")
 	if err != nil {
 		t.Fatalf("assign should succeed: %v", err)
 	}
 
-	// ASSIGNED → COMPLETED is now valid (agent can complete directly)
+	// ASSIGNED → COMPLETED is now valid (guest can complete directly)
 	err = q.Complete("task-1", "done")
 	if err != nil {
 		t.Fatalf("ASSIGNED→COMPLETED should be valid: %v", err)
@@ -141,7 +141,7 @@ func TestAssignTask(t *testing.T) {
 	task := &Task{ID: "task-1", Prompt: "Build a feature", Tags: []string{"tag1"}}
 	q.Add(task)
 
-	err := q.Assign("task-1", "agent-1")
+	err := q.Assign("task-1", "guest-1")
 	if err != nil {
 		t.Fatalf("assign failed: %v", err)
 	}
@@ -149,12 +149,12 @@ func TestAssignTask(t *testing.T) {
 	if task.Status != TaskStatusAssigned {
 		t.Errorf("expected status ASSIGNED, got %s", task.Status)
 	}
-	if task.AssignedTo != "agent-1" {
-		t.Errorf("expected assigned_to agent-1, got %s", task.AssignedTo)
+	if task.AssignedTo != "guest-1" {
+		t.Errorf("expected assigned_to guest-1, got %s", task.AssignedTo)
 	}
 
 	// Try assigning again (should fail)
-	err = q.Assign("task-1", "agent-2")
+	err = q.Assign("task-1", "guest-2")
 	if err == nil {
 		t.Error("expected error for reassigning non-pending task, got nil")
 	}
@@ -162,7 +162,7 @@ func TestAssignTask(t *testing.T) {
 
 func TestAssignNonExistentTask(t *testing.T) {
 	q := newTestQueue(t)
-	err := q.Assign("nonexistent", "agent-1")
+	err := q.Assign("nonexistent", "guest-1")
 	if err == nil {
 		t.Error("expected error for nonexistent task, got nil")
 	}
@@ -173,7 +173,7 @@ func TestStartTask(t *testing.T) {
 
 	task := &Task{ID: "task-1", Prompt: "Build a feature"}
 	q.Add(task)
-	q.Assign("task-1", "agent-1")
+	q.Assign("task-1", "guest-1")
 
 	err := q.Start("task-1")
 	if err != nil {
@@ -196,7 +196,7 @@ func TestCompleteTask(t *testing.T) {
 
 	task := &Task{ID: "task-1", Prompt: "Build a feature"}
 	q.Add(task)
-	q.Assign("task-1", "agent-1")
+	q.Assign("task-1", "guest-1")
 	q.Start("task-1")
 
 	err := q.Complete("task-1", "all tests pass")
@@ -223,7 +223,7 @@ func TestFailTask(t *testing.T) {
 
 	task := &Task{ID: "task-1", Prompt: "Build a feature"}
 	q.Add(task)
-	q.Assign("task-1", "agent-1")
+	q.Assign("task-1", "guest-1")
 	q.Start("task-1")
 
 	err := q.Fail("task-1", "build failed")
@@ -244,9 +244,9 @@ func TestFailAssignedTask(t *testing.T) {
 
 	task := &Task{ID: "task-1", Prompt: "Build a feature"}
 	q.Add(task)
-	q.Assign("task-1", "agent-1")
+	q.Assign("task-1", "guest-1")
 
-	err := q.Fail("task-1", "agent crashed")
+	err := q.Fail("task-1", "guest crashed")
 	if err != nil {
 		t.Fatalf("fail assigned task failed: %v", err)
 	}
@@ -277,7 +277,7 @@ func TestCancelAssignedTask(t *testing.T) {
 
 	task := &Task{ID: "task-1", Prompt: "Build a feature"}
 	q.Add(task)
-	q.Assign("task-1", "agent-1")
+	q.Assign("task-1", "guest-1")
 
 	err := q.Cancel("task-1")
 	if err != nil {
@@ -294,7 +294,7 @@ func TestCancelRunningTask(t *testing.T) {
 
 	task := &Task{ID: "task-1", Prompt: "Build a feature"}
 	q.Add(task)
-	q.Assign("task-1", "agent-1")
+	q.Assign("task-1", "guest-1")
 	q.Start("task-1")
 
 	err := q.Cancel("task-1")
@@ -310,7 +310,7 @@ func TestGetPendingTasks(t *testing.T) {
 	q.Add(&Task{ID: "task-2", Prompt: "Task 2"})
 	q.Add(&Task{ID: "task-3", Prompt: "Task 3"})
 
-	q.Assign("task-1", "agent-1")
+	q.Assign("task-1", "guest-1")
 	q.Start("task-1")
 	q.Complete("task-1", "done")
 	q.Cancel("task-2")
@@ -331,7 +331,7 @@ func TestGetTasksByStatus(t *testing.T) {
 	q.Add(&Task{ID: "task-2", Prompt: "Task 2"})
 	q.Add(&Task{ID: "task-3", Prompt: "Task 3"})
 
-	q.Assign("task-1", "agent-1")
+	q.Assign("task-1", "guest-1")
 	q.Start("task-1")
 	q.Complete("task-1", "done")
 	q.Cancel("task-2")
@@ -370,24 +370,24 @@ func TestGetAllTasks(t *testing.T) {
 	}
 }
 
-func TestGetAgentTasks(t *testing.T) {
+func TestGetGuestTasks(t *testing.T) {
 	q := newTestQueue(t)
 
 	q.Add(&Task{ID: "task-1", Prompt: "Task 1"})
 	q.Add(&Task{ID: "task-2", Prompt: "Task 2"})
 	q.Add(&Task{ID: "task-3", Prompt: "Task 3"})
 
-	q.Assign("task-1", "agent-1")
-	q.Assign("task-3", "agent-1")
+	q.Assign("task-1", "guest-1")
+	q.Assign("task-3", "guest-1")
 
-	tasks := q.GetAgentTasks("agent-1")
+	tasks := q.GetGuestTasks("guest-1")
 	if len(tasks) != 2 {
-		t.Errorf("expected 2 tasks for agent-1, got %d", len(tasks))
+		t.Errorf("expected 2 tasks for guest-1, got %d", len(tasks))
 	}
 
-	tasks = q.GetAgentTasks("agent-2")
+	tasks = q.GetGuestTasks("guest-2")
 	if len(tasks) != 0 {
-		t.Errorf("expected 0 tasks for agent-2, got %d", len(tasks))
+		t.Errorf("expected 0 tasks for guest-2, got %d", len(tasks))
 	}
 }
 
@@ -398,7 +398,7 @@ func TestCountByStatus(t *testing.T) {
 	q.Add(&Task{ID: "task-2", Prompt: "Task 2"})
 	q.Add(&Task{ID: "task-3", Prompt: "Task 3"})
 
-	q.Assign("task-1", "agent-1")
+	q.Assign("task-1", "guest-1")
 	q.Start("task-1")
 	q.Complete("task-1", "done")
 	q.Cancel("task-2")
@@ -463,7 +463,7 @@ func TestNextPendingTask(t *testing.T) {
 	}
 
 	// Assign first task
-	q.Assign("task-2", "agent-1")
+	q.Assign("task-2", "guest-1")
 
 	task = q.NextPendingTask()
 	if task == nil {
@@ -510,7 +510,7 @@ func TestNextPendingTaskForTags(t *testing.T) {
 	}
 
 	// Assign task-1 so it's no longer pending
-	q.Assign("task-1", "agent-1")
+	q.Assign("task-1", "guest-1")
 
 	// Require business-default again - should get task-3 now
 	task = q.NextPendingTaskForTags([]string{"business-default"})
@@ -531,10 +531,10 @@ func TestNextPendingTaskForTags(t *testing.T) {
 	}
 
 	// All tasks done
-	q.Assign("task-1", "agent-1")
-	q.Assign("task-2", "agent-1")
-	q.Assign("task-3", "agent-1")
-	q.Assign("task-4", "agent-1")
+	q.Assign("task-1", "guest-1")
+	q.Assign("task-2", "guest-1")
+	q.Assign("task-3", "guest-1")
+	q.Assign("task-4", "guest-1")
 
 	task = q.NextPendingTaskForTags([]string{})
 	if task != nil {
@@ -726,7 +726,7 @@ func TestQueueConcurrency(t *testing.T) {
 		wg.Add(1)
 		go func(id int) {
 			defer wg.Done()
-			q.Assign(fmt.Sprintf("task-%d", id), "agent-1")
+			q.Assign(fmt.Sprintf("task-%d", id), "guest-1")
 		}(i)
 	}
 

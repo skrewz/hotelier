@@ -17,7 +17,7 @@ import (
 
 // TestLogPersistence_Integration verifies that task logs are persisted to disk
 // when log_dir is configured. It simulates a full flow: create task → send logs
-// via agent.log RPC → flush accumulator → verify filesystem.
+// via guest.log RPC → flush accumulator → verify filesystem.
 func TestLogPersistence_Integration(t *testing.T) {
 	dir, err := os.MkdirTemp("", "hotelier-logpersist-*")
 	if err != nil {
@@ -60,7 +60,7 @@ func TestLogPersistence_Integration(t *testing.T) {
 		level string
 	}{
 		{"Task started", ""},
-		{"Agent is thinking", "info"},
+		{"Guest is thinking", "info"},
 		{"[TOOL_START] read: file.txt (id: t1)", ""},
 		{"[TOOL_OUTPUT] read (id: t1): file contents", ""},
 		{"[TOOL_END] read (id: t1): result", ""},
@@ -74,7 +74,7 @@ func TestLogPersistence_Integration(t *testing.T) {
 			"level":   ll.level,
 		}
 		rawParams, _ := json.Marshal(params)
-		srv.hub.Dispatch("agent.log", rawParams)
+		srv.hub.Dispatch("guest.log", rawParams)
 	}
 
 	// Flush the accumulator — this triggers disk writes
