@@ -8,6 +8,10 @@ Ephemeral YOLO guest queue — autonomous AI development infrastructure.
 
 Hotelier orchestrates ephemeral AI guests ("machines") that register, receive tasks, execute them against target repositories, stream logs, and submit results. Guests are configured entirely via YAML config files.
 
+## Screenshots
+
+![Hotelier Web Dashboard](/docs/screenshot.png)
+
 ## Architecture
 
 ```

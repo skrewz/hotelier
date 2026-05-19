@@ -48,6 +48,37 @@ Changes that touch JavaScript, HTML, CSS, or WebSocket communication **must** be
 - DOM selectors match actual element IDs/classes
 - `innerHTML` vs `textContent` — use `textContent` for user data, `innerHTML` only for trusted HTML
 
+### UI screenshots
+
+The README includes a screenshot of the dashboard at `docs/screenshot.png`.
+When making UI changes, **consider** whether the screenshot should be updated.
+Do this by comparing the old and new screenshots side by side:
+
+1. Generate a candidate screenshot:
+   ```bash
+   make docs/screenshot-candidate.png
+   ```
+   This ensures the server binary is built, starts the server, mock-registers
+   two guests via WebSocket, takes a Playwright screenshot, and saves it to
+   `docs/screenshot-candidate.png`.
+
+2. **Read both screenshots** and compare them visually
+
+3. Decide whether the change is significant enough to warrant an update:
+   - **Update it** if the change is visually significant (new sections, layout
+     shifts, new controls, major colour/typography changes)
+   - **Skip it** for minor tweaks (bug fixes, small label changes, edge-case
+     handling) that don't alter the overall look of the dashboard
+
+4. If updating:
+   ```bash
+   mv -v docs/screenshot-candidate.png docs/screenshot.png
+   ```
+   Otherwise:
+   ```bash
+   rm docs/screenshot-candidate.png
+   ```
+
 # Go formatting
 
 - Run `make format` (gofumpt) before committing changes. gofumpt is stricter than `go fmt`.
