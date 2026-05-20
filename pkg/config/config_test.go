@@ -1,10 +1,18 @@
 package config
 
 import (
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	crand "crypto/rand"
+	"crypto/x509"
+	"crypto/x509/pkix"
+	"encoding/pem"
 	"fmt"
+	"math/big"
 	"math/rand"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -266,6 +274,131 @@ func TestDefaultGuestConfig_AutoClaimNextTask(t *testing.T) {
 	}
 }
 
+func TestGuestConfig_TLSConfig_NoCert(t *testing.T) {
+	cfg := GuestConfig{
+		Host: "localhost",
+		Port: 8080,
+	}
+
+	tlsCfg, err := cfg.TLSConfig()
+	if err != nil {
+		t.Fatalf("expected nil error, got: %v", err)
+	}
+	if tlsCfg != nil {
+		t.Fatal("expected nil TLSConfig when no cert/key set")
+	}
+}
+
+func TestGuestConfig_TLSConfig_MissingKey(t *testing.T) {
+	cfg := GuestConfig{
+		ClientCert: "/tmp/fake-cert.pem",
+		// ClientKey is empty
+	}
+
+	_, err := cfg.TLSConfig()
+	if err == nil {
+		t.Fatal("expected error when only cert is set")
+	}
+}
+
+func TestGuestConfig_TLSConfig_MissingCert(t *testing.T) {
+	cfg := GuestConfig{
+		ClientKey: "/tmp/fake-key.pem",
+		// ClientCert is empty
+	}
+
+	_, err := cfg.TLSConfig()
+	if err == nil {
+		t.Fatal("expected error when only key is set")
+	}
+}
+
+func TestGuestConfig_TLSConfig_InvalidFiles(t *testing.T) {
+	cfg := GuestConfig{
+		ClientCert: "/nonexistent/path/cert.pem",
+		ClientKey:  "/nonexistent/path/key.pem",
+	}
+
+	_, err := cfg.TLSConfig()
+	if err == nil {
+		t.Fatal("expected error for nonexistent cert/key files")
+	}
+	if !strings.Contains(err.Error(), "load client cert/key") {
+		t.Errorf("expected error to mention 'load client cert/key', got: %v", err)
+	}
+}
+
+func TestGuestConfig_TLSConfig_ValidFiles(t *testing.T) {
+	// Generate a self-signed cert+key pair for testing
+	tmpDir := t.TempDir()
+	certPath := tmpDir + "cert.pem"
+	keyPath := tmpDir + "key.pem"
+
+	certPEM, keyPEM := generateSelfSignedCert(t)
+	if err := os.WriteFile(certPath, []byte(certPEM), 0o600); err != nil {
+		t.Fatalf("write cert: %v", err)
+	}
+	if err := os.WriteFile(keyPath, []byte(keyPEM), 0o600); err != nil {
+		t.Fatalf("write key: %v", err)
+	}
+
+	cfg := GuestConfig{
+		ClientCert: certPath,
+		ClientKey:  keyPath,
+	}
+
+	tlsCfg, err := cfg.TLSConfig()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if tlsCfg == nil {
+		t.Fatal("expected non-nil TLSConfig")
+	}
+	if len(tlsCfg.Certificates) != 1 {
+		t.Fatalf("expected 1 certificate, got %d", len(tlsCfg.Certificates))
+	}
+}
+
+func TestLoadGuestConfig_ClientCert(t *testing.T) {
+	tmpDir := t.TempDir()
+	configPath := tmpDir + "/guest.yaml"
+
+	data := `host: localhost
+port: 9090
+id: test-guest
+name: Test Guest
+tags:
+  - test
+client_cert: "/path/to/cert.pem"
+client_key: "/path/to/key.pem"
+`
+	if err := os.WriteFile(configPath, []byte(data), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := LoadGuestConfig(configPath)
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+
+	if cfg.ClientCert != "/path/to/cert.pem" {
+		t.Errorf("expected client_cert /path/to/cert.pem, got %s", cfg.ClientCert)
+	}
+	if cfg.ClientKey != "/path/to/key.pem" {
+		t.Errorf("expected client_key /path/to/key.pem, got %s", cfg.ClientKey)
+	}
+}
+
+func TestDefaultGuestConfig_ClientCert(t *testing.T) {
+	cfg := DefaultGuestConfig()
+	if cfg.ClientCert != "" {
+		t.Errorf("expected empty client_cert, got %s", cfg.ClientCert)
+	}
+	if cfg.ClientKey != "" {
+		t.Errorf("expected empty client_key, got %s", cfg.ClientKey)
+	}
+}
+
 func TestLoadGuestConfig_AutoClaimNextTask(t *testing.T) {
 	tmpDir := t.TempDir()
 	configPath := tmpDir + "/guest.yaml"
@@ -293,4 +426,50 @@ auto_claim_next_task: true
 	if cfg.Port != 9090 {
 		t.Errorf("expected port 9090, got %d", cfg.Port)
 	}
+}
+
+// generateSelfSignedCert creates a temporary self-signed certificate and key
+// for testing TLS config loading. Returns PEM-encoded cert and key strings.
+func generateSelfSignedCert(t *testing.T) (certPEM, keyPEM string) {
+	t.Helper()
+
+	priv, err := ecdsa.GenerateKey(elliptic.P256(), crand.Reader)
+	if err != nil {
+		t.Fatalf("generate key: %v", err)
+	}
+
+	template := x509.Certificate{
+		SerialNumber: big.NewInt(1),
+		Subject: pkix.Name{
+			Organization: []string{"Test"},
+		},
+		NotBefore:             time.Now(),
+		NotAfter:              time.Now().Add(24 * time.Hour),
+		KeyUsage:              x509.KeyUsageDigitalSignature,
+		ExtKeyUsage:           []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth, x509.ExtKeyUsageServerAuth},
+		BasicConstraintsValid: true,
+	}
+
+	certDER, err := x509.CreateCertificate(crand.Reader, &template, &template, &priv.PublicKey, priv)
+	if err != nil {
+		t.Fatalf("create cert: %v", err)
+	}
+
+	// Encode cert
+	certBuf := new(strings.Builder)
+	if err := pem.Encode(certBuf, &pem.Block{Type: "CERTIFICATE", Bytes: certDER}); err != nil {
+		t.Fatalf("encode cert: %v", err)
+	}
+
+	// Encode key
+	keyDER, err := x509.MarshalECPrivateKey(priv)
+	if err != nil {
+		t.Fatalf("marshal key: %v", err)
+	}
+	keyBuf := new(strings.Builder)
+	if err := pem.Encode(keyBuf, &pem.Block{Type: "EC PRIVATE KEY", Bytes: keyDER}); err != nil {
+		t.Fatalf("encode key: %v", err)
+	}
+
+	return certBuf.String(), keyBuf.String()
 }

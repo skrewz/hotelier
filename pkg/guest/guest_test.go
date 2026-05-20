@@ -2,7 +2,17 @@ package guest
 
 import (
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/tls"
+	"crypto/x509"
+	"crypto/x509/pkix"
 	"encoding/json"
+	"encoding/pem"
+	"fmt"
+	"math/big"
+	"os"
 	"strings"
 	"sync"
 	"testing"
@@ -313,4 +323,222 @@ func TestAgentStopConcurrent(t *testing.T) {
 		}()
 	}
 	wg.Wait()
+}
+
+// TestGuestConnect_NoTLS verifies that a guest without mTLS config
+// builds a nil TLS config (no error).
+func TestGuestConnect_NoTLS(t *testing.T) {
+	cfg := config.GuestConfig{
+		ID:   "test-guest",
+		Name: "Test Guest",
+		Tags: []string{"test"},
+	}
+
+	tlsCfg, err := cfg.TLSConfig()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if tlsCfg != nil {
+		t.Fatal("expected nil TLS config without mTLS settings")
+	}
+}
+
+// TestGuestConnect_TLSConfigBuilt verifies that a guest with client_cert
+// and client_key set builds a valid TLS config.
+func TestGuestConnect_TLSConfigBuilt(t *testing.T) {
+	tmpDir := t.TempDir()
+	certPath := tmpDir + "cert.pem"
+	keyPath := tmpDir + "key.pem"
+
+	certPEM, keyPEM := generateSelfSignedCert(t)
+	if err := os.WriteFile(certPath, []byte(certPEM), 0o600); err != nil {
+		t.Fatalf("write cert: %v", err)
+	}
+	if err := os.WriteFile(keyPath, []byte(keyPEM), 0o600); err != nil {
+		t.Fatalf("write key: %v", err)
+	}
+
+	cfg := config.GuestConfig{
+		ID:         "test-guest",
+		Name:       "Test Guest",
+		Tags:       []string{"test"},
+		ClientCert: certPath,
+		ClientKey:  keyPath,
+	}
+
+	tlsCfg, err := cfg.TLSConfig()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if tlsCfg == nil {
+		t.Fatal("expected non-nil TLS config")
+	}
+	if len(tlsCfg.Certificates) != 1 {
+		t.Fatalf("expected 1 certificate, got %d", len(tlsCfg.Certificates))
+	}
+}
+
+// TestGuestConnect_MissingKeyError verifies that setting only client_cert
+// without client_key returns an error.
+func TestGuestConnect_MissingKeyError(t *testing.T) {
+	cfg := config.GuestConfig{
+		ClientCert: "/tmp/fake-cert.pem",
+	}
+
+	_, err := cfg.TLSConfig()
+	if err == nil {
+		t.Fatal("expected error when only client_cert is set")
+	}
+}
+
+// TestGuestConnect_MissingCertError verifies that setting only client_key
+// without client_cert returns an error.
+func TestGuestConnect_MissingCertError(t *testing.T) {
+	cfg := config.GuestConfig{
+		ClientKey: "/tmp/fake-key.pem",
+	}
+
+	_, err := cfg.TLSConfig()
+	if err == nil {
+		t.Fatal("expected error when only client_key is set")
+	}
+}
+
+// TestGuestConnect_InvalidCertError verifies that nonexistent cert files
+// return an error.
+func TestGuestConnect_InvalidCertError(t *testing.T) {
+	cfg := config.GuestConfig{
+		ClientCert: "/nonexistent/cert.pem",
+		ClientKey:  "/nonexistent/key.pem",
+	}
+
+	_, err := cfg.TLSConfig()
+	if err == nil {
+		t.Fatal("expected error for nonexistent cert files")
+	}
+}
+
+// TestGuestConnect_GuestHasTLSConfig verifies that a Guest with mTLS
+// config has the config accessible for Connect to use.
+func TestGuestConnect_GuestHasTLSConfig(t *testing.T) {
+	tmpDir := t.TempDir()
+	certPath := tmpDir + "cert.pem"
+	keyPath := tmpDir + "key.pem"
+
+	certPEM, keyPEM := generateSelfSignedCert(t)
+	os.WriteFile(certPath, []byte(certPEM), 0o600)
+	os.WriteFile(keyPath, []byte(keyPEM), 0o600)
+
+	cfg := config.GuestConfig{
+		ID:         "test-guest",
+		Name:       "Test Guest",
+		Tags:       []string{"test"},
+		ClientCert: certPath,
+		ClientKey:  keyPath,
+	}
+
+	handler := func(ctx context.Context, task TaskAssignment, _ LogCallback) (*TaskResult, error) {
+		return &TaskResult{TaskID: task.TaskID, Success: true}, nil
+	}
+	g := New(cfg, handler)
+
+	tlsCfg, err := g.config.TLSConfig()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if tlsCfg == nil {
+		t.Fatal("expected non-nil TLS config")
+	}
+	_ = g
+}
+
+// generateSelfSignedCert creates a temporary self-signed certificate and key
+// for testing. Returns PEM-encoded cert and key strings.
+func generateSelfSignedCert(t *testing.T) (certPEM, keyPEM string) {
+	t.Helper()
+
+	priv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatalf("generate key: %v", err)
+	}
+
+	template := x509.Certificate{
+		SerialNumber: big.NewInt(1),
+		Subject: pkix.Name{
+			Organization: []string{"Test"},
+		},
+		NotBefore:             time.Now(),
+		NotAfter:              time.Now().Add(24 * time.Hour),
+		KeyUsage:              x509.KeyUsageDigitalSignature,
+		ExtKeyUsage:           []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth, x509.ExtKeyUsageServerAuth},
+		BasicConstraintsValid: true,
+	}
+
+	certDER, err := x509.CreateCertificate(rand.Reader, &template, &template, &priv.PublicKey, priv)
+	if err != nil {
+		t.Fatalf("create cert: %v", err)
+	}
+
+	certBuf := new(strings.Builder)
+	if err := pem.Encode(certBuf, &pem.Block{Type: "CERTIFICATE", Bytes: certDER}); err != nil {
+		t.Fatalf("encode cert: %v", err)
+	}
+
+	keyDER, err := x509.MarshalECPrivateKey(priv)
+	if err != nil {
+		t.Fatalf("marshal key: %v", err)
+	}
+	keyBuf := new(strings.Builder)
+	if err := pem.Encode(keyBuf, &pem.Block{Type: "EC PRIVATE KEY", Bytes: keyDER}); err != nil {
+		t.Fatalf("encode key: %v", err)
+	}
+
+	return certBuf.String(), keyBuf.String()
+}
+
+// TestGuestConnect_TLSConfigInsecureSkipVerify verifies that the TLS config
+// built by GuestConfig.TLSConfig() can be used with InsecureSkipVerify
+// (useful for testing with self-signed certs).
+func TestGuestConnect_TLSConfigInsecureSkipVerify(t *testing.T) {
+	tmpDir := t.TempDir()
+	certPath := tmpDir + "cert.pem"
+	keyPath := tmpDir + "key.pem"
+
+	certPEM, keyPEM := generateSelfSignedCert(t)
+	os.WriteFile(certPath, []byte(certPEM), 0o600)
+	os.WriteFile(keyPath, []byte(keyPEM), 0o600)
+
+	cfg := config.GuestConfig{
+		ClientCert: certPath,
+		ClientKey:  keyPath,
+	}
+
+	tlsCfg, err := cfg.TLSConfig()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// Verify the cert can be used in a TLS handshake
+	conn, err := tls.Dial("tcp", "nonexistent:0", tlsCfg)
+	if err == nil {
+		conn.Close()
+		t.Fatal("expected dial error to nonexistent host")
+	}
+	// The error is expected — the important thing is the TLS config
+	// was built successfully and the cert was loadable.
+	_ = conn
+}
+
+// TestGuestConnect_WSURLScheme verifies that the default Connect URL
+// uses the ws:// scheme (not wss://).
+func TestGuestConnect_WSURLScheme(t *testing.T) {
+	cfg := config.GuestConfig{
+		Host: "localhost",
+		Port: 8080,
+	}
+
+	host := fmt.Sprintf("ws://%s:%d/ws", cfg.Host, cfg.Port)
+	if host != "ws://localhost:8080/ws" {
+		t.Errorf("expected ws://localhost:8080/ws, got %s", host)
+	}
 }

@@ -101,8 +101,22 @@ func (g *Guest) Connect() error {
 	g.log.Printf("connecting to host at %s", host)
 
 	client := rpc.NewClient(g.id, g.hub, g.log.Printf)
-	if err := client.Connect(host); err != nil {
-		return fmt.Errorf("connect: %w", err)
+
+	// Build TLS config if mTLS is configured
+	tlsConfig, err := g.config.TLSConfig()
+	if err != nil {
+		return fmt.Errorf("build TLS config: %w", err)
+	}
+
+	if tlsConfig != nil {
+		g.log.Printf("using mTLS client certificate for connection")
+		if err := client.ConnectWithTLS(host, tlsConfig); err != nil {
+			return fmt.Errorf("connect with TLS: %w", err)
+		}
+	} else {
+		if err := client.Connect(host); err != nil {
+			return fmt.Errorf("connect: %w", err)
+		}
 	}
 	g.client = client
 	g.log.Printf("connected to host")

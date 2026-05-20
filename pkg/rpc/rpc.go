@@ -2,6 +2,7 @@ package rpc
 
 import (
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -585,7 +586,25 @@ func NewClient(id string, hub *ClientHub, logf func(format string, args ...inter
 
 // Connect establishes a WebSocket connection to the server.
 func (c *Client) Connect(url string) error {
-	conn, _, err := websocket.DefaultDialer.Dial(url, nil)
+	return c.ConnectWithTLS(url, nil)
+}
+
+// ConnectWithTLS establishes a WebSocket connection to the server with an
+// optional TLS configuration. If tlsConfig is nil, the connection is
+// plaintext (ws://). If tlsConfig is provided, the connection is upgraded
+// to wss:// with the given TLS settings (use a wss:// URL).
+func (c *Client) ConnectWithTLS(url string, tlsConfig *tls.Config) error {
+	dialer := websocket.DefaultDialer
+
+	if tlsConfig != nil {
+		// Upgrade the URL scheme from ws:// to wss://
+		if len(url) > 5 && url[:5] == "ws://" {
+			url = "wss://" + url[5:]
+		}
+		dialer.TLSClientConfig = tlsConfig
+	}
+
+	conn, _, err := dialer.Dial(url, nil)
 	if err != nil {
 		return fmt.Errorf("dial: %w", err)
 	}

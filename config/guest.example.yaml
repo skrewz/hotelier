@@ -15,3 +15,10 @@ log_level: "info"
 # When false (default), the guest remains idle after finishing a task and
 # waits for the host to assign the next one.
 #auto_claim_next_task: false
+
+# mTLS client authentication for the WebSocket connection to the Check-In Host.
+# When both client_cert and client_key are set, the guest will present the
+# specified certificate during the TLS handshake (upgrades ws:// to wss://).
+# Both fields must be set together — setting only one will cause a startup error.
+#client_cert: "/path/to/client-cert.pem"
+#client_key:  "/path/to/client-key.pem"

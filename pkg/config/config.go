@@ -1,6 +1,8 @@
 package config
 
 import (
+	"crypto/tls"
+	"fmt"
 	"os"
 	"sync"
 
@@ -61,6 +63,14 @@ type GuestConfig struct {
 	// the next pending task after completing the current one. When false,
 	// the guest remains idle and waits for the host to assign a task.
 	AutoClaimNextTask bool `yaml:"auto_claim_next_task"`
+	// ClientCert is the path to the TLS client certificate for mTLS
+	// authentication with the Check-In Host. When set, the guest will
+	// present this certificate during the TLS handshake.
+	ClientCert string `yaml:"client_cert"`
+	// ClientKey is the path to the TLS client private key for mTLS
+	// authentication with the Check-In Host. Must be set together
+	// with ClientCert.
+	ClientKey string `yaml:"client_key"`
 }
 
 // DefaultServerConfig returns a ServerConfig with sensible defaults.
@@ -86,6 +96,8 @@ func DefaultGuestConfig() GuestConfig {
 		TaskTimeout:       0, // use server default
 		HeartbeatInterval: 0, // use server default
 		LogLevel:          "info",
+		ClientCert:        "",
+		ClientKey:         "",
 	}
 }
 
@@ -113,6 +125,29 @@ func LoadGuestConfig(path string) (GuestConfig, error) {
 		return cfg, err
 	}
 	return cfg, nil
+}
+
+// TLSConfig builds a *tls.Config for mTLS client authentication.
+// Returns nil if neither ClientCert nor ClientKey is set.
+// Returns an error if the cert or key files cannot be read.
+func (g *GuestConfig) TLSConfig() (*tls.Config, error) {
+	if g.ClientCert == "" && g.ClientKey == "" {
+		return nil, nil
+	}
+
+	if g.ClientCert == "" || g.ClientKey == "" {
+		return nil, os.ErrInvalid
+	}
+
+	cert, err := tls.LoadX509KeyPair(g.ClientCert, g.ClientKey)
+	if err != nil {
+		return nil, fmt.Errorf("load client cert/key: %w", err)
+	}
+
+	return &tls.Config{
+		Certificates: []tls.Certificate{cert},
+		RootCAs:      nil, // trust system CAs
+	}, nil
 }
 
 // ConfigStore provides a thread-safe way to store and retrieve configurations.
