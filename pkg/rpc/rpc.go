@@ -516,6 +516,7 @@ type Client struct {
 	closed   atomic.Bool
 	closeCh  chan struct{}
 	callResp chan *JSONRPCMessage
+	onClose  func() // called when the connection is lost unexpectedly
 }
 
 // ClientHub manages client connections.
@@ -584,6 +585,11 @@ func NewClient(id string, hub *ClientHub, logf func(format string, args ...inter
 	}
 }
 
+// SetOnClose sets a callback that is invoked when the connection is lost.
+func (c *Client) SetOnClose(fn func()) {
+	c.onClose = fn
+}
+
 // Connect establishes a WebSocket connection to the server.
 func (c *Client) Connect(url string) error {
 	return c.ConnectWithTLS(url, nil)
@@ -632,6 +638,10 @@ func (c *Client) readLoop() {
 				websocket.CloseNormalClosure,
 				websocket.CloseAbnormalClosure) {
 				c.hub.logf("client %s read error: %v", c.id, err)
+			}
+			// Notify the guest that the connection is lost.
+			if c.onClose != nil {
+				c.onClose()
 			}
 			return
 		}

@@ -65,6 +65,7 @@ type Guest struct {
 	running  bool
 	cancel   context.CancelFunc // cancels the current task's context
 	stopCh   chan struct{}
+	connLost chan struct{} // closed when the connection drops
 	callResp chan *rpc.JSONRPCMessage
 	taskCh   chan TaskAssignment // incoming task assignments
 }
@@ -90,6 +91,7 @@ func New(cfg config.GuestConfig, handler Handler) *Guest {
 		log:      logger,
 		handler:  handler,
 		stopCh:   make(chan struct{}),
+		connLost: make(chan struct{}),
 		callResp: make(chan *rpc.JSONRPCMessage, 1),
 		taskCh:   make(chan TaskAssignment, 16),
 	}
@@ -126,8 +128,29 @@ func (g *Guest) Connect() error {
 		}
 	}
 	g.client = client
+	g.client.SetOnClose(g.setConnLost)
 	g.log.Printf("connected to host")
 	return nil
+}
+
+// setConnLost signals that the connection has been lost.
+// This is called by the readLoop when the WebSocket closes unexpectedly.
+func (g *Guest) setConnLost() {
+	select {
+	case <-g.connLost:
+		// already lost
+	default:
+		close(g.connLost)
+	}
+}
+
+// resetConn prepares for a new connection after a reconnect.
+// It resets the connLost channel so future disconnections can be detected.
+func (g *Guest) resetConn() {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+
+	g.connLost = make(chan struct{})
 }
 
 // Register registers the guest with the Check-In Host.
@@ -278,29 +301,58 @@ func (g *Guest) SendResult(result TaskResult) error {
 	return nil
 }
 
-// Start starts the guest's main loop.
+// Start starts the guest's main loop with automatic reconnection.
 func (g *Guest) Start() error {
+	for {
+		if err := g.connectAndRegister(); err != nil {
+			g.log.Printf("connection failed: %v, retrying in 5s...", err)
+			select {
+			case <-time.After(5 * time.Second):
+			case <-g.stopCh:
+				return nil
+			}
+			continue
+		}
+
+		// Start heartbeat goroutine
+		go g.heartbeatLoop()
+
+		// Start task dispatcher — handles incoming task.assign notifications
+		go g.taskDispatcher()
+
+		// Wait for shutdown or connection loss
+		g.log.Printf("guest ready, waiting for tasks...")
+		select {
+		case <-g.stopCh:
+			g.log.Printf("guest shutting down")
+			return nil
+		case <-g.connLost:
+			g.log.Printf("connection lost, reconnecting...")
+			// Clean up the dead connection
+			if g.client != nil {
+				g.client.Close()
+				g.client = nil
+			}
+		}
+
+		// Reset for reconnect
+		g.resetConn()
+	}
+}
+
+// connectAndRegister connects to the host and registers the guest.
+// Returns nil on success, or an error if the connection fails.
+func (g *Guest) connectAndRegister() error {
 	if err := g.Connect(); err != nil {
 		return err
 	}
-	defer g.client.Close()
 
 	if err := g.Register(); err != nil {
+		g.client.Close()
+		g.client = nil
 		return err
 	}
-	defer g.Unregister()
 
-	// Start heartbeat goroutine
-	go g.heartbeatLoop()
-
-	// Start task dispatcher — handles incoming task.assign notifications
-	go g.taskDispatcher()
-
-	// Wait for shutdown
-	g.log.Printf("guest ready, waiting for tasks...")
-	<-g.stopCh
-
-	g.log.Printf("guest shutting down")
 	return nil
 }
 
@@ -333,6 +385,9 @@ func (g *Guest) heartbeatLoop() {
 				g.log.Printf("heartbeat failed: %v", err)
 			}
 		case <-g.stopCh:
+			return
+		case <-g.connLost:
+			// Connection lost — the Start loop will handle reconnection.
 			return
 		}
 	}
