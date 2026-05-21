@@ -59,10 +59,6 @@ type GuestConfig struct {
 	WorkingDir string `yaml:"working_dir"`
 	// LogLevel is the logging level (debug, info, warn, error).
 	LogLevel string `yaml:"log_level"`
-	// AutoClaimNextTask controls whether the guest automatically picks up
-	// the next pending task after completing the current one. When false,
-	// the guest remains idle and waits for the host to assign a task.
-	AutoClaimNextTask bool `yaml:"auto_claim_next_task"`
 	// ClientCert is the path to the TLS client certificate for mTLS
 	// authentication with the Check-In Host. When set, the guest will
 	// present this certificate during the TLS handshake.

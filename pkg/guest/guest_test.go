@@ -826,7 +826,6 @@ func TestGuestReload(t *testing.T) {
 		TaskTimeout:       900,
 		HeartbeatInterval: 15,
 		LogLevel:          "info",
-		AutoClaimNextTask: false,
 	}
 
 	handler := func(ctx context.Context, task TaskAssignment, sendLog LogCallback) (*TaskResult, error) {
@@ -850,7 +849,6 @@ func TestGuestReload(t *testing.T) {
 		TaskTimeout:       1800,
 		HeartbeatInterval: 30,
 		LogLevel:          "debug",
-		AutoClaimNextTask: true,
 	}
 	g.Reload(newCfg)
 
@@ -862,8 +860,5 @@ func TestGuestReload(t *testing.T) {
 	}
 	if g.config.LogLevel != "debug" {
 		t.Errorf("expected log_level debug, got %s", g.config.LogLevel)
-	}
-	if !g.config.AutoClaimNextTask {
-		t.Error("expected AutoClaimNextTask true after reload")
 	}
 }

@@ -345,7 +345,6 @@ func (s *Server) registerRPCMethods() {
 	s.hub.RegisterMethod("guest.heartbeat", s.handleGuestHeartbeat)
 	s.hub.RegisterMethod("guest.log", s.handleGuestLog)
 	s.hub.RegisterMethod("guest.result", s.handleGuestResult)
-	s.hub.RegisterMethod("task.claim", s.handleTaskClaim)
 
 	// Host → Guest methods (pushed by scheduler)
 	s.hub.RegisterMethod("task.assign", s.handleTaskAssign)
@@ -566,6 +565,9 @@ func (s *Server) handleGuestResult(ctx context.Context, params json.RawMessage) 
 		if err := s.registry.ClearGuestTask(guestID); err != nil {
 			s.log.Printf("failed to clear guest task for %s: %v", guestID, err)
 		}
+
+		// Try to assign the next pending task to this now-idle guest
+		s.tryAssignTask(guestID)
 	}
 
 	// Notify UI of task completion
@@ -579,79 +581,6 @@ func (s *Server) handleGuestResult(ctx context.Context, params json.RawMessage) 
 
 	return map[string]interface{}{
 		"status": "accepted",
-	}, nil
-}
-
-// handleTaskClaim handles a guest voluntarily claiming a pending task.
-func (s *Server) handleTaskClaim(ctx context.Context, params json.RawMessage) (interface{}, *rpc.RPCError) {
-	var req struct {
-		ID   string   `json:"id"`
-		Tags []string `json:"tags"`
-	}
-
-	if err := json.Unmarshal(params, &req); err != nil {
-		return nil, rpc.InvalidParamsError("invalid request parameters")
-	}
-
-	// Find a pending task that matches the guest's tags
-	guest, exists := s.registry.GetGuest(req.ID)
-	if !exists {
-		return nil, rpc.InvalidParamsError("guest not found")
-	}
-
-	// Get pending tasks and find the first one that matches
-	pending := s.taskQueue.GetPendingTasks()
-	var matchedTask *queue.Task
-
-	for _, task := range pending {
-		if len(task.Tags) == 0 {
-			matchedTask = task
-			break
-		}
-		// Check if guest has all required tags
-		if s.matchesTags(guest.Tags, task.Tags) {
-			matchedTask = task
-			break
-		}
-	}
-
-	if matchedTask == nil {
-		return map[string]interface{}{
-			"status": "no_task",
-		}, nil
-	}
-
-	// Assign the task
-	if err := s.taskQueue.Assign(matchedTask.ID, req.ID); err != nil {
-		return nil, rpc.InternalError(err.Error())
-	}
-
-	if err := s.registry.SetGuestTask(req.ID, matchedTask.ID); err != nil {
-		return nil, rpc.InternalError(err.Error())
-	}
-
-	// Push task to guest
-	taskData := map[string]interface{}{
-		"id":     matchedTask.ID,
-		"repos":  matchedTask.Repos,
-		"prompt": matchedTask.Prompt,
-		"tags":   matchedTask.Tags,
-	}
-
-	if err := s.hub.SendToGuest(req.ID, "task.assign", taskData); err != nil {
-		s.log.Printf("failed to push task to guest %s: %v", req.ID, err)
-	}
-
-	s.log.Printf("task %s claimed by guest %s", matchedTask.ID, req.ID)
-
-	return map[string]interface{}{
-		"status": "claimed",
-		"task": map[string]interface{}{
-			"id":     matchedTask.ID,
-			"repos":  matchedTask.Repos,
-			"prompt": matchedTask.Prompt,
-			"tags":   matchedTask.Tags,
-		},
 	}, nil
 }
 

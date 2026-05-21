@@ -197,7 +197,6 @@ The Check-In Host exposes JSON-RPC methods for guest communication.
 | `guest.heartbeat`   | Guest→Host  | Liveness ping.                           |
 | `guest.log`         | Guest→Host  | Push a log entry (chunk).                |
 | `guest.result`      | Guest→Host  | Submit final task result.                |
-| `task.claim`        | Guest→Host  | Voluntarily claim a pending task.        |
 
 ### Host → Guest Methods
 

@@ -221,30 +221,7 @@ func (g *Guest) taskDispatcher() {
 			} else {
 				g.log.Printf("[DISPATCH] task %s finished: success=%v output=%q", task.TaskID, result.Success, result.Output)
 			}
-
-			// If configured, automatically claim the next pending task
-			if g.config.AutoClaimNextTask {
-				g.log.Printf("[DISPATCH] auto-claiming next pending task")
-				g.tryClaimNextTask()
-			}
 		}
-	}
-}
-
-// tryClaimNextTask sends a task.claim RPC to pick up the next pending task.
-func (g *Guest) tryClaimNextTask() {
-	if g.client == nil {
-		return
-	}
-
-	params := map[string]interface{}{
-		"id":   g.id,
-		"tags": g.tags,
-	}
-
-	_, err := g.client.Call("task.claim", params)
-	if err != nil {
-		g.log.Printf("[DISPATCH] failed to claim next task: %v", err)
 	}
 }
 
@@ -466,7 +443,7 @@ func LoadConfig(path string) (config.GuestConfig, error) {
 
 // Reload updates the guest's runtime configuration from a new GuestConfig.
 // It updates the config struct that controls heartbeat intervals, task timeouts,
-// log levels, and auto-claim behavior.
+// and log levels.
 func (g *Guest) Reload(cfg config.GuestConfig) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
@@ -483,10 +460,6 @@ func (g *Guest) Reload(cfg config.GuestConfig) {
 	if cfg.LogLevel != g.config.LogLevel {
 		g.log.Printf("log_level updated: %s", cfg.LogLevel)
 	}
-	if cfg.AutoClaimNextTask != g.config.AutoClaimNextTask {
-		g.log.Printf("auto_claim_next_task updated: %v", cfg.AutoClaimNextTask)
-	}
-
 	g.config = cfg
 }
 

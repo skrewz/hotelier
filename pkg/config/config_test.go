@@ -260,13 +260,6 @@ func TestConfigStoreConcurrency(t *testing.T) {
 	}
 }
 
-func TestDefaultGuestConfig_AutoClaimNextTask(t *testing.T) {
-	cfg := DefaultGuestConfig()
-	if cfg.AutoClaimNextTask {
-		t.Error("expected AutoClaimNextTask to default to false")
-	}
-}
-
 func TestGuestConfig_TLSConfig_NoCert(t *testing.T) {
 	cfg := GuestConfig{}
 
@@ -385,31 +378,6 @@ func TestDefaultGuestConfig_ClientCert(t *testing.T) {
 	}
 	if cfg.ClientKey != "" {
 		t.Errorf("expected empty client_key, got %s", cfg.ClientKey)
-	}
-}
-
-func TestLoadGuestConfig_AutoClaimNextTask(t *testing.T) {
-	tmpDir := t.TempDir()
-	configPath := tmpDir + "/guest.yaml"
-
-	data := `url: wss://localhost:9090/ws
-id: test-guest
-name: Test Guest
-tags:
-  - test
-auto_claim_next_task: true
-`
-	if err := os.WriteFile(configPath, []byte(data), 0o644); err != nil {
-		t.Fatal(err)
-	}
-
-	cfg, err := LoadGuestConfig(configPath)
-	if err != nil {
-		t.Fatalf("load config: %v", err)
-	}
-
-	if !cfg.AutoClaimNextTask {
-		t.Error("expected AutoClaimNextTask to be true from config")
 	}
 }
 
