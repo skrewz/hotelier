@@ -88,6 +88,13 @@ func NewGuestRegistry(maxGuests int, logf func(format string, args ...interface{
 	}
 }
 
+// SetMaxGuests updates the maximum number of guests allowed (0 = unlimited).
+func (r *GuestRegistry) SetMaxGuests(maxGuests int) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.maxGuests = maxGuests
+}
+
 // Register adds a new guest to the registry.
 func (r *GuestRegistry) Register(guestID, name string, tags []string) (*Guest, error) {
 	r.mu.Lock()

@@ -464,5 +464,31 @@ func LoadConfig(path string) (config.GuestConfig, error) {
 	return config.LoadGuestConfig(path)
 }
 
+// Reload updates the guest's runtime configuration from a new GuestConfig.
+// It updates the config struct that controls heartbeat intervals, task timeouts,
+// log levels, and auto-claim behavior.
+func (g *Guest) Reload(cfg config.GuestConfig) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+
+	if cfg.TaskTimeout != g.config.TaskTimeout {
+		g.log.Printf("task_timeout updated: %ds", cfg.TaskTimeout)
+	}
+	if cfg.HeartbeatInterval != g.config.HeartbeatInterval {
+		g.log.Printf("heartbeat_interval updated: %ds", cfg.HeartbeatInterval)
+	}
+	if cfg.SilenceTimeout != g.config.SilenceTimeout {
+		g.log.Printf("silence_timeout updated: %ds", cfg.SilenceTimeout)
+	}
+	if cfg.LogLevel != g.config.LogLevel {
+		g.log.Printf("log_level updated: %s", cfg.LogLevel)
+	}
+	if cfg.AutoClaimNextTask != g.config.AutoClaimNextTask {
+		g.log.Printf("auto_claim_next_task updated: %v", cfg.AutoClaimNextTask)
+	}
+
+	g.config = cfg
+}
+
 // Ensure json is used
 var _ = json.Marshal

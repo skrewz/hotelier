@@ -12,6 +12,11 @@ import (
 	"hotelier/pkg/guest"
 )
 
+// reloadableGuestConfig wraps LoadGuestConfig for the config watcher.
+func reloadableGuestConfig(path string) (interface{}, error) {
+	return config.LoadGuestConfig(path)
+}
+
 func main() {
 	configPath := flag.String("config", "config/guest.yaml", "path to guest configuration file")
 	debug := flag.Bool("debug", false, "enable RPC debug logging to stdout")
@@ -39,6 +44,17 @@ func main() {
 	// Create guest
 	g := guest.New(cfg, handler)
 
+	// Set up config file watcher for hot-reload
+	configCh := make(chan interface{}, 1)
+	watcher, err := config.NewConfigWatcher(*configPath, log.Default(), reloadableGuestConfig)
+	if err != nil {
+		log.Printf("failed to create config watcher: %v (config changes will not be auto-reloaded)", err)
+	} else {
+		go watcher.Run(configCh)
+		log.Printf("config watcher active: %s", *configPath)
+		defer watcher.Close()
+	}
+
 	// Handle graceful shutdown
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
@@ -51,8 +67,22 @@ func main() {
 
 	log.Println("guest started")
 
-	// Wait for shutdown signal
-	<-sigCh
+	// Wait for shutdown signal or config reload
+	for {
+		select {
+		case cfg := <-configCh:
+			// Apply the reloaded config directly from the watcher.
+			if newCfg, ok := cfg.(config.GuestConfig); ok {
+				g.Reload(newCfg)
+			} else {
+				log.Printf("failed to cast reloaded config to GuestConfig")
+			}
+		case <-sigCh:
+			goto shutdown
+		}
+	}
+
+shutdown:
 	log.Println("shutting down guest...")
 
 	// Clean up handler resources (pi subprocess)

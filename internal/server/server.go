@@ -186,6 +186,54 @@ type Server struct {
 	templateDir    string
 }
 
+// Reload updates the server's runtime configuration from a new ServerConfig.
+// It applies changes that can take effect without restarting:
+//   - MaxGuests: updates the registry capacity
+//   - LogDir: recreates the disk log store if the path changed
+//   - TaskTimeout, HeartbeatInterval, SilenceTimeout, MaxLogSize: stored for future use
+func (s *Server) Reload(cfg config.ServerConfig) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	old := s.cfg
+	s.cfg = cfg
+
+	// Update max guests if changed
+	if cfg.MaxGuests != old.MaxGuests {
+		s.registry.SetMaxGuests(cfg.MaxGuests)
+		s.log.Printf("max_guests updated: %d", cfg.MaxGuests)
+	}
+
+	// Recreate disk log store if LogDir changed
+	if cfg.LogDir != old.LogDir {
+		if cfg.LogDir != "" {
+			disk, err := logstore.New(cfg.LogDir)
+			if err != nil {
+				s.log.Printf("failed to create disk log store at %s: %v (keeping in-memory)", cfg.LogDir, err)
+			} else {
+				s.diskLogStore = disk
+				s.log.Printf("disk log store enabled: %s", cfg.LogDir)
+			}
+		} else {
+			s.diskLogStore = nil
+			s.log.Printf("disk log store disabled")
+		}
+	}
+
+	if cfg.TaskTimeout != old.TaskTimeout {
+		s.log.Printf("task_timeout updated: %ds", cfg.TaskTimeout)
+	}
+	if cfg.HeartbeatInterval != old.HeartbeatInterval {
+		s.log.Printf("heartbeat_interval updated: %ds", cfg.HeartbeatInterval)
+	}
+	if cfg.SilenceTimeout != old.SilenceTimeout {
+		s.log.Printf("silence_timeout updated: %ds", cfg.SilenceTimeout)
+	}
+	if cfg.MaxLogSize != old.MaxLogSize {
+		s.log.Printf("max_log_size updated: %d bytes", cfg.MaxLogSize)
+	}
+}
+
 // New creates a new Server instance.
 func New(cfg config.ServerConfig) *Server {
 	logPrefix := "[hotelier]"

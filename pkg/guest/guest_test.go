@@ -820,3 +820,50 @@ func TestGuestNew_ConnLostChannel(t *testing.T) {
 		// expected
 	}
 }
+
+func TestGuestReload(t *testing.T) {
+	cfg := config.GuestConfig{
+		TaskTimeout:       900,
+		HeartbeatInterval: 15,
+		LogLevel:          "info",
+		AutoClaimNextTask: false,
+	}
+
+	handler := func(ctx context.Context, task TaskAssignment, sendLog LogCallback) (*TaskResult, error) {
+		return &TaskResult{TaskID: task.TaskID, Success: true}, nil
+	}
+	g := New(cfg, handler)
+
+	// Verify initial config
+	if g.config.TaskTimeout != 900 {
+		t.Errorf("expected task_timeout 900, got %d", g.config.TaskTimeout)
+	}
+	if g.config.HeartbeatInterval != 15 {
+		t.Errorf("expected heartbeat_interval 15, got %d", g.config.HeartbeatInterval)
+	}
+	if g.config.LogLevel != "info" {
+		t.Errorf("expected log_level info, got %s", g.config.LogLevel)
+	}
+
+	// Reload with new values
+	newCfg := config.GuestConfig{
+		TaskTimeout:       1800,
+		HeartbeatInterval: 30,
+		LogLevel:          "debug",
+		AutoClaimNextTask: true,
+	}
+	g.Reload(newCfg)
+
+	if g.config.TaskTimeout != 1800 {
+		t.Errorf("expected task_timeout 1800, got %d", g.config.TaskTimeout)
+	}
+	if g.config.HeartbeatInterval != 30 {
+		t.Errorf("expected heartbeat_interval 30, got %d", g.config.HeartbeatInterval)
+	}
+	if g.config.LogLevel != "debug" {
+		t.Errorf("expected log_level debug, got %s", g.config.LogLevel)
+	}
+	if !g.config.AutoClaimNextTask {
+		t.Error("expected AutoClaimNextTask true after reload")
+	}
+}

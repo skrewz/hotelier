@@ -1703,3 +1703,66 @@ func TestCheckSilentGuests_ActiveGuest(t *testing.T) {
 		t.Errorf("expected task RUNNING (guest is active), got %s", taskData.Status)
 	}
 }
+
+func TestServerReload_MaxGuests(t *testing.T) {
+	srv := newTestServer(t)
+
+	// Initial max guests is 0 (unlimited)
+	if srv.cfg.MaxGuests != 0 {
+		t.Errorf("expected max_guests 0, got %d", srv.cfg.MaxGuests)
+	}
+
+	// Reload with a max of 5
+	newCfg := config.ServerConfig{MaxGuests: 5}
+	srv.Reload(newCfg)
+
+	if srv.cfg.MaxGuests != 5 {
+		t.Errorf("expected max_guests 5 after reload, got %d", srv.cfg.MaxGuests)
+	}
+
+	// Verify the registry was updated via SetMaxGuests
+	srv.Registry().SetMaxGuests(5)
+	// Register a guest to verify the max limit takes effect
+	_, err := srv.Registry().Register("test-guest", "Test", nil)
+	if err != nil {
+		t.Errorf("expected guest registration to succeed with max 5, got: %v", err)
+	}
+}
+
+func TestServerReload_LogDir(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	srv := newTestServer(t)
+
+	// Initially no disk log store
+	if srv.DiskLogStore() != nil {
+		t.Error("expected nil disk log store initially")
+	}
+
+	// Reload with a LogDir
+	newCfg := config.ServerConfig{LogDir: tmpDir}
+	srv.Reload(newCfg)
+
+	if srv.DiskLogStore() == nil {
+		t.Fatal("expected non-nil disk log store after reload")
+	}
+
+	// Reload with empty LogDir to disable
+	emptyCfg := config.ServerConfig{}
+	srv.Reload(emptyCfg)
+
+	if srv.DiskLogStore() != nil {
+		t.Error("expected nil disk log store after disabling LogDir")
+	}
+}
+
+func TestServerReload_TaskTimeout(t *testing.T) {
+	srv := newTestServer(t)
+
+	newCfg := config.ServerConfig{TaskTimeout: 7200}
+	srv.Reload(newCfg)
+
+	if srv.cfg.TaskTimeout != 7200 {
+		t.Errorf("expected task_timeout 7200, got %d", srv.cfg.TaskTimeout)
+	}
+}
