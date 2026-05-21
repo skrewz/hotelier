@@ -3,7 +3,9 @@ package config
 import (
 	"crypto/tls"
 	"fmt"
+	"net/url"
 	"os"
+	"strings"
 	"sync"
 
 	"gopkg.in/yaml.v3"
@@ -38,10 +40,8 @@ type ServerConfig struct {
 
 // GuestConfig holds the configuration for a guest.
 type GuestConfig struct {
-	// Host is the address of the Check-In Host.
-	Host string `yaml:"host"`
-	// Port is the port of the Check-In Host.
-	Port int `yaml:"port"`
+	// URL is the full WebSocket URL of the Check-In Host (e.g. "wss://host:443/ws").
+	URL string `yaml:"url"`
 	// ID is the unique identifier for this guest.
 	ID string `yaml:"id"`
 	// Name is a human-readable name for this guest.
@@ -91,14 +91,41 @@ func DefaultServerConfig() ServerConfig {
 // DefaultGuestConfig returns a GuestConfig with sensible defaults.
 func DefaultGuestConfig() GuestConfig {
 	return GuestConfig{
-		Host:              "localhost",
-		Port:              8080,
 		TaskTimeout:       0, // use server default
 		HeartbeatInterval: 0, // use server default
 		LogLevel:          "info",
 		ClientCert:        "",
 		ClientKey:         "",
 	}
+}
+
+// ConnectURL returns the WebSocket URL to connect to. The scheme defaults to
+// "ws" unless mTLS is configured (then "wss").
+func (g *GuestConfig) ConnectURL(hasMTLS bool) (string, error) {
+	raw := g.URL
+	if raw == "" {
+		return "", fmt.Errorf("url is required")
+	}
+
+	// url.Parse requires a scheme to distinguish host from path.
+	// If no scheme is present, prepend http:// as a temporary placeholder
+	// so the host/path are parsed correctly, then replace the scheme.
+	if !strings.Contains(raw, "://") {
+		if hasMTLS {
+			raw = "wss://" + raw
+		} else {
+			raw = "ws://" + raw
+		}
+	}
+
+	u, err := url.Parse(raw)
+	if err != nil {
+		return "", fmt.Errorf("parse url: %w", err)
+	}
+	if u.Host == "" {
+		return "", fmt.Errorf("url must have a host")
+	}
+	return u.String(), nil
 }
 
 // LoadServerConfig reads and parses a server config file.

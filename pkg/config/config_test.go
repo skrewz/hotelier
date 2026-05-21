@@ -52,11 +52,8 @@ func TestDefaultServerConfig(t *testing.T) {
 func TestDefaultGuestConfig(t *testing.T) {
 	cfg := DefaultGuestConfig()
 
-	if cfg.Host != "localhost" {
-		t.Errorf("expected host localhost, got %s", cfg.Host)
-	}
-	if cfg.Port != 8080 {
-		t.Errorf("expected port 8080, got %d", cfg.Port)
+	if cfg.URL != "" {
+		t.Errorf("expected empty url, got %s", cfg.URL)
 	}
 	if cfg.TaskTimeout != 0 {
 		t.Errorf("expected task_timeout 0, got %d", cfg.TaskTimeout)
@@ -145,8 +142,7 @@ func TestLoadGuestConfig(t *testing.T) {
 	configPath := filepath.Join(tmpDir, "guest.yaml")
 
 	content := `
-host: "192.168.1.100"
-port: 3000
+url: "wss://192.168.1.100:3000/ws"
 id: "test-guest-1"
 name: "Test Guest"
 tags:
@@ -166,11 +162,8 @@ log_level: "debug"
 		t.Fatalf("LoadGuestConfig failed: %v", err)
 	}
 
-	if cfg.Host != "192.168.1.100" {
-		t.Errorf("expected host 192.168.1.100, got %s", cfg.Host)
-	}
-	if cfg.Port != 3000 {
-		t.Errorf("expected port 3000, got %d", cfg.Port)
+	if cfg.URL != "wss://192.168.1.100:3000/ws" {
+		t.Errorf("expected url wss://192.168.1.100:3000/ws, got %s", cfg.URL)
 	}
 	if cfg.ID != "test-guest-1" {
 		t.Errorf("expected id test-guest-1, got %s", cfg.ID)
@@ -275,10 +268,7 @@ func TestDefaultGuestConfig_AutoClaimNextTask(t *testing.T) {
 }
 
 func TestGuestConfig_TLSConfig_NoCert(t *testing.T) {
-	cfg := GuestConfig{
-		Host: "localhost",
-		Port: 8080,
-	}
+	cfg := GuestConfig{}
 
 	tlsCfg, err := cfg.TLSConfig()
 	if err != nil {
@@ -363,8 +353,7 @@ func TestLoadGuestConfig_ClientCert(t *testing.T) {
 	tmpDir := t.TempDir()
 	configPath := tmpDir + "/guest.yaml"
 
-	data := `host: localhost
-port: 9090
+	data := `url: wss://localhost:9090/ws
 id: test-guest
 name: Test Guest
 tags:
@@ -403,8 +392,7 @@ func TestLoadGuestConfig_AutoClaimNextTask(t *testing.T) {
 	tmpDir := t.TempDir()
 	configPath := tmpDir + "/guest.yaml"
 
-	data := `host: localhost
-port: 9090
+	data := `url: wss://localhost:9090/ws
 id: test-guest
 name: Test Guest
 tags:
@@ -422,9 +410,6 @@ auto_claim_next_task: true
 
 	if !cfg.AutoClaimNextTask {
 		t.Error("expected AutoClaimNextTask to be true from config")
-	}
-	if cfg.Port != 9090 {
-		t.Errorf("expected port 9090, got %d", cfg.Port)
 	}
 }
 

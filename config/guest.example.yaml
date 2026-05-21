@@ -1,6 +1,5 @@
 # Hotelier Guest Configuration
-host: "localhost"
-port: 8080
+url: "wss://hotelier.example.com:443/ws"
 id: "guest-1"
 name: "Development Guest #1"
 tags:

@@ -97,9 +97,6 @@ func New(cfg config.GuestConfig, handler Handler) *Guest {
 
 // Connect connects the guest to the Check-In Host.
 func (g *Guest) Connect() error {
-	host := fmt.Sprintf("ws://%s:%d/ws", g.config.Host, g.config.Port)
-	g.log.Printf("connecting to host at %s", host)
-
 	client := rpc.NewClient(g.id, g.hub, g.log.Printf)
 
 	// Build TLS config if mTLS is configured
@@ -108,13 +105,23 @@ func (g *Guest) Connect() error {
 		return fmt.Errorf("build TLS config: %w", err)
 	}
 
-	if tlsConfig != nil {
+	hasMTLS := tlsConfig != nil
+	if hasMTLS {
 		g.log.Printf("using mTLS client certificate for connection")
-		if err := client.ConnectWithTLS(host, tlsConfig); err != nil {
+	}
+
+	connectURL, err := g.config.ConnectURL(hasMTLS)
+	if err != nil {
+		return fmt.Errorf("resolve connect url: %w", err)
+	}
+	g.log.Printf("connecting to host at %s", connectURL)
+
+	if hasMTLS {
+		if err := client.ConnectWithTLS(connectURL, tlsConfig); err != nil {
 			return fmt.Errorf("connect with TLS: %w", err)
 		}
 	} else {
-		if err := client.Connect(host); err != nil {
+		if err := client.Connect(connectURL); err != nil {
 			return fmt.Errorf("connect: %w", err)
 		}
 	}

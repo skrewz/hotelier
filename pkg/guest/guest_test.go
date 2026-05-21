@@ -10,7 +10,6 @@ import (
 	"crypto/x509/pkix"
 	"encoding/json"
 	"encoding/pem"
-	"fmt"
 	"math/big"
 	"os"
 	"strings"
@@ -529,16 +528,66 @@ func TestGuestConnect_TLSConfigInsecureSkipVerify(t *testing.T) {
 	_ = conn
 }
 
-// TestGuestConnect_WSURLScheme verifies that the default Connect URL
-// uses the ws:// scheme (not wss://).
-func TestGuestConnect_WSURLScheme(t *testing.T) {
+// TestGuestConnect_WSSURLScheme verifies that ConnectURL uses wss://
+// when mTLS is configured and the URL has no scheme.
+func TestGuestConnect_WSSURLScheme(t *testing.T) {
 	cfg := config.GuestConfig{
-		Host: "localhost",
-		Port: 8080,
+		URL: "hotelier.example.com:443/ws",
 	}
 
-	host := fmt.Sprintf("ws://%s:%d/ws", cfg.Host, cfg.Port)
-	if host != "ws://localhost:8080/ws" {
-		t.Errorf("expected ws://localhost:8080/ws, got %s", host)
+	u, err := cfg.ConnectURL(true)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if u != "wss://hotelier.example.com:443/ws" {
+		t.Errorf("expected wss://hotelier.example.com:443/ws, got %s", u)
+	}
+}
+
+// TestGuestConnect_WSURLScheme verifies that ConnectURL uses ws://
+// when mTLS is not configured and the URL has no scheme.
+func TestGuestConnect_WSURLScheme(t *testing.T) {
+	cfg := config.GuestConfig{
+		URL: "localhost:8080/ws",
+	}
+
+	u, err := cfg.ConnectURL(false)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if u != "ws://localhost:8080/ws" {
+		t.Errorf("expected ws://localhost:8080/ws, got %s", u)
+	}
+}
+
+// TestGuestConnect_URLFieldPreservesScheme verifies that an explicit
+// scheme in the URL is not overwritten.
+func TestGuestConnect_URLFieldPreservesScheme(t *testing.T) {
+	cfg := config.GuestConfig{
+		URL: "ws://localhost:8080/ws",
+	}
+
+	u, err := cfg.ConnectURL(true)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if u != "ws://localhost:8080/ws" {
+		t.Errorf("expected ws://localhost:8080/ws, got %s", u)
+	}
+}
+
+// TestGuestConnect_URLFieldPreservesPath verifies that a custom path
+// in the URL is preserved.
+func TestGuestConnect_URLFieldPreservesPath(t *testing.T) {
+	cfg := config.GuestConfig{
+		URL: "wss://example.com/custom-path",
+	}
+
+	u, err := cfg.ConnectURL(true)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if u != "wss://example.com/custom-path" {
+		t.Errorf("expected wss://example.com/custom-path, got %s", u)
 	}
 }

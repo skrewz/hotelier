@@ -68,8 +68,7 @@ max_guests: 0
 ### Guest (`config/guest.yaml`)
 
 ```yaml
-host: "localhost"
-port: 8080
+url: "wss://hotelier.example.com:443/ws"
 id: "guest-1"
 name: "Dev Guest #1"
 tags:
@@ -83,8 +82,23 @@ log_level: "info"
 
 | Field | Description | Default |
 |-------|-------------|--------|
+| `url` | Full WebSocket URL of the Check-In Host (`ws://` or `wss://`). Scheme defaults to `ws://` or `wss://` based on mTLS config if omitted. | — |
 | `working_dir` | Base directory for task execution | `"/tmp/hotelier"` |
 | `log_level` | Logging level (`debug`, `info`, `warn`, `error`) | `"info"` |
+
+Example with mTLS:
+
+```yaml
+url: "wss://hotelier.example.com:443/ws"
+client_cert: "/home/user/.certs/client.crt"
+client_key:  "/home/user/.certs/client.key"
+```
+
+Example without mTLS:
+
+```yaml
+url: "ws://localhost:8080"
+```
 
 ## Task Submission
 
