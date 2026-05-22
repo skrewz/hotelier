@@ -30,8 +30,6 @@ type testLogEntry struct {
 }
 
 // testLogEntries returns the shared set of simulated log entries.
-// Using a single source avoids duplicating test data between the RPC path
-// and the inline Playwright script.
 func testLogEntries() []testLogEntry {
 	return []testLogEntry{
 		{"Task started", "system"},
@@ -166,7 +164,8 @@ func TestValidateToolUI(t *testing.T) {
 	// Step 4: Validate server-side log store has correct entries.
 	validateServerLogs(t, srv, taskID, logEntries)
 
-	// Step 5: Validate UI rendering via Playwright.
+	// Step 5: Validate UI rendering via Playwright by exercising the real
+	// user flow: navigate → task list → click task → detail view.
 	validateUI(t, baseURL, taskID, projectRoot)
 }
 
@@ -239,29 +238,32 @@ const { chromium } = require('playwright');
     process.exit(1);
   }
 
-  const hasParseToolLine = await page.evaluate(() => typeof parseToolLine === 'function');
-  if (!hasParseToolLine) {
-    console.error('parseToolLine function not found');
-    await takeScreenshot('02-no-parseToolLine');
-    process.exit(1);
-  }
+  // Wait for the task list to populate — the Go test has already sent
+  // logs via WebSocket; the server broadcast should have triggered the
+  // client-side refreshTaskList call that renders .task-item elements.
+  await page.waitForSelector('.task-item', { timeout: 10000 });
+  await takeScreenshot('02-task-list');
 
+  // Click the task item — this triggers selectTask() → refreshTaskDetail()
+  // which fetches from /api/tasks/{taskId} and renders the detail view.
+  await page.click('.task-item');
+  await page.waitForSelector('.task-detail-header', { timeout: 5000 });
+  await takeScreenshot('03-task-detail-rendered');
+
+  // Wait for any pending WebSocket updates to arrive and be processed.
+  await new Promise(r => setTimeout(r, 1000));
+  await takeScreenshot('04-after-ws-settle');
+
+  // Validate the rendered DOM.
   const result = await page.evaluate(() => {
-    const logEntries = %s;
-
-    // Build the task-detail-view exactly as renderTaskDetail does.
-    const view = document.getElementById('task-detail-view');
-    view.innerHTML = '<div class="task-detail"><div class="task-detail-header"><div class="task-detail-id">test-task</div></div><div class="task-detail-prompt">Test prompt</div><div class="task-detail-body"></div></div>';
-
-    const task = { id: 'test-task', status: 'COMPLETED', prompt: 'Test prompt', assigned_to: 'test-guest' };
-    const logs = logEntries.map(e => ({ task_id: e.task_id, line: e.line, level: e.level, timestamp: new Date().toISOString() }));
-    renderTaskDetail(task, logs, logs.length);
-
     const body = document.querySelector('.task-detail-body');
+    if (!body) return { error: 'no .task-detail-body found' };
+
     const toolBlocks = body.querySelectorAll('.tool-block');
     const logMsgs = body.querySelectorAll(':scope > .log-msg');
 
-    // Check that no plain-text log-msg contains tool markers — they should be inside tool blocks.
+    // Check that no plain-text log-msg contains tool markers — they should
+    // be inside tool blocks, not duplicated as separate log lines.
     const toolMarkerLines = ['[TOOL_OUTPUT]', '[TOOL_END]', '[TOOL_START]'];
     const hasToolMarkersOutsideBlocks = Array.from(logMsgs).some(m =>
       toolMarkerLines.some(marker => m.textContent.includes(marker))
@@ -281,6 +283,12 @@ const { chromium } = require('playwright');
       hasToolMarkersOutsideBlocks,
     };
   });
+
+  if (result.error) {
+    console.error('DOM validation error:', result.error);
+    await takeScreenshot('05-dom-error');
+    process.exit(1);
+  }
 
   const checks = [
     { name: '2 tool blocks', pass: result.toolBlockCount === 2 },
@@ -303,16 +311,14 @@ const { chromium } = require('playwright');
     }
   }
 
-  // Click the Task Detail tab button so the page's own showTab handler does the work.
-  await page.getByText('Task Detail').click();
-
-  await takeScreenshot('03-final-render');
-
-  if (failed) process.exit(1);
+  if (failed) {
+    await takeScreenshot('06-validation-failed');
+    process.exit(1);
+  }
   console.log('All UI validation checks passed!');
   await browser.close();
 })().catch(e => { console.error('Test failed:', e); process.exit(1); });
-`, screenshotDir, baseURL, jsonLogEntries())
+`, screenshotDir, baseURL)
 
 	tmpScript := t.TempDir() + "/validate_ui.js"
 	if err := os.WriteFile(tmpScript, []byte(script), 0o644); err != nil {
@@ -352,22 +358,6 @@ func jsonID(id int64) *json.RawMessage {
 
 func toolID1() string { return "aBcD1234EfGh5678IjKlMnOpQrStUvWx" }
 func toolID2() string { return "xYz789AbCdEf012GhIjKlMnOpQrStUv01" }
-
-func jsonLogEntries() string {
-	entries := []map[string]interface{}{
-		{"task_id": "test", "line": "Task started", "level": "system", "timestamp": time.Now().Format(time.RFC3339)},
-		{"task_id": "test", "line": "[TOOL_START] bash: cat package.json (id: " + toolID1() + ")", "level": "tool", "timestamp": time.Now().Format(time.RFC3339)},
-		{"task_id": "test", "line": "[TOOL_OUTPUT] bash (id: " + toolID1() + "): {\"name\": \"example-app\", \"version\": \"1.0.0\"}", "level": "tool", "timestamp": time.Now().Format(time.RFC3339)},
-		{"task_id": "test", "line": "[TOOL_END] bash (id: " + toolID1() + "): {\"name\": \"example-app\", \"version\": \"1.0.0\"}", "level": "tool", "timestamp": time.Now().Format(time.RFC3339)},
-		{"task_id": "test", "line": "Let me check the API endpoint and the repo path more carefully.", "level": "text", "timestamp": time.Now().Format(time.RFC3339)},
-		{"task_id": "test", "line": "[TOOL_START] read: package.json (id: " + toolID2() + ")", "level": "tool", "timestamp": time.Now().Format(time.RFC3339)},
-		{"task_id": "test", "line": "[TOOL_OUTPUT] read (id: " + toolID2() + "): {\"name\": \"example-app\", \"version\": \"1.0.0\"}", "level": "tool", "timestamp": time.Now().Format(time.RFC3339)},
-		{"task_id": "test", "line": "[TOOL_END] read (id: " + toolID2() + ") [ERROR]", "level": "tool", "timestamp": time.Now().Format(time.RFC3339)},
-		{"task_id": "test", "line": "Task completed successfully", "level": "system", "timestamp": time.Now().Format(time.RFC3339)},
-	}
-	b, _ := json.Marshal(entries)
-	return string(b)
-}
 
 func min(a, b int) int {
 	if a < b {
