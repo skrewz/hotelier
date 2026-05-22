@@ -227,6 +227,8 @@ const { chromium } = require('playwright');
   page.on('pageerror', err => errors.push(err.message));
 
   const screenshotDir = '%s';
+  const baseURL = '%s';
+  const taskId = '%s';
   const path = require('path');
 
   async function takeScreenshot(name) {
@@ -236,7 +238,7 @@ const { chromium } = require('playwright');
   }
 
   // --- Navigate and take front-page screenshot ---
-  await page.goto('%s');
+  await page.goto(baseURL);
   await page.waitForLoadState('networkidle');
 
   if (errors.length > 0) {
@@ -256,10 +258,18 @@ const { chromium } = require('playwright');
   // Screenshot 2: front page after task submitted (same view, explicit label)
   await takeScreenshot('02-after-task-submitted');
 
-  // Click the task item — this triggers selectTask() → refreshTaskDetail()
-  // which fetches from /api/tasks/{taskId} and renders the detail view.
+  // --- Click the task item and verify URL changes ---
   await page.click('.task-item');
   await page.waitForSelector('.task-detail-header', { timeout: 5000 });
+
+  // Verify URL updated to /task/:id
+  const urlAfterClick = await page.evaluate(() => window.location.pathname);
+  if (!urlAfterClick.startsWith('/task/')) {
+    console.error('FAIL: URL should start with /task/ after clicking task, got:', urlAfterClick);
+    await takeScreenshot('03-url-mismatch');
+    process.exit(1);
+  }
+  console.log('PASS: URL updated to', urlAfterClick);
 
   // Screenshot 3: task detail view after clicking the task
   await takeScreenshot('03-task-clicked-detail');
@@ -267,10 +277,8 @@ const { chromium } = require('playwright');
   // Wait for any pending WebSocket updates to arrive and be processed.
   await new Promise(r => setTimeout(r, 1000));
 
-  // --- Switch to Logs tab ---
-  // Screenshot 4: logs page (showing dates)
+  // --- Switch to Logs tab and verify URL changes ---
   await page.evaluate(async () => {
-    // Manually switch tab (avoid relying on implicit event global)
     document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
     document.querySelectorAll('.tab').forEach(t => {
       if (t.textContent.trim() === 'Logs') t.classList.add('active');
@@ -278,35 +286,81 @@ const { chromium } = require('playwright');
     document.getElementById('tab-tasks').style.display = 'none';
     document.getElementById('tab-detail').style.display = 'none';
     document.getElementById('tab-logs').style.display = 'block';
-    // Load the log dates
     await loadLogDates();
   });
   await new Promise(r => setTimeout(r, 1000));
+
+  // Verify URL updated to /logs
+  const urlAfterLogs = await page.evaluate(() => window.location.pathname);
+  if (urlAfterLogs !== '/logs') {
+    console.error('FAIL: URL should be /logs on Logs tab, got:', urlAfterLogs);
+    await takeScreenshot('04-url-mismatch');
+    process.exit(1);
+  }
+  console.log('PASS: URL updated to /logs');
+
+  // Screenshot 4: logs page (showing dates)
   await takeScreenshot('04-logs-page');
 
   // Screenshot 5: logs page under the most recent date
-  // Click the first (most recent) date entry
   const hasDateItem = await page.evaluate(() => {
     return document.querySelector('.log-task-item') !== null;
   });
   if (hasDateItem) {
     await page.click('.log-task-item');
     await new Promise(r => setTimeout(r, 1500));
+
+    // Verify URL updated to /logs/:date
+    const urlAfterDate = await page.evaluate(() => window.location.pathname);
+    if (!urlAfterDate.startsWith('/logs/')) {
+      console.error('FAIL: URL should start with /logs/ after clicking date, got:', urlAfterDate);
+      await takeScreenshot('05-url-mismatch');
+      process.exit(1);
+    }
+    console.log('PASS: URL updated to', urlAfterDate);
+
     await takeScreenshot('05-logs-under-date');
   } else {
     console.log('No date items found in logs view — skipping date screenshot');
   }
 
-  // --- Return to Task Detail tab for DOM validation ---
-  await page.evaluate(() => {
-    document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
-    document.querySelectorAll('.tab').forEach(t => {
-      if (t.textContent.trim() === 'Task Detail') t.classList.add('active');
-    });
-    document.getElementById('tab-tasks').style.display = 'none';
-    document.getElementById('tab-detail').style.display = 'block';
-    document.getElementById('tab-logs').style.display = 'none';
+  // --- Test direct URL navigation: navigate to /task/:id directly ---
+  await page.goto(baseURL + '/task/' + taskId);
+  await page.waitForLoadState('networkidle');
+  await page.waitForSelector('.task-detail-header', { timeout: 5000 });
+
+  const directNavDetail = await page.evaluate(() => {
+    return document.querySelector('.task-detail-header') !== null;
   });
+  if (!directNavDetail) {
+    console.error('FAIL: Direct navigation to /task/:id did not show detail view');
+    await takeScreenshot('06-direct-nav-fail');
+    process.exit(1);
+  }
+  console.log('PASS: Direct navigation to /task/:id shows detail view');
+  await takeScreenshot('06-direct-task-nav');
+
+  // --- Test browser back/forward ---
+  // Go back — should return to /logs (previous history entry)
+  await page.goBack();
+  await new Promise(r => setTimeout(r, 1000));
+
+  const backUrl = await page.evaluate(() => window.location.pathname);
+  const backIsLogs = await page.evaluate(() => {
+    return document.getElementById('tab-logs').style.display === 'block';
+  });
+  if (!backIsLogs) {
+    console.error('FAIL: After goBack, Logs tab should be active, URL:', backUrl);
+    await takeScreenshot('07-back-fail');
+    process.exit(1);
+  }
+  console.log('PASS: Browser back restored Logs view');
+
+  // --- Return to Task Detail tab for DOM validation ---
+  // Navigate to the task URL to reload the detail view
+  await page.goto(baseURL + '/task/' + taskId);
+  await page.waitForLoadState('networkidle');
+  await page.waitForSelector('.task-detail-header', { timeout: 5000 });
   await new Promise(r => setTimeout(r, 500));
 
   // Validate the rendered DOM.
@@ -341,7 +395,7 @@ const { chromium } = require('playwright');
 
   if (result.error) {
     console.error('DOM validation error:', result.error);
-    await takeScreenshot('06-dom-error');
+    await takeScreenshot('08-dom-error');
     process.exit(1);
   }
 
@@ -367,13 +421,13 @@ const { chromium } = require('playwright');
   }
 
   if (failed) {
-    await takeScreenshot('07-validation-failed');
+    await takeScreenshot('09-validation-failed');
     process.exit(1);
   }
   console.log('All UI validation checks passed!');
   await browser.close();
 })().catch(e => { console.error('Test failed:', e); process.exit(1); });
-`, screenshotDir, baseURL)
+`, screenshotDir, baseURL, taskID)
 
 	tmpScript := t.TempDir() + "/validate_ui.js"
 	if err := os.WriteFile(tmpScript, []byte(script), 0o644); err != nil {

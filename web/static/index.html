@@ -222,19 +222,104 @@
     </div>
 
     <script>
+        // =====================================================================
+        // Lightweight router — keeps the browser URL in sync with UI state.
+        // Uses history.pushState so the address bar reflects the current view
+        // and page refreshes restore the correct state.
+        // =====================================================================
+
         let refreshInterval;
         let ws;
         let activeTaskId = null;
         let taskLogs = {};  // Accumulates logs per task: { taskId: [entries] }
 
-        function showTab(tab) {
-            document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
-            event.target.classList.add('active');
+        const router = {
+            // Push a new URL without reloading the page.
+            // When routerReplaceMode is true (initial dispatch), uses
+            // replaceState instead to avoid polluting the history stack.
+            push(path) {
+                if (routerReplaceMode) {
+                    history.replaceState({ path }, '', path);
+                } else {
+                    history.pushState({ path }, '', path);
+                }
+            },
+
+            // Parse the current pathname into a structured route object.
+            parse() {
+                const parts = location.pathname.split('/').filter(Boolean);
+                if (parts.length === 0 || (parts.length === 1 && parts[0] === 'tasks')) {
+                    return { view: 'tasks' };
+                }
+                if (parts[0] === 'task' && parts[1]) {
+                    return { view: 'detail', taskId: parts[1] };
+                }
+                if (parts[0] === 'logs' && parts.length === 1) {
+                    return { view: 'logs' };
+                }
+                if (parts[0] === 'logs' && parts[1]) {
+                    return { view: 'logs', date: parts[1], taskID: parts[2] || null };
+                }
+                return { view: 'tasks' };
+            },
+
+            // Dispatch the parsed route to the appropriate UI view.
+            // When fromInitialLoad is true, navigation functions should use
+            // replaceState instead of pushState (set via the global flag below).
+            async dispatch(fromInitialLoad) {
+                const route = this.parse();
+                switch (route.view) {
+                case 'detail':
+                    selectTask(route.taskId, fromInitialLoad);
+                    break;
+                case 'logs':
+                    showTab('logs', true, fromInitialLoad);
+                    if (route.date) {
+                        await loadLogTasks(route.date, fromInitialLoad);
+                        if (route.taskID) {
+                            await loadLogEntries(route.date, route.taskID, fromInitialLoad);
+                        }
+                    }
+                    break;
+                default:
+                    showTab('tasks', true, fromInitialLoad);
+                    break;
+                }
+            },
+        };
+
+        // Flag: when true, router.push() acts as replaceState instead.
+        // Set during initial dispatch to avoid polluting the history stack.
+        let routerReplaceMode = false;
+
+        // Internal helper: activate a tab by name in the DOM.
+        // When called from the router (skipUrl === true) we do not push a
+        // second history entry.
+        function activateTabByName(name) {
+            document.querySelectorAll('.tab').forEach(t => {
+                t.classList.toggle('active', t.textContent.trim() === name);
+            });
+        }
+
+        // showTab switches the visible tab panel.
+        //   tab              — 'tasks', 'detail', or 'logs'
+        //   skipUrl          — when true, do NOT call router.push (used by
+        //                      router dispatch and popstate so we don't
+        //                      double-push).
+        //   fromInitialLoad  — when true, URL changes use replaceState
+        //                      instead of pushState.
+        function showTab(tab, skipUrl, fromInitialLoad) {
+            if (!skipUrl) {
+                if (tab === 'tasks') router.push('/tasks');
+                // 'detail' is handled by selectTask which pushes /task/:id
+                // 'logs' — loadLogDates() pushes /logs, so skip here
+            }
+            activateTabByName(tab === 'tasks' ? 'Tasks' : tab === 'detail' ? 'Task Detail' : 'Logs');
             document.getElementById('tab-tasks').style.display = tab === 'tasks' ? 'block' : 'none';
             document.getElementById('tab-detail').style.display = tab === 'detail' ? 'block' : 'none';
             document.getElementById('tab-logs').style.display = tab === 'logs' ? 'block' : 'none';
             if (tab === 'logs') {
-                loadLogDates();
+                loadLogDates(fromInitialLoad);
             }
         }
 
@@ -430,17 +515,27 @@
             return escapeHtml(text);
         }
 
-        function selectTask(taskId) {
+        function selectTask(taskId, fromInitialLoad) {
+            if (fromInitialLoad) routerReplaceMode = true;
             activeTaskId = taskId;
+            router.push('/task/' + taskId);
+            routerReplaceMode = false;
             refresh();
-            showTab('detail');
-            document.querySelectorAll('.tab').forEach(t => {
-                t.classList.remove('active');
-                if (t.textContent.trim() === 'Task Detail') t.classList.add('active');
-            });
+            activateTabByName('Task Detail');
             document.getElementById('tab-tasks').style.display = 'none';
             document.getElementById('tab-detail').style.display = 'block';
+            document.getElementById('tab-logs').style.display = 'none';
             refreshTaskDetail(taskId);
+        }
+
+        function closeTaskDetail() {
+            activeTaskId = null;
+            router.push('/tasks');
+            activateTabByName('Tasks');
+            document.getElementById('tab-tasks').style.display = 'block';
+            document.getElementById('tab-detail').style.display = 'none';
+            document.getElementById('tab-logs').style.display = 'none';
+            document.getElementById('task-detail-view').innerHTML = '<div class="empty-state"><span>📄</span>Select a task to view details</div>';
         }
 
         async function refreshTaskDetail(taskId) {
@@ -567,7 +662,7 @@
                         <div class="task-detail-id">${escapeHtml(task.id)} <span class="badge ${badgeClass}">${task.status}</span></div>
                         <div class="task-detail-meta">${task.assigned_to ? 'Guest: ' + escapeHtml(task.assigned_to) : 'Unassigned'} · ${logs.length} log entries</div>
                     </div>
-                    <button class="btn btn-sm btn-ghost" onclick="selectTask('')">Close</button>
+                    <button class="btn btn-sm btn-ghost" onclick="closeTaskDetail()">Close</button>
                 </div>
                 <div class="task-detail-prompt">${promptHtml}</div>
                 <div class="task-detail-body"></div>
@@ -848,7 +943,10 @@
 
         let logBreadcrumb = []; // [date, taskID?, ...]
 
-        async function loadLogDates() {
+        async function loadLogDates(fromInitialLoad) {
+            if (fromInitialLoad) routerReplaceMode = true;
+            router.push('/logs');
+            routerReplaceMode = false;
             const view = document.getElementById('log-view');
             try {
                 const res = await fetch('/api/logs');
@@ -880,7 +978,10 @@
             view.innerHTML = html;
         }
 
-        async function loadLogTasks(date) {
+        async function loadLogTasks(date, fromInitialLoad) {
+            if (fromInitialLoad) routerReplaceMode = true;
+            router.push('/logs/' + date);
+            routerReplaceMode = false;
             logBreadcrumb = [date];
             const view = document.getElementById('log-view');
             try {
@@ -918,7 +1019,10 @@
             view.innerHTML = html;
         }
 
-        async function loadLogEntries(date, taskID) {
+        async function loadLogEntries(date, taskID, fromInitialLoad) {
+            if (fromInitialLoad) routerReplaceMode = true;
+            router.push('/logs/' + date + '/' + taskID);
+            routerReplaceMode = false;
             logBreadcrumb = [date, taskID];
             const view = document.getElementById('log-view');
             try {
@@ -963,10 +1067,19 @@
             view.innerHTML = html;
         }
 
-        // Initial load
-        refresh();
-        connectWS();
-        refreshInterval = setInterval(refresh, 5000);
+        // Handle browser back/forward — re-dispatch to the correct view.
+        window.addEventListener('popstate', async () => {
+            await router.dispatch(false);
+        });
+
+        // Initial load: refresh data, connect WebSocket, then dispatch the
+        // current URL to the correct view (restores state after page refresh).
+        (async () => {
+            connectWS();
+            refreshInterval = setInterval(refresh, 5000);
+            await refresh();
+            await router.dispatch(true);
+        })();
     </script>
 </body>
 </html>
