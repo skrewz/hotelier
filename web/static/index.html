@@ -332,6 +332,33 @@
             return frag;
         }
 
+        // buildToolBlockHTML creates a complete tool-block div as innerHTML.
+        // Used by renderTaskDetail which builds the full view at once.
+        function buildToolBlockHTML(toolName, toolId, args, output, status) {
+            const statusClass = status === 'error' ? 'error' : 'success';
+            const statusLabel = status === 'error' ? 'error' : 'done';
+            const argsHtml = args ? `<div class="tool-args">${escapeHtml(args)}</div>` : '';
+            const outputHtml = output
+                ? `<div class="tool-output"><div class="output-label">Output</div><pre>${escapeHtml(output)}</pre></div>`
+                : '<div class="tool-output"><div class="output-label">Output</div></div>';
+            return `<div class="tool-block" id="tool-${toolId}">
+                <div class="tool-block-header" onclick="toggleToolBlock('${toolId}')">
+                    <div>
+                        <span class="tool-icon">🔧</span>
+                        <span class="tool-name">${escapeHtml(toolName)}</span>
+                        <span class="tool-id">${toolId}</span>
+                    </div>
+                    <div style="display:flex;align-items:center;gap:0.5rem;">
+                        <span class="tool-status ${statusClass}">${statusLabel}</span>
+                        <span class="tool-chevron">▶</span>
+                    </div>
+                </div>
+                <div class="tool-block-body" id="tool-body-${toolId}">
+                    ${argsHtml}${outputHtml}
+                </div>
+            </div>`;
+        }
+
         function renderToolBlockEnd(block) {
             // Update existing tool block in place — never create a new div
             const blockEl = document.getElementById('tool-' + block.toolId);
@@ -434,12 +461,9 @@
             const badgeClass = `badge-${task.status.toLowerCase()}`;
             const promptHtml = escapeHtml(task.prompt);
 
-            let logsFrag = document.createDocumentFragment();
+            let logsHtml = '';
             if (logs.length === 0) {
-                const emptyMsg = document.createElement('div');
-                emptyMsg.className = 'log-msg system';
-                emptyMsg.textContent = 'Waiting for guest output...';
-                logsFrag.appendChild(emptyMsg);
+                logsHtml += '<div class="log-msg system">Waiting for guest output...</div>';
             } else {
                 const isRunning = task.status === 'RUNNING' || task.status === 'ASSIGNED';
                 let currentToolBlock = null;
@@ -456,29 +480,28 @@
                         if (!parsed) {
                             // Fallback: render as plain text
                             if (currentToolBlock) {
-                                renderToolBlockEnd(currentToolBlock);
+                                logsHtml += buildToolBlockHTML(
+                                    currentToolBlock.toolName, currentToolBlock.toolId,
+                                    currentToolBlock.args, currentToolBlock.output, 'running'
+                                );
                                 currentToolBlock = null;
                             }
-                            const msgEl = document.createElement('div');
-                            msgEl.className = `log-msg guest${cursorClass}`;
-                            const inner = document.createElement('div');
-                            inner.className = 'md-rendered';
-                            inner.innerHTML = renderMarkdown(log.line);
-                            msgEl.appendChild(inner);
-                            logsFrag.appendChild(msgEl);
+                            logsHtml += `<div class="log-msg guest${cursorClass}"><div class="md-rendered">${renderMarkdown(log.line)}</div></div>`;
                             return;
                         }
 
                         if (parsed.type === 'start') {
                             if (currentToolBlock) {
-                                renderToolBlockEnd(currentToolBlock);
+                                // Flush previous incomplete block
+                                logsHtml += buildToolBlockHTML(
+                                    currentToolBlock.toolName, currentToolBlock.toolId,
+                                    currentToolBlock.args, currentToolBlock.output, 'running'
+                                );
                             }
                             currentToolBlock = {
                                 toolName: parsed.toolName, toolId: parsed.toolId,
                                 args: parsed.args, output: '', status: 'running', hasOutput: false
                             };
-                            const frag = renderToolBlockStart(currentToolBlock, timeStr, cursorClass);
-                            logsFrag.appendChild(frag);
                             return;
                         }
 
@@ -495,7 +518,12 @@
                                 if (parsed.result) currentToolBlock.output += parsed.result;
                                 currentToolBlock.status = parsed.isError ? 'error' : 'success';
                             }
-                            renderToolBlockEnd(currentToolBlock);
+                            // Build and append the complete tool block now that we have all output
+                            logsHtml += buildToolBlockHTML(
+                                currentToolBlock.toolName, currentToolBlock.toolId,
+                                currentToolBlock.args, currentToolBlock.output,
+                                currentToolBlock.status
+                            );
                             currentToolBlock = null;
                             return;
                         }
@@ -503,33 +531,30 @@
 
                     // Non-tool log lines
                     if (currentToolBlock) {
-                        renderToolBlockEnd(currentToolBlock);
+                        logsHtml += buildToolBlockHTML(
+                            currentToolBlock.toolName, currentToolBlock.toolId,
+                            currentToolBlock.args, currentToolBlock.output, 'running'
+                        );
                         currentToolBlock = null;
                     }
 
-                    let msgEl;
+                    let msgHtml;
                     if (log.line === 'Task started' || log.line === 'Task completed successfully') {
-                        msgEl = document.createElement('div');
-                        msgEl.className = `log-msg system${cursorClass}`;
-                        msgEl.textContent = log.line;
+                        msgHtml = `<div class="log-msg system${cursorClass}">${escapeHtml(log.line)}</div>`;
                     } else if (level === 'error') {
-                        msgEl = document.createElement('div');
-                        msgEl.className = `log-msg error${cursorClass}`;
-                        msgEl.textContent = log.line;
+                        msgHtml = `<div class="log-msg error${cursorClass}">${escapeHtml(log.line)}</div>`;
                     } else {
-                        msgEl = document.createElement('div');
-                        msgEl.className = `log-msg guest${cursorClass}`;
-                        const inner = document.createElement('div');
-                        inner.className = 'md-rendered';
-                        inner.innerHTML = renderMarkdown(log.line);
-                        msgEl.appendChild(inner);
+                        msgHtml = `<div class="log-msg guest${cursorClass}"><div class="md-rendered">${renderMarkdown(log.line)}</div></div>`;
                     }
-                    logsFrag.appendChild(msgEl);
+                    logsHtml += msgHtml;
                 });
 
                 // Close any remaining open tool block
                 if (currentToolBlock) {
-                    renderToolBlockEnd(currentToolBlock);
+                    logsHtml += buildToolBlockHTML(
+                        currentToolBlock.toolName, currentToolBlock.toolId,
+                        currentToolBlock.args, currentToolBlock.output, 'running'
+                    );
                     currentToolBlock = null;
                 }
             }
@@ -548,9 +573,19 @@
                 <div class="task-detail-body"></div>
             `;
             const detailBody = detailContainer.querySelector('.task-detail-body');
-            detailBody.appendChild(logsFrag);
+            detailBody.innerHTML = logsHtml;
             view.innerHTML = '';
             view.appendChild(detailContainer);
+
+            // Sync taskLogs so appendLogToDetail doesn't double-render
+            if (activeTaskId && taskLogs[task.id]) {
+                taskLogs[task.id] = logs.map(l => ({
+                    task_id: l.task_id || activeTaskId,
+                    line: l.line,
+                    level: l.level || 'info',
+                    timestamp: new Date().toISOString()
+                }));
+            }
 
             // Scroll to bottom
             const scrollBody = view.querySelector('.task-detail-body');

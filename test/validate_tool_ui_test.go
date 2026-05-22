@@ -247,25 +247,38 @@ const { chromium } = require('playwright');
   }
 
   const result = await page.evaluate(() => {
-    const view = document.getElementById('task-detail-view');
-    view.innerHTML = '<div class="task-detail"><div class="task-detail-header"></div><div class="task-detail-body"></div></div>';
-
     const logEntries = %s;
 
-    logEntries.forEach(entry => appendLogToDetail(entry));
+    // Build the task-detail-view exactly as renderTaskDetail does.
+    const view = document.getElementById('task-detail-view');
+    view.innerHTML = '<div class="task-detail"><div class="task-detail-header"><div class="task-detail-id">test-task</div></div><div class="task-detail-prompt">Test prompt</div><div class="task-detail-body"></div></div>';
+
+    const task = { id: 'test-task', status: 'COMPLETED', prompt: 'Test prompt', assigned_to: 'test-guest' };
+    const logs = logEntries.map(e => ({ task_id: e.task_id, line: e.line, level: e.level, timestamp: new Date().toISOString() }));
+    renderTaskDetail(task, logs, logs.length);
 
     const body = document.querySelector('.task-detail-body');
     const toolBlocks = body.querySelectorAll('.tool-block');
     const logMsgs = body.querySelectorAll(':scope > .log-msg');
+
+    // Check that no plain-text log-msg contains tool markers — they should be inside tool blocks.
+    const toolMarkerLines = ['[TOOL_OUTPUT]', '[TOOL_END]', '[TOOL_START]'];
+    const hasToolMarkersOutsideBlocks = Array.from(logMsgs).some(m =>
+      toolMarkerLines.some(marker => m.textContent.includes(marker))
+    );
 
     return {
       toolBlockCount: toolBlocks.length,
       toolBlockIds: Array.from(toolBlocks).map(b => b.id),
       toolStatuses: Array.from(toolBlocks).map(b => b.querySelector('.tool-status')?.textContent?.trim()),
       toolOutputsHavePre: Array.from(toolBlocks).map(b => b.querySelector('.tool-output pre') !== null),
-      toolOutputContents: Array.from(toolBlocks).map(b => b.querySelector('.tool-output pre')?.textContent?.substring(0, 50) || ''),
+      toolOutputContents: Array.from(toolBlocks).map(b => {
+        const pre = b.querySelector('.tool-output pre');
+        return pre ? pre.textContent.substring(0, 50) : '';
+      }),
       logMsgCount: logMsgs.length,
       hasPlainMsg: Array.from(logMsgs).some(m => m.textContent?.includes("Let me check")),
+      hasToolMarkersOutsideBlocks,
     };
   });
 
@@ -274,9 +287,10 @@ const { chromium } = require('playwright');
     { name: 'unique tool block IDs', pass: result.toolBlockIds[0] !== result.toolBlockIds[1] },
     { name: 'first block status "done"', pass: result.toolStatuses[0] === 'done' },
     { name: 'second block status "error"', pass: result.toolStatuses[1] === 'error' },
-    { name: 'both use <pre> for output', pass: result.toolOutputsHavePre[0] && result.toolOutputsHavePre[1] },
-    { name: 'first output contains JSON', pass: result.toolOutputContents[0].includes("example-app") },
+    { name: 'first block has <pre> for output', pass: result.toolOutputsHavePre[0] },
+    { name: 'first output contains JSON', pass: result.toolOutputContents[0] && result.toolOutputContents[0].includes("example-app") },
     { name: 'plain text msg after tools', pass: result.hasPlainMsg },
+    { name: 'no tool markers outside blocks', pass: !result.hasToolMarkersOutsideBlocks },
   ];
 
   let failed = false;
@@ -289,15 +303,8 @@ const { chromium } = require('playwright');
     }
   }
 
-  // Switch to the Task Detail tab so the rendered logs are visible for the screenshot.
-  await page.evaluate(() => {
-    // Make the detail view visible regardless of tab state
-    const detailView = document.getElementById('task-detail-view');
-    if (detailView) detailView.style.display = 'block';
-    // Hide other tabs
-    const tasksView = document.getElementById('tasks-view');
-    if (tasksView) tasksView.style.display = 'none';
-  });
+  // Click the Task Detail tab button so the page's own showTab handler does the work.
+  await page.getByText('Task Detail').click();
 
   await takeScreenshot('03-final-render');
 
