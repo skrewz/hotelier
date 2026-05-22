@@ -104,6 +104,7 @@
         .tool-block-body.open { display: block; }
         .tool-block-body .tool-args { padding: 0.5rem 0.75rem; font-size: 0.75rem; color: #94a3b8; font-family: 'SF Mono', 'Fira Code', monospace; white-space: pre-wrap; word-break: break-all; }
         .tool-block-body .tool-output { padding: 0.5rem 0.75rem; font-size: 0.75rem; color: #cbd5e1; font-family: 'SF Mono', 'Fira Code', monospace; white-space: pre-wrap; word-break: break-all; max-height: 300px; overflow-y: auto; border-top: 1px solid #1e293b; }
+        .tool-block-body .tool-output pre { margin: 0; white-space: pre-wrap; word-break: break-all; font-family: inherit; font-size: inherit; color: inherit; }
         .tool-block-body .tool-output .output-label { color: #475569; font-size: 0.65rem; text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 0.25rem; }
 
         .streaming-cursor::after { content: '▊'; animation: blink 1s infinite; color: #22c55e; }
@@ -353,13 +354,13 @@
                 </div>
             `;
 
-            // Update body: append result to output
+            // Update body: append result to output as pre-formatted text
             const bodyEl = blockEl.querySelector('.tool-block-body');
             const outputDiv = bodyEl.querySelector('.tool-output');
             if (outputDiv && block.output) {
-                outputDiv.innerHTML = renderMarkdown(block.output);
+                outputDiv.innerHTML = '<pre>' + escapeHtml(block.output) + '</pre>';
             } else if (!outputDiv && block.output) {
-                bodyEl.innerHTML = `<div class="tool-output"><div class="output-label">Output</div>${renderMarkdown(block.output)}</div>`;
+                bodyEl.innerHTML = `<div class="tool-output"><div class="output-label">Output</div><pre>${escapeHtml(block.output)}</pre></div>`;
             }
         }
 
@@ -447,58 +448,61 @@
                     const isLast = i === logs.length - 1 && isRunning;
                     const timeStr = new Date(log.timestamp).toLocaleTimeString();
                     const cursorClass = isLast ? ' streaming-cursor' : '';
+                    const level = log.level || '';
 
-                    // Parse tool start
-                    const toolStartMatch = log.line.match(/^\[TOOL_START\]\s+(\S+?)\s*:?\s*(.*)\s*\(id:\s*([^)]+)\)/);
-                    if (toolStartMatch) {
-                        // Close any open tool block first
-                        if (currentToolBlock) {
-                            renderToolBlockEnd(currentToolBlock);
+                    // Use level field to determine event type — not regex parsing of the line.
+                    if (level === 'tool') {
+                        const parsed = parseToolLine(log.line);
+                        if (!parsed) {
+                            // Fallback: render as plain text
+                            if (currentToolBlock) {
+                                renderToolBlockEnd(currentToolBlock);
+                                currentToolBlock = null;
+                            }
+                            const msgEl = document.createElement('div');
+                            msgEl.className = `log-msg guest${cursorClass}`;
+                            const inner = document.createElement('div');
+                            inner.className = 'md-rendered';
+                            inner.innerHTML = renderMarkdown(log.line);
+                            msgEl.appendChild(inner);
+                            logsFrag.appendChild(msgEl);
+                            return;
                         }
-                        const toolName = toolStartMatch[1];
-                        const args = toolStartMatch[2].trim();
-                        const toolId = toolStartMatch[3];
-                        currentToolBlock = {
-                            toolName, toolId, args: '', output: '',
-                            status: 'running', hasOutput: false
-                        };
-                        const frag = renderToolBlockStart(currentToolBlock, timeStr, cursorClass);
-                        logsFrag.appendChild(frag);
-                        return;
-                    }
 
-                    // Parse tool output
-                    const toolOutputMatch = log.line.match(/^\[TOOL_OUTPUT\]\s+(\S+?)\s*\(id:\s*([^)]+)\):\s*(.*)$/);
-                    if (toolOutputMatch) {
-                        const toolId = toolOutputMatch[2];
-                        const output = toolOutputMatch[3];
-                        if (currentToolBlock && currentToolId(currentToolBlock) === toolId) {
-                            currentToolBlock.output += output;
-                            currentToolBlock.hasOutput = true;
+                        if (parsed.type === 'start') {
+                            if (currentToolBlock) {
+                                renderToolBlockEnd(currentToolBlock);
+                            }
+                            currentToolBlock = {
+                                toolName: parsed.toolName, toolId: parsed.toolId,
+                                args: parsed.args, output: '', status: 'running', hasOutput: false
+                            };
+                            const frag = renderToolBlockStart(currentToolBlock, timeStr, cursorClass);
+                            logsFrag.appendChild(frag);
+                            return;
                         }
-                        return;
-                    }
 
-                    // Parse tool end
-                    const toolEndMatch = log.line.match(/^\[TOOL_END\]\s+(\S+?)\s*\(id:\s*([^)]+)\)(?:\s*\[ERROR\])?:?\s*(.*)$/);
-                    if (toolEndMatch) {
-                        const toolName = toolEndMatch[1];
-                        const toolId = toolEndMatch[2];
-                        const result = toolEndMatch[3].trim();
-                        if (currentToolBlock && currentToolId(currentToolBlock) === toolId) {
-                            if (result) currentToolBlock.output += result;
-                            currentToolBlock.status = log.line.includes('[ERROR]') ? 'error' : 'success';
+                        if (parsed.type === 'output') {
+                            if (currentToolBlock && currentToolId(currentToolBlock) === parsed.toolId) {
+                                currentToolBlock.output += parsed.result;
+                                currentToolBlock.hasOutput = true;
+                            }
+                            return;
                         }
-                        if (currentToolBlock) {
+
+                        if (parsed.type === 'end') {
+                            if (currentToolBlock && currentToolId(currentToolBlock) === parsed.toolId) {
+                                if (parsed.result) currentToolBlock.output += parsed.result;
+                                currentToolBlock.status = parsed.isError ? 'error' : 'success';
+                            }
                             renderToolBlockEnd(currentToolBlock);
                             currentToolBlock = null;
+                            return;
                         }
-                        return;
                     }
 
                     // Non-tool log lines
                     if (currentToolBlock) {
-                        // Close any unclosed tool block
                         renderToolBlockEnd(currentToolBlock);
                         currentToolBlock = null;
                     }
@@ -507,6 +511,10 @@
                     if (log.line === 'Task started' || log.line === 'Task completed successfully') {
                         msgEl = document.createElement('div');
                         msgEl.className = `log-msg system${cursorClass}`;
+                        msgEl.textContent = log.line;
+                    } else if (level === 'error') {
+                        msgEl = document.createElement('div');
+                        msgEl.className = `log-msg error${cursorClass}`;
                         msgEl.textContent = log.line;
                     } else {
                         msgEl = document.createElement('div');
@@ -645,84 +653,140 @@
             ws.onclose = () => setTimeout(connectWS, 5000);
         }
 
+        // parseToolLine extracts tool metadata from a [TOOL_START/OUTPUT/END] line.
+        // Returns { type, toolName, toolId, args, result } or null if not a tool line.
+        function parseToolLine(line) {
+            // TOOL_START: [TOOL_START] toolName: args (id: xxx)  or  [TOOL_START] toolName (id: xxx)
+            const startMatch = line.match(/^\[TOOL_START\]\s+(\S+?):\s*(.*?)\s*\(id:\s*([^)]+)\)/);
+            if (startMatch) {
+                return { type: 'start', toolName: startMatch[1], toolId: startMatch[3], args: startMatch[2].trim(), result: '' };
+            }
+            const startMatch2 = line.match(/^\[TOOL_START\]\s+(\S+?)\s*\(id:\s*([^)]+)\)/);
+            if (startMatch2) {
+                return { type: 'start', toolName: startMatch2[1], toolId: startMatch2[2], args: '', result: '' };
+            }
+            // TOOL_OUTPUT: [TOOL_OUTPUT] toolName (id: xxx): output
+            const outputMatch = line.match(/^\[TOOL_OUTPUT\]\s+(\S+?)\s*\(id:\s*([^)]+)\):\s*(.*)$/);
+            if (outputMatch) {
+                return { type: 'output', toolName: outputMatch[1], toolId: outputMatch[2], args: '', result: outputMatch[3] };
+            }
+            // TOOL_END: [TOOL_END] toolName (id: xxx): result  or  [TOOL_END] toolName (id: xxx) [ERROR]
+            const endMatchErr = line.match(/^\[TOOL_END\]\s+(\S+?)\s*\(id:\s*([^)]+)\)\s*\[ERROR\](?::\s*(.*))?$/);
+            if (endMatchErr) {
+                return { type: 'end', toolName: endMatchErr[1], toolId: endMatchErr[2], args: '', result: (endMatchErr[3] || '').trim(), isError: true };
+            }
+            const endMatch = line.match(/^\[TOOL_END\]\s+(\S+?)\s*\(id:\s*([^)]+)\):\s*(.*)$/);
+            if (endMatch) {
+                return { type: 'end', toolName: endMatch[1], toolId: endMatch[2], args: '', result: endMatch[3].trim(), isError: false };
+            }
+            const endMatch2 = line.match(/^\[TOOL_END\]\s+(\S+?)\s*\(id:\s*([^)]+)\)$/);
+            if (endMatch2) {
+                return { type: 'end', toolName: endMatch2[1], toolId: endMatch2[2], args: '', result: '', isError: false };
+            }
+            return null;
+        }
+
         function appendLogToDetail(logEntry) {
             const view = document.getElementById('task-detail-view');
             const body = view.querySelector('.task-detail-body');
             if (!body) return;
 
-            const timeStr = new Date(logEntry.timestamp).toLocaleTimeString();
+            const level = logEntry.level || '';
             const line = logEntry.line;
 
-            // Parse tool start
-            const toolStartMatch = line.match(/^\[TOOL_START\]\s+(\S+?)\s*:?\s*(.*)\s*\(id:\s*([^)]+)\)/);
-            if (toolStartMatch) {
-                const toolName = toolStartMatch[1];
-                const args = toolStartMatch[2].trim();
-                const toolId = toolStartMatch[3];
-                const frag = renderToolBlockStart({ toolName, toolId, args, output: '', status: 'running', hasOutput: false }, timeStr, '');
-                body.appendChild(frag);
-                body.scrollTop = body.scrollHeight;
-                return;
-            }
-
-            // Parse tool output — update the existing tool block in place
-            const toolOutputMatch = line.match(/^\[TOOL_OUTPUT\]\s+(\S+?)\s*\(id:\s*([^)]+)\):\s*(.*)$/);
-            if (toolOutputMatch) {
-                const toolId = toolOutputMatch[2];
-                const output = toolOutputMatch[3];
-                const block = body.querySelector(`#tool-${toolId}`);
-                if (block) {
-                    const outputDiv = block.querySelector('.tool-output');
-                    if (outputDiv) {
-                        const existing = outputDiv.innerHTML || '';
-                        outputDiv.innerHTML = renderMarkdown(existing + output);
-                    }
+            // Use the level field to determine event type — not regex parsing of the line.
+            if (level === 'tool') {
+                const parsed = parseToolLine(line);
+                if (!parsed) {
+                    // Fallback: render as plain tool line
+                    const msgEl = document.createElement('div');
+                    msgEl.className = 'log-msg guest';
+                    const inner = document.createElement('div');
+                    inner.className = 'md-rendered';
+                    inner.innerHTML = renderMarkdown(line);
+                    msgEl.appendChild(inner);
+                    body.appendChild(msgEl);
+                    body.scrollTop = body.scrollHeight;
+                    return;
                 }
-                body.scrollTop = body.scrollHeight;
-                return;
-            }
 
-            // Parse tool end — update the existing tool block in place
-            const toolEndMatch = line.match(/^\[TOOL_END\]\s+(\S+?)\s*\(id:\s*([^)]+)\)(?:\s*\[ERROR\])?:?\s*(.*)$/);
-            if (toolEndMatch) {
-                const toolName = toolEndMatch[1];
-                const toolId = toolEndMatch[2];
-                const result = toolEndMatch[3].trim();
-                const isError = line.includes('[ERROR]');
-                const statusClass = isError ? 'error' : 'success';
-                const statusLabel = isError ? 'error' : 'done';
-                const block = body.querySelector(`#tool-${toolId}`);
-                if (block) {
-                    const header = block.querySelector('.tool-block-header');
-                    header.innerHTML = `
-                        <div>
-                            <span class="tool-icon">🔧</span>
-                            <span class="tool-name">${escapeHtml(toolName)}</span>
-                            <span class="tool-id">${toolId}</span>
-                        </div>
-                        <div style="display:flex;align-items:center;gap:0.5rem;">
-                            <span class="tool-status ${statusClass}">${statusLabel}</span>
-                            <span class="tool-chevron">▶</span>
-                        </div>
-                    `;
-                    const bodyEl = block.querySelector('.tool-block-body');
-                    const outputDiv = bodyEl.querySelector('.tool-output');
-                    if (outputDiv && result) {
-                        const existing = outputDiv.innerHTML || '';
-                        outputDiv.innerHTML = renderMarkdown(existing + result);
-                    } else if (result) {
-                        bodyEl.innerHTML = `<div class="tool-output"><div class="output-label">Output</div>${renderMarkdown(result)}</div>`;
-                    }
+                if (parsed.type === 'start') {
+                    const frag = renderToolBlockStart({
+                        toolName: parsed.toolName, toolId: parsed.toolId,
+                        args: parsed.args, output: '', status: 'running', hasOutput: false
+                    }, '', '');
+                    body.appendChild(frag);
+                    body.scrollTop = body.scrollHeight;
+                    return;
                 }
-                body.scrollTop = body.scrollHeight;
-                return;
+
+                if (parsed.type === 'output') {
+                    const block = body.querySelector(`#tool-${parsed.toolId}`);
+                    if (block) {
+                        const outputDiv = block.querySelector('.tool-output');
+                        if (outputDiv) {
+                            const pre = outputDiv.querySelector('pre');
+                            if (pre) {
+                                pre.textContent += parsed.result;
+                            } else {
+                                outputDiv.innerHTML = '<pre>' + escapeHtml(parsed.result) + '</pre>';
+                            }
+                        }
+                    }
+                    body.scrollTop = body.scrollHeight;
+                    return;
+                }
+
+                if (parsed.type === 'end') {
+                    const block = body.querySelector(`#tool-${parsed.toolId}`);
+                    if (block) {
+                        const statusClass = parsed.isError ? 'error' : 'success';
+                        const statusLabel = parsed.isError ? 'error' : 'done';
+                        const header = block.querySelector('.tool-block-header');
+                        header.innerHTML = `
+                            <div>
+                                <span class="tool-icon">🔧</span>
+                                <span class="tool-name">${escapeHtml(parsed.toolName)}</span>
+                                <span class="tool-id">${parsed.toolId}</span>
+                            </div>
+                            <div style="display:flex;align-items:center;gap:0.5rem;">
+                                <span class="tool-status ${statusClass}">${statusLabel}</span>
+                                <span class="tool-chevron">▶</span>
+                            </div>
+                        `;
+                        const bodyEl = block.querySelector('.tool-block-body');
+                        let outputDiv = bodyEl.querySelector('.tool-output');
+                        if (!outputDiv) {
+                            bodyEl.innerHTML = '<div class="tool-output"><div class="output-label">Output</div></div>';
+                            outputDiv = bodyEl.querySelector('.tool-output');
+                        }
+                        if (parsed.result) {
+                            const pre = outputDiv.querySelector('pre');
+                            if (pre) {
+                                pre.textContent += parsed.result;
+                            } else {
+                                outputDiv.innerHTML = '<pre>' + escapeHtml(parsed.result) + '</pre>';
+                            }
+                        }
+                        // Auto-open the block when completed
+                        bodyEl.classList.add('open');
+                        const chevron = header.querySelector('.tool-chevron');
+                        if (chevron) chevron.classList.add('open');
+                    }
+                    body.scrollTop = body.scrollHeight;
+                    return;
+                }
             }
 
-            // Non-tool log lines
+            // Non-tool log lines: render based on level
             let msgEl;
             if (line === 'Task started' || line === 'Task completed successfully') {
                 msgEl = document.createElement('div');
                 msgEl.className = 'log-msg system';
+                msgEl.textContent = line;
+            } else if (level === 'error') {
+                msgEl = document.createElement('div');
+                msgEl.className = 'log-msg error';
                 msgEl.textContent = line;
             } else {
                 msgEl = document.createElement('div');
