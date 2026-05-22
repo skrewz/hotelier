@@ -9,6 +9,7 @@ import (
 	"log"
 	"os"
 	"os/exec"
+	"strings"
 	"sync"
 	"time"
 )
@@ -113,6 +114,8 @@ func (c *PiClient) Start(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("stderr pipe: %w", err)
 	}
+
+	c.log.Printf("pi command: %s (cwd: %s)", strings.Join(c.cmd.Args, " "), c.cwd)
 
 	if err := c.cmd.Start(); err != nil {
 		return fmt.Errorf("start pi: %w", err)
@@ -276,6 +279,11 @@ func (c *PiClient) readEvents() {
 			continue
 		}
 
+		// Log tool execution events for troubleshooting
+		if event.Type == "tool_execution_start" || event.Type == "tool_execution_end" {
+			c.log.Printf("pi tool: %s %s (id: %s)", event.Type, event.ToolName, event.ToolCallId)
+		}
+
 		select {
 		case c.eventCh <- event:
 		case <-c.doneCh:
@@ -285,6 +293,13 @@ func (c *PiClient) readEvents() {
 
 	if err := scanner.Err(); err != nil {
 		c.log.Printf("pi stdout scan error: %v", err)
+	}
+
+	// Check if the process has exited (stdout closed = process died or stdin closed)
+	if state := c.cmd.ProcessState; state != nil {
+		c.log.Printf("pi process exited (state: %v)", state)
+	} else {
+		c.log.Printf("pi stdout closed, process state unknown")
 	}
 }
 
@@ -334,7 +349,7 @@ func IsTextDelta(event Event) bool {
 
 // IsGuestEnd checks if the event is a guest completion event.
 func IsGuestEnd(event Event) bool {
-	return event.Type == "guest_end"
+	return event.Type == "guest_end" || event.Type == "agent_end"
 }
 
 // FinalText extracts the final assistant message text from an guest_end event.

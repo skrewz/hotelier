@@ -175,9 +175,11 @@ func (h *PIHandler) ExecuteTask(ctx context.Context, task TaskAssignment, sendLo
 	}
 
 	// Send the prompt
+	h.log.Printf("[PI] sending prompt to pi (client running: %v)", h.client.IsRunning())
 	if err := h.client.Prompt(ctx, prompt); err != nil {
 		return nil, fmt.Errorf("send prompt: %w", err)
 	}
+	h.log.Printf("[PI] prompt sent, waiting for events")
 
 	// Collect streaming output
 	var mu sync.Mutex
@@ -187,9 +189,28 @@ func (h *PIHandler) ExecuteTask(ctx context.Context, task TaskAssignment, sendLo
 	eventCh := h.client.Subscribe()
 
 	done := make(chan struct{})
+
+	// Track last activity for idle detection
+	var lastActivityMu sync.Mutex
+	lastActivity := time.Now()
+	updateActivity := func() {
+		lastActivityMu.Lock()
+		defer lastActivityMu.Unlock()
+		lastActivity = time.Now()
+	}
+	getLastActivity := func() time.Time {
+		lastActivityMu.Lock()
+		defer lastActivityMu.Unlock()
+		return lastActivity
+	}
+
 	go func() {
 		defer close(done)
+		eventCount := 0
 		for event := range eventCh {
+			eventCount++
+			updateActivity()
+			h.log.Printf("[PI] event #%d: type=%s", eventCount, event.Type)
 			if pi.IsGuestEnd(event) {
 				// Text deltas have already been streamed via sendLog.
 				// No need to re-send the final text — it would duplicate.
@@ -227,6 +248,7 @@ func (h *PIHandler) ExecuteTask(ctx context.Context, task TaskAssignment, sendLo
 					if err := sendLog(task.TaskID, logMsg); err != nil {
 						h.log.Printf("[PI] failed to send tool log: %v", err)
 					}
+					h.log.Printf("[TOOL] %s started (id: %s)", toolName, toolID)
 
 				case "tool_execution_update":
 					partial := pi.ToolPartialResult(event)
@@ -251,6 +273,7 @@ func (h *PIHandler) ExecuteTask(ctx context.Context, task TaskAssignment, sendLo
 					if err := sendLog(task.TaskID, logMsg); err != nil {
 						h.log.Printf("[PI] failed to send tool end log: %v", err)
 					}
+					h.log.Printf("[TOOL] %s ended (id: %s) elapsed=%s", toolName, toolID, time.Since(lastActivity))
 				}
 			}
 		}
@@ -260,30 +283,41 @@ func (h *PIHandler) ExecuteTask(ctx context.Context, task TaskAssignment, sendLo
 	// The context is driven by the guest's task timeout (configurable) or
 	// by a server-sent task.cancel RPC (via silence detection). No hardcoded
 	// timeout here — the server's silence detection replaces the old fixed limit.
-	select {
-	case <-done:
-		// Agent completed
-	case <-ctx.Done():
-		h.log.Printf("[PI] task %s cancelled by context", task.TaskID)
-		_ = h.client.Abort()
-		return &TaskResult{
-			TaskID:  task.TaskID,
-			Success: false,
-			Error:   "task cancelled",
-		}, nil
+	idleCheck := time.NewTicker(30 * time.Second)
+	defer idleCheck.Stop()
+
+	for {
+		select {
+		case <-done:
+			idleCheck.Stop()
+			// Agent completed
+			return &TaskResult{
+				TaskID:  task.TaskID,
+				Success: true,
+				Output:  output.String(),
+			}, nil
+		case <-ctx.Done():
+			idleCheck.Stop()
+			h.log.Printf("[PI] task %s cancelled by context", task.TaskID)
+			_ = h.client.Abort()
+			return &TaskResult{
+				TaskID:  task.TaskID,
+				Success: false,
+				Error:   "task cancelled",
+			}, nil
+		case <-idleCheck.C:
+			idle := time.Since(getLastActivity())
+			if idle > 3*time.Minute {
+				h.log.Printf("[PI] task %s idle for %s — agent may be stuck", task.TaskID, idle)
+				_ = h.client.Abort()
+				return &TaskResult{
+					TaskID:  task.TaskID,
+					Success: false,
+					Error:   fmt.Sprintf("agent idle for %s", idle.Round(time.Second)),
+				}, nil
+			}
+		}
 	}
-
-	mu.Lock()
-	result := output.String()
-	mu.Unlock()
-
-	h.log.Printf("[PI] task %s completed, output length: %d", task.TaskID, len(result))
-
-	return &TaskResult{
-		TaskID:  task.TaskID,
-		Success: true,
-		Output:  result,
-	}, nil
 }
 
 // prepareRepos clones any remote repos into a task-specific directory and
