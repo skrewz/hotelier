@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"strings"
 	"sync"
 	"time"
 
@@ -218,6 +219,11 @@ func (g *Guest) taskDispatcher() {
 			result, err := g.ExecuteTask(task)
 			if err != nil {
 				g.log.Printf("[DISPATCH] task %s error: %v", task.TaskID, err)
+				// If the guest is already running a task, decline the assignment
+				// so the server can re-queue it for another guest.
+				if strings.Contains(err.Error(), "already running a task") {
+					g.DeclineTask(task.TaskID, err.Error())
+				}
 			} else {
 				g.log.Printf("[DISPATCH] task %s finished: success=%v output=%q", task.TaskID, result.Success, result.Output)
 			}
@@ -276,6 +282,23 @@ func (g *Guest) SendResult(result TaskResult) error {
 		return fmt.Errorf("send result: %w", err)
 	}
 	return nil
+}
+
+// DeclineTask notifies the host that this guest cannot accept a task assignment.
+// This is called when the guest is already running a task and receives a new
+// assignment it cannot handle.
+func (g *Guest) DeclineTask(taskID, reason string) {
+	params := map[string]string{
+		"task_id":  taskID,
+		"guest_id": g.id,
+		"reason":   reason,
+	}
+
+	if _, err := g.client.Call("guest.task_declined", params); err != nil {
+		g.log.Printf("[DISPATCH] failed to decline task %s: %v", taskID, err)
+	} else {
+		g.log.Printf("[DISPATCH] declined task %s: %s", taskID, reason)
+	}
 }
 
 // Start starts the guest's main loop with automatic reconnection.

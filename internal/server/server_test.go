@@ -1766,3 +1766,96 @@ func TestServerReload_TaskTimeout(t *testing.T) {
 		t.Errorf("expected task_timeout 7200, got %d", srv.cfg.TaskTimeout)
 	}
 }
+
+func TestTryAssignTask_RejectsNonIdleGuest(t *testing.T) {
+	srv := newTestServer(t)
+
+	// Register a guest
+	_, err := srv.Registry().Register("test-guest", "test-guest", []string{"default"})
+	if err != nil {
+		t.Fatalf("register guest: %v", err)
+	}
+
+	// Add a pending task
+	task := &queue.Task{
+		ID:     "task-1",
+		Prompt: "test task",
+		Tags:   []string{"default"},
+	}
+	if err := srv.TaskQueue().Add(task); err != nil {
+		t.Fatalf("add task: %v", err)
+	}
+
+	// Set the guest to running state (simulating a guest already executing a task)
+	if err := srv.Registry().SetGuestTask("test-guest", "existing-task"); err != nil {
+		t.Fatalf("set guest task: %v", err)
+	}
+
+	// tryAssignTask should not assign because the guest is not idle
+	srv.tryAssignTask("test-guest")
+
+	// The task should still be pending (not assigned)
+	qTask, ok := srv.TaskQueue().Get("task-1")
+	if !ok {
+		t.Fatal("task should still exist")
+	}
+	if qTask.Status != queue.TaskStatusPending {
+		t.Errorf("expected task status PENDING, got %s", qTask.Status)
+	}
+
+	// The guest should still have its original task
+	regGuest, ok := srv.Registry().GetGuest("test-guest")
+	if !ok {
+		t.Fatal("guest should still exist")
+	}
+	if regGuest.TaskID != "existing-task" {
+		t.Errorf("expected guest task 'existing-task', got %s", regGuest.TaskID)
+	}
+}
+
+func TestTryAssignTask_AssignsToIdleGuest(t *testing.T) {
+	srv := newTestServer(t)
+
+	// Register a guest
+	_, err := srv.Registry().Register("test-guest", "test-guest", []string{"default"})
+	if err != nil {
+		t.Fatalf("register guest: %v", err)
+	}
+
+	// Add a pending task
+	task := &queue.Task{
+		ID:     "task-1",
+		Prompt: "test task",
+		Tags:   []string{"default"},
+	}
+	if err := srv.TaskQueue().Add(task); err != nil {
+		t.Fatalf("add task: %v", err)
+	}
+
+	// Guest is idle — tryAssignTask should assign the task
+	srv.tryAssignTask("test-guest")
+
+	// The task should now be assigned
+	qTask, ok := srv.TaskQueue().Get("task-1")
+	if !ok {
+		t.Fatal("task should still exist")
+	}
+	if qTask.Status != queue.TaskStatusAssigned {
+		t.Errorf("expected task status ASSIGNED, got %s", qTask.Status)
+	}
+	if qTask.AssignedTo != "test-guest" {
+		t.Errorf("expected task assigned to 'test-guest', got %s", qTask.AssignedTo)
+	}
+
+	// The guest should now be running
+	regGuest, ok := srv.Registry().GetGuest("test-guest")
+	if !ok {
+		t.Fatal("guest should still exist")
+	}
+	if regGuest.TaskID != "task-1" {
+		t.Errorf("expected guest task 'task-1', got %s", regGuest.TaskID)
+	}
+	if regGuest.State != registry.GuestStateRunning {
+		t.Errorf("expected guest state RUNNING, got %s", regGuest.State)
+	}
+}

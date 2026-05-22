@@ -345,6 +345,7 @@ func (s *Server) registerRPCMethods() {
 	s.hub.RegisterMethod("guest.heartbeat", s.handleGuestHeartbeat)
 	s.hub.RegisterMethod("guest.log", s.handleGuestLog)
 	s.hub.RegisterMethod("guest.result", s.handleGuestResult)
+	s.hub.RegisterMethod("guest.task_declined", s.handleGuestTaskDeclined)
 
 	// Host → Guest methods (pushed by scheduler)
 	s.hub.RegisterMethod("task.assign", s.handleTaskAssign)
@@ -584,6 +585,52 @@ func (s *Server) handleGuestResult(ctx context.Context, params json.RawMessage) 
 	}, nil
 }
 
+// handleGuestTaskDeclined handles a guest declining a task assignment.
+// This is called when the guest is already running a task and cannot accept
+// a new one. The server reverts the assignment and tries to assign the task
+// to another eligible guest.
+func (s *Server) handleGuestTaskDeclined(ctx context.Context, params json.RawMessage) (interface{}, *rpc.RPCError) {
+	var req struct {
+		TaskID  string `json:"task_id"`
+		GuestID string `json:"guest_id"`
+		Reason  string `json:"reason,omitempty"`
+	}
+
+	if err := json.Unmarshal(params, &req); err != nil {
+		return nil, rpc.InvalidParamsError("invalid request parameters")
+	}
+
+	if req.TaskID == "" {
+		return nil, rpc.InvalidParamsError("task_id is required")
+	}
+
+	s.log.Printf("task %s declined by guest %s: %s", req.TaskID, req.GuestID, req.Reason)
+
+	// Revert the task assignment in the queue
+	if err := s.taskQueue.UpdateStatus(req.TaskID, queue.TaskStatusPending); err != nil {
+		s.log.Printf("failed to re-queue task %s: %v", req.TaskID, err)
+	} else {
+		// Clear the guest's task assignment in the registry
+		if err := s.registry.ClearGuestTask(req.GuestID); err != nil {
+			s.log.Printf("failed to clear guest task for %s: %v", req.GuestID, err)
+		}
+
+		// Notify UI of task re-queue
+		s.hub.Broadcast(rpc.ConnectionRoleBrowser, &rpc.JSONRPCMessage{
+			JSONRPC: "2.0",
+			Method:  "task.updated",
+			Params:  json.RawMessage(fmt.Sprintf(`{"task_id":"%s","status":"pending"}`, req.TaskID)),
+		})
+
+		// Try to assign the task to another eligible guest
+		s.tryAssignTaskToEligible(req.TaskID)
+	}
+
+	return map[string]interface{}{
+		"status": "accepted",
+	}, nil
+}
+
 // handleTaskAssign is registered for host→guest task.assign (for completeness).
 func (s *Server) handleTaskAssign(ctx context.Context, params json.RawMessage) (interface{}, *rpc.RPCError) {
 	return map[string]interface{}{
@@ -599,9 +646,72 @@ func (s *Server) handleTaskCancel(ctx context.Context, params json.RawMessage) (
 }
 
 // tryAssignTask tries to assign a pending task to the given guest.
+// tryAssignTaskToEligible finds an idle guest that matches the given task's
+// tags and assigns the task to that guest. It is used when a previously-
+// assigned guest declines the task.
+func (s *Server) tryAssignTaskToEligible(taskID string) {
+	task, exists := s.taskQueue.Get(taskID)
+	if !exists {
+		return
+	}
+
+	guests := s.registry.FindAvailableGuests(task.Tags)
+	if len(guests) == 0 {
+		return
+	}
+
+	// Try each idle guest in order until one accepts
+	for _, guest := range guests {
+		// Skip the guest that already declined
+		if guest.ID == task.AssignedTo {
+			continue
+		}
+
+		if err := s.taskQueue.Assign(task.ID, guest.ID); err != nil {
+			s.log.Printf("failed to assign task %s to guest %s: %v", task.ID, guest.ID, err)
+			continue
+		}
+
+		if err := s.registry.SetGuestTask(guest.ID, task.ID); err != nil {
+			s.log.Printf("failed to set guest task: %v", err)
+			s.taskQueue.UpdateStatus(task.ID, queue.TaskStatusPending)
+			continue
+		}
+
+		taskData := map[string]interface{}{
+			"id":     task.ID,
+			"repos":  task.Repos,
+			"prompt": task.Prompt,
+			"tags":   task.Tags,
+		}
+
+		if err := s.hub.SendToGuest(guest.ID, "task.assign", taskData); err != nil {
+			s.log.Printf("failed to push task to guest %s: %v", guest.ID, err)
+			s.registry.ClearGuestTask(guest.ID)
+			s.taskQueue.UpdateStatus(task.ID, queue.TaskStatusPending)
+			continue
+		}
+
+		s.log.Printf("task %s reassigned to guest %s", task.ID, guest.ID)
+		return
+	}
+
+	// No guest accepted — re-queue the task
+	if err := s.taskQueue.UpdateStatus(taskID, queue.TaskStatusPending); err != nil {
+		s.log.Printf("failed to re-queue task %s after all guests declined: %v", taskID, err)
+	}
+}
+
+// tryAssignTask tries to assign a pending task to the given guest.
 func (s *Server) tryAssignTask(guestID string) {
 	guest, exists := s.registry.GetGuest(guestID)
 	if !exists {
+		return
+	}
+
+	// Only assign to idle guests — a guest that is already running a task
+	// on the client side should not receive another assignment.
+	if guest.State != registry.GuestStateIdle {
 		return
 	}
 
