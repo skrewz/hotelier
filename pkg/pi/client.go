@@ -294,13 +294,6 @@ func (c *PiClient) readEvents() {
 	if err := scanner.Err(); err != nil {
 		c.log.Printf("pi stdout scan error: %v", err)
 	}
-
-	// Check if the process has exited (stdout closed = process died or stdin closed)
-	if state := c.cmd.ProcessState; state != nil {
-		c.log.Printf("pi process exited (state: %v)", state)
-	} else {
-		c.log.Printf("pi stdout closed, process state unknown")
-	}
 }
 
 func (c *PiClient) readStderr() {

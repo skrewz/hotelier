@@ -210,7 +210,12 @@ func (h *PIHandler) ExecuteTask(ctx context.Context, task TaskAssignment, sendLo
 		for event := range eventCh {
 			eventCount++
 			updateActivity()
-			h.log.Printf("[PI] event #%d: type=%s", eventCount, event.Type)
+
+			// Log significant events; suppress message_update noise
+			if event.Type != "message_update" {
+				h.log.Printf("[PI] event #%d: type=%s", eventCount, event.Type)
+			}
+
 			if pi.IsGuestEnd(event) {
 				// Text deltas have already been streamed via sendLog.
 				// No need to re-send the final text — it would duplicate.
