@@ -26,19 +26,24 @@ Every turn that touches client-side code **must** run the integration test suite
 make test-integration
 ```
 
-This starts a real server, registers a guest via WebSocket, simulates tool call log entries (including `[TOOL_START]`, `[TOOL_OUTPUT]`, `[TOOL_END]` with both success and error paths), and then uses Playwright to:
+This starts a real server, registers a guest via WebSocket, simulates tool call log entries (including `[TOOL_START]`, `[TOOL_OUTPUT]`, `[TOOL_END]` with both success and error paths), and then uses Playwright to exercise the **real user flow**:
 
-1. Construct the task detail view in-memory via `appendLogToDetail`
-2. Assert structural properties (tool block count, statuses, `<pre>` usage, etc.)
-3. Take a full-page `.png` screenshot of the rendered output
+1. Navigate to the page and wait for the task list to populate (via real WebSocket messages from the Go test)
+2. Click the task item — this triggers `selectTask()` → `refreshTaskDetail()` → `renderTaskDetail()`
+3. Wait for any pending WebSocket updates to settle
+4. Assert structural properties (tool block count, statuses, `<pre>` usage, etc.)
+5. Take full-page `.png` screenshots at each stage
 
-The screenshot is saved to a temp directory and its path is logged in the test output. **You must read that screenshot** and verify visually that:
+The screenshots are saved to a temp directory and their paths are logged in the test output. **You must read the screenshots** and verify visually that:
 
+- The detail view renders under the "Task Detail" tab (not the "Tasks" tab)
 - Tool blocks render with correct headers (tool name, ID, status label)
 - Tool output is inside `<pre>` elements within the tool block body — not as separate plain-text log lines
 - `[TOOL_OUTPUT]` and `[TOOL_END]` lines are consumed by the tool block, not duplicated as plain text below it
 - Plain-text messages appear correctly between tool blocks
 - Error tool blocks show the correct error status
+
+> **Principle:** The Playwright script must follow the real user journey — navigate, interact, observe — not inject DOM elements and call rendering functions directly. Injected DOM bypasses the actual code paths (WebSocket delivery, task list rendering, `selectTask`, tab switching) that were the source of real bugs. If the test doesn't exercise the same functions a user would trigger, it isn't a true integration test.
 
 If the screenshot shows any of the issues from the previous commit (tool output lines duplicated as plain text outside tool blocks), **stop and fix the rendering logic before proceeding**.
 
@@ -63,7 +68,7 @@ At the end of every turn where you modify client-side code, deliberate on these 
 
 **Rule of thumb:** If the UI can look wrong in ways that structural assertions can't catch, a screenshot is the safety net. When in doubt, add one.
 
-**How to extend the test:** The Playwright script is embedded inline in `validateUI()` inside `test/validate_tool_ui_test.go`. To add a screenshot, call `await takeScreenshot('04-descriptive-name')` at the appropriate point in the script. To add new log entries, extend `testLogEntries()` and `jsonLogEntries()`. To add assertions, extend the `checks` array in the inline script.
+**How to extend the test:** The Playwright script is embedded inline in `validateUI()` inside `test/validate_tool_ui_test.go`. To add a screenshot, call `await takeScreenshot('04-descriptive-name')` at the appropriate point in the script. To add new log entries, extend `testLogEntries()`. To add assertions, extend the `checks` array in the inline script. To change the user interaction sequence (e.g. add a new step between clicking the task and validating), insert `await` calls before the `page.evaluate()` block.
 
 ## Manual Playwright smoke test
 
