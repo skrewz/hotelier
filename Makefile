@@ -1,4 +1,4 @@
-.PHONY: build test test-coverage test-race lint check-format clean run-server run-guest image
+.PHONY: build test test-coverage test-race test-integration lint check-format clean run-server run-guest image
 
 MODULE  := hotelier
 GO      := go
@@ -11,7 +11,7 @@ build: ## Build hotelier server and guest binaries
 	$(GO) build -trimpath -ldflags "$(LDFLAGS)" -o bin/hotelier ./cmd/hotelier
 	$(GO) build -trimpath -ldflags "$(LDFLAGS)" -o bin/guest ./cmd/guest
 
-test: lint test-coverage test-race ## Run all tests (after linting)
+test: lint test-coverage test-race test-integration ## Run all tests (after linting)
 	@echo "All test targets passed"
 
 test-coverage: ## Run tests with coverage report
@@ -25,6 +25,10 @@ test-coverage: ## Run tests with coverage report
 test-race: ## Run tests with race detector
 	$(GO) test -race -count=1 ./...
 	@echo "Race detector passed"
+
+test-integration: ## Run integration tests (Playwright UI validation)
+	$(GO) test -race -tags=integration -count=1 ./test/
+	@echo "Integration tests passed"
 
 lint: ## Run go vet and check formatting with gofumpt
 	$(GO) vet ./...

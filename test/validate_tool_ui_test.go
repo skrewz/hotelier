@@ -131,11 +131,11 @@ func TestValidateToolUI(t *testing.T) {
 
 	// Step 3: Assign task to guest and simulate tool call log entries.
 	assignParams, _ := json.Marshal(map[string]interface{}{
-		"id":           taskID,
-		"repos":        []string{"/tmp/test-repo"},
-		"prompt":       "Simulate tool calls and validate UI rendering",
-		"tags":         []string{"business-default"},
-		"assigned_to":  "ui-test-guest",
+		"id":          taskID,
+		"repos":       []string{"/tmp/test-repo"},
+		"prompt":      "Simulate tool calls and validate UI rendering",
+		"tags":        []string{"business-default"},
+		"assigned_to": "ui-test-guest",
 	})
 	hub.Broadcast(rpc.ConnectionRoleGuest, &rpc.JSONRPCMessage{
 		JSONRPC: "2.0", Method: "task.assign", Params: assignParams,
@@ -197,25 +197,52 @@ func validateServerLogs(t *testing.T, srv *server.Server, taskID string, expecte
 }
 
 func validateUI(t *testing.T, baseURL, taskID, projectRoot string) {
+	// Allow overriding the screenshot directory via env var for manual inspection.
+	// When set, screenshots survive t.TempDir() cleanup.
+	overrideDir := os.Getenv("SCREENSHOT_DIR")
+	var screenshotDir string
+	if overrideDir != "" {
+		screenshotDir = overrideDir
+		if err := os.MkdirAll(screenshotDir, 0o755); err != nil {
+			t.Fatalf("create screenshot dir: %v", err)
+		}
+	} else {
+		screenshotDir = t.TempDir() + "/screenshots"
+		if err := os.MkdirAll(screenshotDir, 0o755); err != nil {
+			t.Fatalf("create screenshot dir: %v", err)
+		}
+	}
+
 	script := fmt.Sprintf(`
 const { chromium } = require('playwright');
 (async () => {
   const browser = await chromium.launch({ headless: true });
-  const page = await browser.newPage();
+  const page = await browser.newPage({ viewport: { width: 1280, height: 900 } });
   const errors = [];
   page.on('pageerror', err => errors.push(err.message));
+
+  const screenshotDir = '%s';
+  const path = require('path');
+
+  async function takeScreenshot(name) {
+    const filePath = path.join(screenshotDir, name + '.png');
+    await page.screenshot({ path: filePath, fullPage: true });
+    console.log('Screenshot saved:', filePath);
+  }
 
   await page.goto('%s');
   await page.waitForLoadState('networkidle');
 
   if (errors.length > 0) {
     console.error('JS errors on page load:', errors);
+    await takeScreenshot('01-page-load');
     process.exit(1);
   }
 
   const hasParseToolLine = await page.evaluate(() => typeof parseToolLine === 'function');
   if (!hasParseToolLine) {
     console.error('parseToolLine function not found');
+    await takeScreenshot('02-no-parseToolLine');
     process.exit(1);
   }
 
@@ -262,14 +289,26 @@ const { chromium } = require('playwright');
     }
   }
 
+  // Switch to the Task Detail tab so the rendered logs are visible for the screenshot.
+  await page.evaluate(() => {
+    // Make the detail view visible regardless of tab state
+    const detailView = document.getElementById('task-detail-view');
+    if (detailView) detailView.style.display = 'block';
+    // Hide other tabs
+    const tasksView = document.getElementById('tasks-view');
+    if (tasksView) tasksView.style.display = 'none';
+  });
+
+  await takeScreenshot('03-final-render');
+
   if (failed) process.exit(1);
   console.log('All UI validation checks passed!');
   await browser.close();
 })().catch(e => { console.error('Test failed:', e); process.exit(1); });
-`, baseURL, jsonLogEntries())
+`, screenshotDir, baseURL, jsonLogEntries())
 
 	tmpScript := t.TempDir() + "/validate_ui.js"
-	if err := os.WriteFile(tmpScript, []byte(script), 0644); err != nil {
+	if err := os.WriteFile(tmpScript, []byte(script), 0o644); err != nil {
 		t.Fatalf("write playwright script: %v", err)
 	}
 
@@ -286,6 +325,15 @@ const { chromium } = require('playwright');
 
 	if err := cmd.Run(); err != nil {
 		t.Fatalf("Playwright UI validation failed: %v", err)
+	}
+
+	// List any screenshots taken
+	files, _ := os.ReadDir(screenshotDir)
+	if len(files) > 0 {
+		t.Log("Screenshots taken:")
+		for _, f := range files {
+			t.Logf("  %s", filepath.Join(screenshotDir, f.Name()))
+		}
 	}
 }
 

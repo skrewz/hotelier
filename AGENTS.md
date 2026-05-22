@@ -18,7 +18,57 @@ Changes that touch JavaScript, HTML, CSS, or WebSocket communication **must** be
 
 **Why:** JS errors silently swallowed by empty `catch {}` blocks, duplicate `const` declarations, wrong DOM selectors, and WebSocket message format mismatches all pass Go tests but break the UI completely.
 
-**How:**
+## Mandatory integration test: `make test-integration`
+
+Every turn that touches client-side code **must** run the integration test suite and inspect the screenshots:
+
+```bash
+make test-integration
+```
+
+This starts a real server, registers a guest via WebSocket, simulates tool call log entries (including `[TOOL_START]`, `[TOOL_OUTPUT]`, `[TOOL_END]` with both success and error paths), and then uses Playwright to:
+
+1. Construct the task detail view in-memory via `appendLogToDetail`
+2. Assert structural properties (tool block count, statuses, `<pre>` usage, etc.)
+3. Take a full-page `.png` screenshot of the rendered output
+
+The screenshot is saved to a temp directory and its path is logged in the test output. **You must read that screenshot** and verify visually that:
+
+- Tool blocks render with correct headers (tool name, ID, status label)
+- Tool output is inside `<pre>` elements within the tool block body — not as separate plain-text log lines
+- `[TOOL_OUTPUT]` and `[TOOL_END]` lines are consumed by the tool block, not duplicated as plain text below it
+- Plain-text messages appear correctly between tool blocks
+- Error tool blocks show the correct error status
+
+If the screenshot shows any of the issues from the previous commit (tool output lines duplicated as plain text outside tool blocks), **stop and fix the rendering logic before proceeding**.
+
+## Test ownership and test-suite deliberation
+
+The integration test suite (`test/validate_tool_ui_test.go`) is **your responsibility** — not the user's. Treat it as living code that evolves alongside the UI.
+
+At the end of every turn where you modify client-side code, deliberate on these questions **before handing back**:
+
+1. **Does the diff suggest the integration test should be extended?**
+   - Have you changed how tool blocks are rendered? → Add or update assertions about block structure, status labels, or output containment.
+   - Have you changed the `parseToolLine` regexes? → Add test cases for edge-case formats (e.g. tool names with hyphens, empty args, multi-line output).
+   - Have you added a new log level or message type? → Add corresponding test entries.
+   - Have you changed CSS / layout? → The screenshot inspection catches regressions, but consider whether a new structural assertion would be more reliable.
+
+2. **Should the test take additional screenshots?**
+   - Are you introducing a new UI state (e.g. empty task, loading spinner, empty state, error banner)? → Add a `takeScreenshot` call at that point so future agents can visually inspect it.
+   - Is the change likely to produce visual regressions that assertions can't catch (spacing, alignment, colour)? → Add a screenshot.
+
+3. **Do the existing screenshots still make sense?**
+   - Run `make test-integration` with `SCREENSHOT_DIR=/tmp/hotelier-screenshots` and read the saved `.png` files. If the rendered output no longer matches what the test was designed to validate, update the test data and assertions accordingly.
+
+**Rule of thumb:** If the UI can look wrong in ways that structural assertions can't catch, a screenshot is the safety net. When in doubt, add one.
+
+**How to extend the test:** The Playwright script is embedded inline in `validateUI()` inside `test/validate_tool_ui_test.go`. To add a screenshot, call `await takeScreenshot('04-descriptive-name')` at the appropriate point in the script. To add new log entries, extend `testLogEntries()` and `jsonLogEntries()`. To add assertions, extend the `checks` array in the inline script.
+
+## Manual Playwright smoke test
+
+For quick checks outside the integration test suite:
+
 1. Start the server: `./bin/hotelier &`
 2. Launch a headless browser via Playwright to exercise the full path:
    ```js
