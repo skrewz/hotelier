@@ -57,10 +57,16 @@ func TestValidateToolUI(t *testing.T) {
 	}
 	projectRoot := p
 
+	logDir := t.TempDir() + "/logs"
+	if err := os.MkdirAll(logDir, 0o755); err != nil {
+		t.Fatalf("create log dir: %v", err)
+	}
+
 	cfg := config.ServerConfig{
 		Host:      "127.0.0.1",
 		Port:      0,
 		MaxGuests: 0,
+		LogDir:    logDir,
 	}
 	srv := server.New(cfg)
 	hub := srv.Hub()
@@ -229,6 +235,7 @@ const { chromium } = require('playwright');
     console.log('Screenshot saved:', filePath);
   }
 
+  // --- Navigate and take front-page screenshot ---
   await page.goto('%s');
   await page.waitForLoadState('networkidle');
 
@@ -242,17 +249,65 @@ const { chromium } = require('playwright');
   // logs via WebSocket; the server broadcast should have triggered the
   // client-side refreshTaskList call that renders .task-item elements.
   await page.waitForSelector('.task-item', { timeout: 10000 });
-  await takeScreenshot('02-task-list');
+
+  // Screenshot 1: front page (Tasks tab with the submitted task visible)
+  await takeScreenshot('01-front-page');
+
+  // Screenshot 2: front page after task submitted (same view, explicit label)
+  await takeScreenshot('02-after-task-submitted');
 
   // Click the task item — this triggers selectTask() → refreshTaskDetail()
   // which fetches from /api/tasks/{taskId} and renders the detail view.
   await page.click('.task-item');
   await page.waitForSelector('.task-detail-header', { timeout: 5000 });
-  await takeScreenshot('03-task-detail-rendered');
+
+  // Screenshot 3: task detail view after clicking the task
+  await takeScreenshot('03-task-clicked-detail');
 
   // Wait for any pending WebSocket updates to arrive and be processed.
   await new Promise(r => setTimeout(r, 1000));
-  await takeScreenshot('04-after-ws-settle');
+
+  // --- Switch to Logs tab ---
+  // Screenshot 4: logs page (showing dates)
+  await page.evaluate(async () => {
+    // Manually switch tab (avoid relying on implicit event global)
+    document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+    document.querySelectorAll('.tab').forEach(t => {
+      if (t.textContent.trim() === 'Logs') t.classList.add('active');
+    });
+    document.getElementById('tab-tasks').style.display = 'none';
+    document.getElementById('tab-detail').style.display = 'none';
+    document.getElementById('tab-logs').style.display = 'block';
+    // Load the log dates
+    await loadLogDates();
+  });
+  await new Promise(r => setTimeout(r, 1000));
+  await takeScreenshot('04-logs-page');
+
+  // Screenshot 5: logs page under the most recent date
+  // Click the first (most recent) date entry
+  const hasDateItem = await page.evaluate(() => {
+    return document.querySelector('.log-task-item') !== null;
+  });
+  if (hasDateItem) {
+    await page.click('.log-task-item');
+    await new Promise(r => setTimeout(r, 1500));
+    await takeScreenshot('05-logs-under-date');
+  } else {
+    console.log('No date items found in logs view — skipping date screenshot');
+  }
+
+  // --- Return to Task Detail tab for DOM validation ---
+  await page.evaluate(() => {
+    document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+    document.querySelectorAll('.tab').forEach(t => {
+      if (t.textContent.trim() === 'Task Detail') t.classList.add('active');
+    });
+    document.getElementById('tab-tasks').style.display = 'none';
+    document.getElementById('tab-detail').style.display = 'block';
+    document.getElementById('tab-logs').style.display = 'none';
+  });
+  await new Promise(r => setTimeout(r, 500));
 
   // Validate the rendered DOM.
   const result = await page.evaluate(() => {
@@ -286,7 +341,7 @@ const { chromium } = require('playwright');
 
   if (result.error) {
     console.error('DOM validation error:', result.error);
-    await takeScreenshot('05-dom-error');
+    await takeScreenshot('06-dom-error');
     process.exit(1);
   }
 
@@ -312,7 +367,7 @@ const { chromium } = require('playwright');
   }
 
   if (failed) {
-    await takeScreenshot('06-validation-failed');
+    await takeScreenshot('07-validation-failed');
     process.exit(1);
   }
   console.log('All UI validation checks passed!');
