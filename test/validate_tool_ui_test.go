@@ -629,9 +629,84 @@ const { chromium } = require('playwright');
   // reload (new WebSocket connection), which resets the SPA history stack.
 
   // =====================================================================
-  // Phase 7: Close task detail and return to Tasks tab
+  // Phase 7: Navigate back to Tasks tab, then click into existing task
   // =====================================================================
-  console.log('=== Phase 7: Close task detail ===');
+  console.log('=== Phase 7: Back to Tasks, then click existing task ===');
+
+  // Start from Task Detail (via direct URL)
+  await page.goto(baseURL + '/task/' + taskId);
+  await page.waitForLoadState('networkidle');
+  await page.waitForSelector('.task-detail-header', { timeout: 5000 });
+
+  // Verify we're in Task Detail view
+  const inDetailView = await page.evaluate(() => {
+    return document.querySelector('.task-detail-header') !== null &&
+           document.getElementById('tab-detail').style.display === 'block';
+  });
+  if (!inDetailView) fail('Should be in Task Detail view');
+  console.log('PASS: In Task Detail view');
+
+  // Click the Tasks tab to navigate back
+  await page.locator('.tab').filter({ hasText: 'Tasks' }).click();
+
+  // Wait for Tasks tab to become active
+  await page.waitForFunction(() => {
+    const tabs = document.querySelectorAll('.tab');
+    for (const tab of tabs) {
+      if (tab.textContent.trim() === 'Tasks' && tab.classList.contains('active')) {
+        return true;
+      }
+    }
+    return false;
+  }, { timeout: 5000 });
+
+  // Verify Tasks tab is active
+  const tasksTabActiveAfterNav = await page.evaluate(() => {
+    return document.getElementById('tab-tasks').style.display === 'block' &&
+           document.getElementById('tab-detail').style.display === 'none';
+  });
+  if (!tasksTabActiveAfterNav) fail('Tasks tab should be active after clicking Tasks tab');
+  console.log('PASS: Tasks tab active after clicking Tasks tab');
+
+  // Verify URL updated to /tasks
+  const tasksUrl = await page.evaluate(() => window.location.pathname);
+  if (tasksUrl !== '/tasks' && tasksUrl !== '/') fail('URL should be /tasks or / after clicking Tasks tab, got: ' + tasksUrl);
+  console.log('PASS: URL is', tasksUrl, 'after clicking Tasks tab');
+
+  await takeScreenshot('07-back-to-tasks');
+
+  // Now click into an existing task from the task list
+  console.log('--- Clicking existing task from task list ---');
+  await page.click('.task-item');
+  await page.waitForSelector('.task-detail-header', { timeout: 5000 });
+
+  // Verify we're back in Task Detail view
+  const backInDetail = await page.evaluate(() => {
+    return document.querySelector('.task-detail-header') !== null &&
+           document.getElementById('tab-detail').style.display === 'block';
+  });
+  if (!backInDetail) fail('Should be in Task Detail view after clicking task');
+  console.log('PASS: Back in Task Detail view after clicking existing task');
+
+  // Verify task content is loaded (tool blocks should be present)
+  const taskContentLoaded = await page.evaluate(() => {
+    const body = document.querySelector('.task-detail-body');
+    return body !== null && body.querySelectorAll('.tool-block').length > 0;
+  });
+  if (!taskContentLoaded) fail('Task content should be loaded after clicking task');
+  console.log('PASS: Task content loaded after clicking existing task');
+
+  // Verify URL updated to /task/:id
+  const taskDetailUrl = await page.evaluate(() => window.location.pathname);
+  if (!taskDetailUrl.startsWith('/task/')) fail('URL should start with /task/, got: ' + taskDetailUrl);
+  console.log('PASS: URL is', taskDetailUrl, 'after clicking existing task');
+
+  await takeScreenshot('08-click-existing-task');
+
+  // =====================================================================
+  // Phase 8: Close task detail and return to Tasks tab
+  // =====================================================================
+  console.log('=== Phase 8: Close task detail ===');
 
   // Navigate back to task detail
   await page.goto(baseURL + '/task/' + taskId);
@@ -663,7 +738,7 @@ const { chromium } = require('playwright');
   if (closeUrl !== '/tasks' && closeUrl !== '/') fail('URL should be /tasks or / after Close, got: ' + closeUrl);
   console.log('PASS: URL is', closeUrl, 'after Close');
 
-  await takeScreenshot('10-after-close');
+  await takeScreenshot('09-after-close');
 
   console.log('All UI validation checks passed!');
   await browser.close();
