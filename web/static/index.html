@@ -202,16 +202,10 @@
         <div class="main">
             <div class="tab-bar">
                 <div class="tab active" onclick="showTab('tasks')">Tasks</div>
-                <div class="tab" onclick="showTab('detail')">Task Detail</div>
                 <div class="tab" onclick="showTab('logs')">Logs</div>
             </div>
             <div id="tab-tasks">
                 <div id="task-list"></div>
-            </div>
-            <div id="tab-detail" style="display:none;">
-                <div id="task-detail-view">
-                    <div class="empty-state"><span>📄</span>Select a task to view details</div>
-                </div>
             </div>
             <div id="tab-logs" style="display:none;">
                 <div id="log-view">
@@ -251,8 +245,9 @@
                 if (parts.length === 0 || (parts.length === 1 && parts[0] === 'tasks')) {
                     return { view: 'tasks' };
                 }
+                // /task/:id shows task detail in the Logs tab
                 if (parts[0] === 'task' && parts[1]) {
-                    return { view: 'detail', taskId: parts[1] };
+                    return { view: 'taskDetail', taskId: parts[1] };
                 }
                 if (parts[0] === 'logs' && parts.length === 1) {
                     return { view: 'logs' };
@@ -269,7 +264,7 @@
             async dispatch(fromInitialLoad) {
                 const route = this.parse();
                 switch (route.view) {
-                case 'detail':
+                case 'taskDetail':
                     selectTask(route.taskId, fromInitialLoad);
                     break;
                 case 'logs':
@@ -302,7 +297,7 @@
         }
 
         // showTab switches the visible tab panel.
-        //   tab              — 'tasks', 'detail', or 'logs'
+        //   tab              — 'tasks' or 'logs'
         //   skipUrl          — when true, do NOT call router.push (used by
         //                      router dispatch and popstate so we don't
         //                      double-push).
@@ -311,12 +306,10 @@
         function showTab(tab, skipUrl, fromInitialLoad) {
             if (!skipUrl) {
                 if (tab === 'tasks') router.push('/tasks');
-                // 'detail' is handled by selectTask which pushes /task/:id
                 // 'logs' — loadLogDates() pushes /logs, so skip here
             }
-            activateTabByName(tab === 'tasks' ? 'Tasks' : tab === 'detail' ? 'Task Detail' : 'Logs');
+            activateTabByName(tab === 'tasks' ? 'Tasks' : 'Logs');
             document.getElementById('tab-tasks').style.display = tab === 'tasks' ? 'block' : 'none';
-            document.getElementById('tab-detail').style.display = tab === 'detail' ? 'block' : 'none';
             document.getElementById('tab-logs').style.display = tab === 'logs' ? 'block' : 'none';
             if (tab === 'logs') {
                 loadLogDates(fromInitialLoad);
@@ -334,11 +327,6 @@
                 renderGuests(guests);
                 renderTasks(tasks);
                 updateStats(guests, tasks);
-
-                // If a task detail is open, refresh it
-                if (activeTaskId) {
-                    refreshTaskDetail(activeTaskId);
-                }
             } catch (e) {
                 console.error('refresh failed:', e);
             }
@@ -512,21 +500,12 @@
             router.push('/task/' + taskId);
             routerReplaceMode = false;
             refresh();
-            activateTabByName('Task Detail');
+            // Show Logs tab but skip loadLogDates (we're showing task detail, not log browser)
+            activateTabByName('Logs');
             document.getElementById('tab-tasks').style.display = 'none';
-            document.getElementById('tab-detail').style.display = 'block';
-            document.getElementById('tab-logs').style.display = 'none';
+            document.getElementById('tab-logs').style.display = 'block';
+            // Use the task detail API (has structured tool fields) for rich rendering
             refreshTaskDetail(taskId);
-        }
-
-        function closeTaskDetail() {
-            activeTaskId = null;
-            router.push('/tasks');
-            activateTabByName('Tasks');
-            document.getElementById('tab-tasks').style.display = 'block';
-            document.getElementById('tab-detail').style.display = 'none';
-            document.getElementById('tab-logs').style.display = 'none';
-            document.getElementById('task-detail-view').innerHTML = '<div class="empty-state"><span>📄</span>Select a task to view details</div>';
         }
 
         async function refreshTaskDetail(taskId) {
@@ -541,7 +520,7 @@
         }
 
         function renderTaskDetail(task, logs, logCount) {
-            const view = document.getElementById('task-detail-view');
+            const view = document.getElementById('log-view');
             if (!task) return;
 
             const badgeClass = `badge-${task.status.toLowerCase()}`;
@@ -760,7 +739,7 @@
         }
 
         function appendLogToDetail(logEntry) {
-            const view = document.getElementById('task-detail-view');
+            const view = document.getElementById('log-view');
             const body = view.querySelector('.task-detail-body');
             if (!body) return;
 
@@ -980,18 +959,84 @@
             if (entries.length === 0) {
                 html += '<div class="empty-state"><span>📭</span>No log entries for this task</div>';
             } else {
-                html += '<div id="log-entries-list">';
-                html += entries.map(e => {
-                    const ts = e.timestamp ? new Date(e.timestamp).toLocaleTimeString() : '';
-                    const level = e.level || '';
-                    const content = escapeHtml(e.line);
-                    return `<div class="log-entry-line" data-level="${escapeHtml(level)}">
-                        ${ts ? '<span class="log-timestamp">' + ts + '</span>' : ''}
-                        <span class="log-level-badge ${escapeHtml(level)}">${escapeHtml(level || '—')}</span>
-                        <span class="log-content">${content}</span>
-                    </div>`;
-                }).join('');
-                html += '</div>';
+                // Use rich tool-block rendering (same as task detail view)
+                const isRunning = false; // Logs view is static; streaming handled separately
+                let currentToolBlock = null;
+
+                entries.forEach((log) => {
+                    const level = log.level || '';
+
+                    // Use structured fields to determine event type.
+                    if (level === 'tool' && log.tool_type) {
+                        if (log.tool_type === 'start') {
+                            if (currentToolBlock) {
+                                // Flush previous incomplete block
+                                html += buildToolBlockHTML(
+                                    currentToolBlock.toolName, currentToolBlock.toolId,
+                                    currentToolBlock.args, currentToolBlock.output, 'running'
+                                );
+                            }
+                            currentToolBlock = {
+                                toolName: log.tool_name, toolId: log.tool_id,
+                                args: log.tool_args, output: '', status: 'running', hasOutput: false
+                            };
+                            return;
+                        }
+
+                        if (log.tool_type === 'output') {
+                            if (currentToolBlock && currentToolId(currentToolBlock) === log.tool_id) {
+                                currentToolBlock.output += log.tool_output;
+                                currentToolBlock.hasOutput = true;
+                            }
+                            return;
+                        }
+
+                        if (log.tool_type === 'end') {
+                            if (currentToolBlock && currentToolId(currentToolBlock) === log.tool_id) {
+                                if (log.tool_output) currentToolBlock.output += log.tool_output;
+                                currentToolBlock.status = log.tool_error ? 'error' : 'success';
+                            }
+                            // Build and append the complete tool block now that we have all output
+                            html += buildToolBlockHTML(
+                                currentToolBlock.toolName, currentToolBlock.toolId,
+                                currentToolBlock.args, currentToolBlock.output,
+                                currentToolBlock.status
+                            );
+                            currentToolBlock = null;
+                            return;
+                        }
+                    }
+
+                    // Non-tool log lines
+                    if (currentToolBlock) {
+                        html += buildToolBlockHTML(
+                            currentToolBlock.toolName, currentToolBlock.toolId,
+                            currentToolBlock.args, currentToolBlock.output, 'running'
+                        );
+                        currentToolBlock = null;
+                    }
+
+                    let msgHtml;
+                    if (log.line === 'Task started' || log.line === 'Task completed successfully') {
+                        msgHtml = `<div class="log-msg system">${escapeHtml(log.line)}</div>`;
+                    } else if (level === 'error') {
+                        msgHtml = `<div class="log-msg error">${escapeHtml(log.line)}</div>`;
+                    } else {
+                        msgHtml = `<div class="log-msg guest"><div class="md-rendered">${renderMarkdown(log.line)}</div></div>`;
+                    }
+                    html += msgHtml;
+                });
+
+                // Close any remaining open tool block
+                if (currentToolBlock) {
+                    html += buildToolBlockHTML(
+                        currentToolBlock.toolName, currentToolBlock.toolId,
+                        currentToolBlock.args, currentToolBlock.output, 'running'
+                    );
+                    currentToolBlock = null;
+                }
+
+                html += '<div id="log-entries-list">' + html + '</div>';
             }
             view.innerHTML = html;
         }

@@ -340,57 +340,53 @@ const { chromium } = require('playwright');
   if (!statsOk) fail('Header stats should show non-zero values');
   console.log('PASS: Header stats populated');
 
+  // Verify only 2 tabs exist (Tasks + Logs, no Task Detail)
+  const tabCount = await page.evaluate(() => document.querySelectorAll('.tab').length);
+  if (tabCount !== 2) fail('Should have exactly 2 tabs (Tasks + Logs), got ' + tabCount);
+  console.log('PASS: Only 2 tabs present (Task Detail removed)');
+
   await takeScreenshot('01-front-page');
 
   // =====================================================================
-  // Phase 2: Click task → Task Detail view
+  // Phase 2: Click task → Logs view with rich tool-block rendering
   // =====================================================================
-  console.log('=== Phase 2: Task Detail ===');
+  console.log('=== Phase 2: Click task → Logs view ===');
   // Must use clickEl() — page.click() does NOT fire onclick attribute
   // handlers on elements rendered via innerHTML (which is how task items work).
   await clickEl('.task-item');
-  await page.waitForSelector('.task-detail-header', { timeout: 5000 });
+  await page.waitForSelector('.task-detail-body .tool-block', { timeout: 5000 });
 
-  // Verify URL updated
+  // Verify URL updated to /task/:id (kept for backwards compatibility)
   const detailUrl = await page.evaluate(() => window.location.pathname);
   if (!detailUrl.startsWith('/task/')) fail('URL should start with /task/, got: ' + detailUrl);
   console.log('PASS: URL updated to', detailUrl);
 
-  // Verify Task Detail tab is active
-  const detailTabActive = await page.evaluate(() => {
+  // Verify Logs tab is active
+  const logsTabActive = await page.evaluate(() => {
     const tabs = document.querySelectorAll('.tab');
     for (const tab of tabs) {
-      if (tab.textContent.trim() === 'Task Detail' && tab.classList.contains('active')) {
+      if (tab.textContent.trim() === 'Logs' && tab.classList.contains('active')) {
         return true;
       }
     }
     return false;
   });
-  if (!detailTabActive) fail('Task Detail tab should be active after clicking task');
-  console.log('PASS: Task Detail tab active');
+  if (!logsTabActive) fail('Logs tab should be active after clicking task');
+  console.log('PASS: Logs tab active');
 
-  // Verify detail header shows task info
+  // Verify task detail header is present (no breadcrumb for task detail view)
   const headerOk = await page.evaluate(() => {
-    const header = document.querySelector('.task-detail-header');
-    const meta = document.querySelector('.task-detail-meta');
-    return header !== null && meta !== null;
+    return document.querySelector('.task-detail-header') !== null;
   });
-  if (!headerOk) fail('Task detail header/meta missing');
+  if (!headerOk) fail('Task detail header missing');
   console.log('PASS: Task detail header rendered');
 
-  // Verify Close button exists
-  const closeBtn = await page.evaluate(() => {
-    return document.querySelector('.task-detail-header .btn-ghost') !== null;
-  });
-  if (!closeBtn) fail('Close button missing in task detail header');
-  console.log('PASS: Close button present');
-
-  await takeScreenshot('02-task-detail');
+  await takeScreenshot('02-logs-task-detail');
 
   // =====================================================================
-  // Phase 3: DOM validation of task detail (tool blocks, log messages)
+  // Phase 3: DOM validation of logs view (tool blocks, log messages)
   // =====================================================================
-  console.log('=== Phase 3: Task detail DOM validation ===');
+  console.log('=== Phase 3: Logs view DOM validation ===');
 
   const detailResult = await page.evaluate(() => {
     const body = document.querySelector('.task-detail-body');
@@ -420,7 +416,6 @@ const { chromium } = require('playwright');
       hasSystemMsg: Array.from(logMsgs).some(m => m.classList.contains('system')),
       hasIntroMsg: Array.from(logMsgs).some(m => m.textContent?.includes("I'll help you")),
       hasToolMarkersOutsideBlocks,
-      promptVisible: document.querySelector('.task-detail-prompt') !== null,
     };
   });
 
@@ -445,7 +440,6 @@ const { chromium } = require('playwright');
     { name: 'intro text message present', pass: detailResult.hasIntroMsg },
     { name: 'system messages present', pass: detailResult.hasSystemMsg },
     { name: 'no tool markers outside blocks', pass: !detailResult.hasToolMarkersOutsideBlocks },
-    { name: 'prompt visible', pass: detailResult.promptVisible },
   ];
 
   let detailFailed = false;
@@ -503,12 +497,12 @@ const { chromium } = require('playwright');
   }, logDate, { timeout: 10000 });
 
   // Verify breadcrumb shows date crumb
-  const breadcrumbOk = await page.evaluate((date) => {
+  const breadcrumbOk2 = await page.evaluate((date) => {
     const crumbs = document.querySelectorAll('.log-breadcrumb .crumb, .log-breadcrumb .current');
     const text = Array.from(crumbs).map(c => c.textContent).join(' ');
     return text.includes(date);
   }, logDate);
-  if (!breadcrumbOk) fail('Breadcrumb should contain date ' + logDate);
+  if (!breadcrumbOk2) fail('Breadcrumb should contain date ' + logDate);
   console.log('PASS: Breadcrumb shows date');
 
   // Verify URL updated to /logs/:date
@@ -535,23 +529,18 @@ const { chromium } = require('playwright');
   console.log('--- Clicking task item ---');
   await clickEl('.log-task-item');
 
-  // Wait for log entries to render
-  await page.waitForSelector('.log-entry-line', { timeout: 10000 });
+  // Wait for log entries to render (disk log store has flat-line entries)
+  await page.waitForSelector('#log-entries-list .log-msg', { timeout: 10000 });
 
-  // Verify log entries are rendered
+  // Verify log entries are rendered (flat-line from disk log store, no tool blocks)
   const logEntryResult = await page.evaluate(() => {
-    const entries = document.querySelectorAll('.log-entry-line');
+    const entries = document.querySelectorAll('#log-entries-list .log-msg');
     if (entries.length === 0) return { error: 'no log entries found' };
 
     return {
       entryCount: entries.length,
-      hasTimestamps: Array.from(entries).some(e => e.querySelector('.log-timestamp') !== null),
-      hasLevelBadges: Array.from(entries).some(e => e.querySelector('.log-level-badge') !== null),
-      hasContent: Array.from(entries).some(e => e.querySelector('.log-content') !== null),
-      levels: Array.from(entries).map(e => e.dataset.level || ''),
-      hasToolEntries: Array.from(entries).some(e => e.dataset.level === 'tool'),
-      hasTextEntries: Array.from(entries).some(e => e.dataset.level === 'text'),
-      hasSystemEntries: Array.from(entries).some(e => e.dataset.level === 'system'),
+      hasSystemMsg: Array.from(entries).some(e => e.classList.contains('system')),
+      hasGuestMsg: Array.from(entries).some(e => e.classList.contains('guest')),
       breadcrumbCrumbs: Array.from(document.querySelectorAll('.log-breadcrumb .crumb, .log-breadcrumb .current'))
         .map(c => c.textContent),
     };
@@ -561,12 +550,8 @@ const { chromium } = require('playwright');
 
   const logEntryChecks = [
     { name: 'log entries rendered', pass: logEntryResult.entryCount > 0 },
-    { name: 'entries have timestamps', pass: logEntryResult.hasTimestamps },
-    { name: 'entries have level badges', pass: logEntryResult.hasLevelBadges },
-    { name: 'entries have content', pass: logEntryResult.hasContent },
-    { name: 'tool-level entries present', pass: logEntryResult.hasToolEntries },
-    { name: 'text-level entries present', pass: logEntryResult.hasTextEntries },
-    { name: 'system-level entries present', pass: logEntryResult.hasSystemEntries },
+    { name: 'system messages present', pass: logEntryResult.hasSystemMsg },
+    { name: 'guest messages present', pass: logEntryResult.hasGuestMsg },
     { name: 'breadcrumb has date crumb', pass: logEntryResult.breadcrumbCrumbs.some(c => c.includes('-')) },
     { name: 'breadcrumb has All Dates crumb', pass: logEntryResult.breadcrumbCrumbs.some(c => c === 'All Dates') },
   ];
@@ -608,17 +593,22 @@ const { chromium } = require('playwright');
   // =====================================================================
   console.log('=== Phase 5: Direct URL navigation ===');
 
-  // Navigate directly to /task/:id
+  // Navigate directly to /task/:id — should show task detail in Logs tab
   await page.goto(baseURL + '/task/' + taskId);
   await page.waitForLoadState('networkidle');
-  await page.waitForSelector('.task-detail-header', { timeout: 5000 });
+  await page.waitForSelector('.task-detail-body .tool-block', { timeout: 5000 });
 
   const directDetail = await page.evaluate(() => {
-    return document.querySelector('.task-detail-header') !== null &&
-           document.querySelector('.task-detail-body') !== null;
+    return document.querySelector('.task-detail-body .tool-block') !== null &&
+           document.getElementById('tab-logs').style.display === 'block';
   });
-  if (!directDetail) fail('Direct nav to /task/:id should show detail view');
+  if (!directDetail) fail('Direct nav to /task/:id should show task detail in Logs tab');
   console.log('PASS: Direct nav to /task/:id works');
+
+  // Verify URL is /task/:id (kept for backwards compatibility)
+  const directNavUrl = await page.evaluate(() => window.location.pathname);
+  if (!directNavUrl.startsWith('/task/')) fail('URL should be /task/:id, got: ' + directNavUrl);
+  console.log('PASS: URL is', directNavUrl, '(kept for backwards compat)');
 
   await takeScreenshot('08-direct-task-nav');
 
@@ -675,18 +665,18 @@ const { chromium } = require('playwright');
   // =====================================================================
   console.log('=== Phase 7: Back to Tasks, then click existing task ===');
 
-  // Start from Task Detail (via direct URL)
+  // Start from task detail (via direct URL)
   await page.goto(baseURL + '/task/' + taskId);
   await page.waitForLoadState('networkidle');
-  await page.waitForSelector('.task-detail-header', { timeout: 5000 });
+  await page.waitForSelector('.task-detail-body .tool-block', { timeout: 5000 });
 
-  // Verify we're in Task Detail view
-  const inDetailView = await page.evaluate(() => {
-    return document.querySelector('.task-detail-header') !== null &&
-           document.getElementById('tab-detail').style.display === 'block';
+  // Verify we're in Logs view with tool blocks
+  const inLogsView = await page.evaluate(() => {
+    return document.querySelector('.task-detail-body .tool-block') !== null &&
+           document.getElementById('tab-logs').style.display === 'block';
   });
-  if (!inDetailView) fail('Should be in Task Detail view');
-  console.log('PASS: In Task Detail view');
+  if (!inLogsView) fail('Should be in Logs view');
+  console.log('PASS: In Logs view');
 
   // Click the Tasks tab to navigate back
   await page.locator('.tab').filter({ hasText: 'Tasks' }).click();
@@ -705,7 +695,7 @@ const { chromium } = require('playwright');
   // Verify Tasks tab is active
   const tasksTabActiveAfterNav = await page.evaluate(() => {
     return document.getElementById('tab-tasks').style.display === 'block' &&
-           document.getElementById('tab-detail').style.display === 'none';
+           document.getElementById('tab-logs').style.display === 'none';
   });
   if (!tasksTabActiveAfterNav) fail('Tasks tab should be active after clicking Tasks tab');
   console.log('PASS: Tasks tab active after clicking Tasks tab');
@@ -719,16 +709,16 @@ const { chromium } = require('playwright');
 
   // Now click into an existing task from the task list
   console.log('--- Clicking existing task from task list ---');
-  await page.click('.task-item');
-  await page.waitForSelector('.task-detail-header', { timeout: 5000 });
+  await clickEl('.task-item');
+  await page.waitForSelector('.task-detail-body .tool-block', { timeout: 5000 });
 
-  // Verify we're back in Task Detail view
-  const backInDetail = await page.evaluate(() => {
-    return document.querySelector('.task-detail-header') !== null &&
-           document.getElementById('tab-detail').style.display === 'block';
+  // Verify we're in Logs view with tool blocks
+  const backInLogs = await page.evaluate(() => {
+    return document.querySelector('.task-detail-body .tool-block') !== null &&
+           document.getElementById('tab-logs').style.display === 'block';
   });
-  if (!backInDetail) fail('Should be in Task Detail view after clicking task');
-  console.log('PASS: Back in Task Detail view after clicking existing task');
+  if (!backInLogs) fail('Should be in Logs view after clicking task');
+  console.log('PASS: In Logs view after clicking existing task');
 
   // Verify task content is loaded (tool blocks should be present)
   const taskContentLoaded = await page.evaluate(() => {
@@ -746,41 +736,33 @@ const { chromium } = require('playwright');
   await takeScreenshot('08-click-existing-task');
 
   // =====================================================================
-  // Phase 8: Close task detail and return to Tasks tab
+  // Phase 8: Breadcrumb navigation back to date list
   // =====================================================================
-  console.log('=== Phase 8: Close task detail ===');
+  console.log('=== Phase 8: Breadcrumb navigation ===');
 
-  // Navigate back to task detail
-  await page.goto(baseURL + '/task/' + taskId);
+  // Navigate to logs view to test breadcrumb (task detail view has no breadcrumb)
+  await page.goto(baseURL + '/logs/' + logDate + '/' + taskId);
   await page.waitForLoadState('networkidle');
-  await page.waitForSelector('.task-detail-header', { timeout: 5000 });
+  await page.waitForSelector('#log-entries-list .log-msg', { timeout: 5000 });
 
-  // Click Close button
-  await page.click('.task-detail-header .btn-ghost');
+  // Click the date crumb to navigate back to date list
+  await clickEl('.log-breadcrumb .crumb');
 
-  // Wait for Tasks tab to be active
-  await page.waitForFunction(() => {
-    const tabs = document.querySelectorAll('.tab');
-    for (const tab of tabs) {
-      if (tab.textContent.trim() === 'Tasks' && tab.classList.contains('active')) {
-        return true;
-      }
-    }
-    return false;
-  }, { timeout: 5000 });
+  // Wait for date list to reload
+  await page.waitForSelector('#log-dates-list .log-task-item', { timeout: 10000 });
 
-  const tasksAfterClose = await page.evaluate(() => {
-    return document.getElementById('tab-tasks').style.display === 'block' &&
-           document.getElementById('tab-detail').style.display === 'none';
+  const backToDateList2 = await page.evaluate(() => {
+    const breadcrumb = document.querySelector('.log-breadcrumb .current');
+    return breadcrumb && breadcrumb.textContent === 'All Dates';
   });
-  if (!tasksAfterClose) fail('After Close, Tasks tab should be active');
-  console.log('PASS: Close button returns to Tasks tab');
+  if (!backToDateList2) fail('Breadcrumb should show "All Dates" after clicking crumb');
+  console.log('PASS: Breadcrumb navigation to All Dates works');
 
-  const closeUrl = await page.evaluate(() => window.location.pathname);
-  if (closeUrl !== '/tasks' && closeUrl !== '/') fail('URL should be /tasks or / after Close, got: ' + closeUrl);
-  console.log('PASS: URL is', closeUrl, 'after Close');
+  const breadcrumbUrl2 = await page.evaluate(() => window.location.pathname);
+  if (breadcrumbUrl2 !== '/logs') fail('URL should be /logs after breadcrumb nav, got: ' + breadcrumbUrl2);
+  console.log('PASS: URL is /logs after breadcrumb navigation');
 
-  await takeScreenshot('09-after-close');
+  await takeScreenshot('09-breadcrumb-nav');
 
   console.log('All UI validation checks passed!');
   await browser.close();
