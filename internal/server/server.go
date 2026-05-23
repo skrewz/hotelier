@@ -21,11 +21,22 @@ import (
 )
 
 // TaskLogEntry is a single log line for a task.
+// For tool call events, the Line field contains the original formatted
+// string for backwards compatibility, but structured fields (ToolType,
+// ToolName, etc.) carry the machine-readable data.
 type TaskLogEntry struct {
 	TaskID    string    `json:"task_id"`
 	Line      string    `json:"line"`
 	Level     string    `json:"level,omitempty"`
 	Timestamp time.Time `json:"timestamp"`
+
+	// Structured tool call fields (only set when Level == "tool")
+	ToolType   string `json:"tool_type,omitempty"`   // "start", "output", "end"
+	ToolName   string `json:"tool_name,omitempty"`   // e.g. "bash", "read"
+	ToolID     string `json:"tool_id,omitempty"`     // unique tool call identifier
+	ToolArgs   string `json:"tool_args,omitempty"`   // arguments/parameters
+	ToolOutput string `json:"tool_output,omitempty"` // captured output
+	ToolError  bool   `json:"tool_error,omitempty"`  // true if tool ended with error
 }
 
 // TaskLogStore stores log entries per task.
@@ -479,28 +490,45 @@ func (s *Server) handleGuestHeartbeat(ctx context.Context, params json.RawMessag
 }
 
 // handleGuestLog handles incoming log entries from guests.
+// For tool call events, the guest sends structured fields (tool_type,
+// tool_name, tool_id, etc.) alongside the formatted line string.
 func (s *Server) handleGuestLog(ctx context.Context, params json.RawMessage) (interface{}, *rpc.RPCError) {
-	var entry struct {
-		TaskID string `json:"task_id"`
-		Line   string `json:"line"`
-		Level  string `json:"level,omitempty"`
+	var req struct {
+		TaskID     string `json:"task_id"`
+		Line       string `json:"line"`
+		Level      string `json:"level,omitempty"`
+		ToolType   string `json:"tool_type,omitempty"`
+		ToolName   string `json:"tool_name,omitempty"`
+		ToolID     string `json:"tool_id,omitempty"`
+		ToolArgs   string `json:"tool_args,omitempty"`
+		ToolOutput string `json:"tool_output,omitempty"`
+		ToolError  bool   `json:"tool_error,omitempty"`
 	}
 
-	if err := json.Unmarshal(params, &entry); err != nil {
+	if err := json.Unmarshal(params, &req); err != nil {
 		return nil, rpc.InvalidParamsError("invalid request parameters")
 	}
 
-	if entry.TaskID == "" || entry.Line == "" {
+	if req.TaskID == "" || req.Line == "" {
 		return nil, rpc.InvalidParamsError("task_id and line are required")
 	}
 
 	// Use the log accumulator to batch text deltas into complete messages.
 	// Only non-text levels (tool, system, error) bypass the buffer.
 	s.logAccumulator.Feed(
-		entry.TaskID,
-		entry.Line,
-		entry.Level,
+		req.TaskID,
+		req.Line,
+		req.Level,
 		func(e TaskLogEntry) {
+			// Populate structured tool call fields
+			if req.Level == "tool" || req.ToolType != "" {
+				e.ToolType = req.ToolType
+				e.ToolName = req.ToolName
+				e.ToolID = req.ToolID
+				e.ToolArgs = req.ToolArgs
+				e.ToolOutput = req.ToolOutput
+				e.ToolError = req.ToolError
+			}
 			s.logStore.Add(e)
 			// Persist to disk if configured
 			if s.diskLogStore != nil {
@@ -512,9 +540,15 @@ func (s *Server) handleGuestLog(ctx context.Context, params json.RawMessage) (in
 				})
 			}
 			s.hub.SendNotification("", rpc.ConnectionRoleBrowser, "task.log", map[string]interface{}{
-				"task_id": e.TaskID,
-				"line":    e.Line,
-				"level":   e.Level,
+				"task_id":     e.TaskID,
+				"line":        e.Line,
+				"level":       e.Level,
+				"tool_type":   e.ToolType,
+				"tool_name":   e.ToolName,
+				"tool_id":     e.ToolID,
+				"tool_args":   e.ToolArgs,
+				"tool_output": e.ToolOutput,
+				"tool_error":  e.ToolError,
 			})
 		},
 	)

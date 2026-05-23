@@ -145,7 +145,7 @@ func (h *PIHandler) GetClient() *pi.PiClient {
 // ExecuteTask runs a task through the pi guest and streams logs back via the callback.
 // It clones any remote repos into a per-task working directory, sets that as the
 // CWD for the pi subprocess, and logs all commands it spawns.
-func (h *PIHandler) ExecuteTask(ctx context.Context, task TaskAssignment, sendLog func(taskID, line string) error) (*TaskResult, error) {
+func (h *PIHandler) ExecuteTask(ctx context.Context, task TaskAssignment, sendLog func(LogEntry) error) (*TaskResult, error) {
 	h.mu.Lock()
 	if h.client == nil || !h.client.IsRunning() {
 		h.mu.Unlock()
@@ -231,7 +231,7 @@ func (h *PIHandler) ExecuteTask(ctx context.Context, task TaskAssignment, sendLo
 
 					// Send the full delta as one log entry, preserving newlines.
 					// The server-side accumulator will batch these into complete messages.
-					if err := sendLog(task.TaskID, delta); err != nil {
+					if err := sendLog(LogEntry{TaskID: task.TaskID, Line: delta, Level: "text"}); err != nil {
 						h.log.Printf("[PI] failed to send log: %v", err)
 					}
 				}
@@ -244,13 +244,16 @@ func (h *PIHandler) ExecuteTask(ctx context.Context, task TaskAssignment, sendLo
 				switch event.Type {
 				case "tool_execution_start":
 					args := pi.ToolArgs(event)
-					var logMsg string
-					if args != "" {
-						logMsg = fmt.Sprintf("[TOOL_START] %s: %s (id: %s)", toolName, args, toolID)
-					} else {
-						logMsg = fmt.Sprintf("[TOOL_START] %s (id: %s)", toolName, toolID)
+					entry := LogEntry{
+						TaskID:   task.TaskID,
+						Line:     fmt.Sprintf("[TOOL_START] %s: %s (id: %s)", toolName, args, toolID),
+						Level:    "tool",
+						ToolType: "start",
+						ToolName: toolName,
+						ToolID:   toolID,
+						ToolArgs: args,
 					}
-					if err := sendLog(task.TaskID, logMsg); err != nil {
+					if err := sendLog(entry); err != nil {
 						h.log.Printf("[PI] failed to send tool log: %v", err)
 					}
 					h.log.Printf("[TOOL] %s started (id: %s)", toolName, toolID)
@@ -258,8 +261,16 @@ func (h *PIHandler) ExecuteTask(ctx context.Context, task TaskAssignment, sendLo
 				case "tool_execution_update":
 					partial := pi.ToolPartialResult(event)
 					if partial != "" {
-						logMsg := fmt.Sprintf("[TOOL_OUTPUT] %s (id: %s): %s", toolName, toolID, partial)
-						if err := sendLog(task.TaskID, logMsg); err != nil {
+						entry := LogEntry{
+							TaskID:     task.TaskID,
+							Line:       fmt.Sprintf("[TOOL_OUTPUT] %s (id: %s): %s", toolName, toolID, partial),
+							Level:      "tool",
+							ToolType:   "output",
+							ToolName:   toolName,
+							ToolID:     toolID,
+							ToolOutput: partial,
+						}
+						if err := sendLog(entry); err != nil {
 							h.log.Printf("[PI] failed to send tool output: %v", err)
 						}
 					}
@@ -267,15 +278,25 @@ func (h *PIHandler) ExecuteTask(ctx context.Context, task TaskAssignment, sendLo
 				case "tool_execution_end":
 					result := pi.ToolResult(event)
 					isErr := event.IsError
-					var logMsg string
+					var line string
 					if isErr {
-						logMsg = fmt.Sprintf("[TOOL_END] %s (id: %s) [ERROR]", toolName, toolID)
+						line = fmt.Sprintf("[TOOL_END] %s (id: %s) [ERROR]", toolName, toolID)
 					} else if result != "" {
-						logMsg = fmt.Sprintf("[TOOL_END] %s (id: %s): %s", toolName, toolID, result)
+						line = fmt.Sprintf("[TOOL_END] %s (id: %s): %s", toolName, toolID, result)
 					} else {
-						logMsg = fmt.Sprintf("[TOOL_END] %s (id: %s)", toolName, toolID)
+						line = fmt.Sprintf("[TOOL_END] %s (id: %s)", toolName, toolID)
 					}
-					if err := sendLog(task.TaskID, logMsg); err != nil {
+					entry := LogEntry{
+						TaskID:     task.TaskID,
+						Line:       line,
+						Level:      "tool",
+						ToolType:   "end",
+						ToolName:   toolName,
+						ToolID:     toolID,
+						ToolOutput: result,
+						ToolError:  isErr,
+					}
+					if err := sendLog(entry); err != nil {
 						h.log.Printf("[PI] failed to send tool end log: %v", err)
 					}
 					h.log.Printf("[TOOL] %s ended (id: %s) elapsed=%s", toolName, toolID, time.Since(lastActivity))
@@ -328,7 +349,7 @@ func (h *PIHandler) ExecuteTask(ctx context.Context, task TaskAssignment, sendLo
 // prepareRepos clones any remote repos into a task-specific directory and
 // returns the path to use as the working directory for the pi subprocess.
 // Local paths are resolved as-is; remote URLs are cloned.
-func (h *PIHandler) prepareRepos(ctx context.Context, taskID string, repos []string, sendLog func(taskID, line string) error) (string, error) {
+func (h *PIHandler) prepareRepos(ctx context.Context, taskID string, repos []string, sendLog func(LogEntry) error) (string, error) {
 	if len(repos) == 0 {
 		// No repos — create a task-specific directory so the guest has a
 		// clean, isolated working directory instead of the base CWD.

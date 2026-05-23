@@ -25,22 +25,31 @@ import (
 // testLogEntry represents a single log entry used across both the RPC and
 // Playwright validation paths.
 type testLogEntry struct {
-	line  string
-	level string
+	line       string
+	level      string
+	toolType   string // "start", "output", "end"
+	toolName   string // e.g. "bash", "read"
+	toolID     string // unique tool call identifier
+	toolArgs   string // arguments/parameters
+	toolOutput string // captured output
+	toolError  bool   // true if tool ended with error
 }
 
 // testLogEntries returns the shared set of simulated log entries.
+// These mirror real RPC log entries with structured fields as produced
+// by the guest agent after the structured data refactor.
 func testLogEntries() []testLogEntry {
 	return []testLogEntry{
-		{"Task started", "system"},
-		{fmt.Sprintf("[TOOL_START] bash: cat package.json (id: %s)", toolID1()), "tool"},
-		{fmt.Sprintf("[TOOL_OUTPUT] bash (id: %s): {\"name\": \"example-app\", \"version\": \"1.0.0\"}", toolID1()), "tool"},
-		{fmt.Sprintf("[TOOL_END] bash (id: %s): {\"name\": \"example-app\", \"version\": \"1.0.0\"}", toolID1()), "tool"},
-		{"Let me check the API endpoint and the repo path more carefully.", "text"},
-		{fmt.Sprintf("[TOOL_START] read: package.json (id: %s)", toolID2()), "tool"},
-		{fmt.Sprintf("[TOOL_OUTPUT] read (id: %s): {\"name\": \"example-app\", \"version\": \"1.0.0\"}", toolID2()), "tool"},
-		{fmt.Sprintf("[TOOL_END] read (id: %s) [ERROR]", toolID2()), "tool"},
-		{"Task completed successfully", "system"},
+		{"Task started", "system", "", "", "", "", "", false},
+		{"I'll help you with that. Let me start by checking the package.json file.", "text", "", "", "", "", "", false},
+		{fmt.Sprintf("[TOOL_START] bash: cat package.json (id: %s)", toolID1()), "tool", "start", "bash", toolID1(), "cat package.json", "", false},
+		{fmt.Sprintf("[TOOL_OUTPUT] bash (id: %s): {\"name\": \"example-app\", \"version\": \"1.0.0\"}", toolID1()), "tool", "output", "bash", toolID1(), "", "{\"name\": \"example-app\", \"version\": \"1.0.0\"}", false},
+		{fmt.Sprintf("[TOOL_END] bash (id: %s): {\"name\": \"example-app\", \"version\": \"1.0.0\"}", toolID1()), "tool", "end", "bash", toolID1(), "", "{\"name\": \"example-app\", \"version\": \"1.0.0\"}", false},
+		{"Let me check the API endpoint and the repo path more carefully.", "text", "", "", "", "", "", false},
+		{fmt.Sprintf("[TOOL_START] read: package.json (id: %s)", toolID2()), "tool", "start", "read", toolID2(), "package.json", "", false},
+		{fmt.Sprintf("[TOOL_OUTPUT] read (id: %s): {\"name\": \"example-app\", \"version\": \"1.0.0\"}", toolID2()), "tool", "output", "read", toolID2(), "", "{\"name\": \"example-app\", \"version\": \"1.0.0\"}", false},
+		{fmt.Sprintf("[TOOL_END] read (id: %s)", toolID2()), "tool", "end", "read", toolID2(), "", "", true},
+		{"Task completed successfully", "system", "", "", "", "", "", false},
 	}
 }
 
@@ -150,9 +159,15 @@ func TestValidateToolUI(t *testing.T) {
 
 	for _, entry := range logEntries {
 		logParams, _ := json.Marshal(map[string]interface{}{
-			"task_id": taskID,
-			"line":    entry.line,
-			"level":   entry.level,
+			"task_id":     taskID,
+			"line":        entry.line,
+			"level":       entry.level,
+			"tool_type":   entry.toolType,
+			"tool_name":   entry.toolName,
+			"tool_id":     entry.toolID,
+			"tool_args":   entry.toolArgs,
+			"tool_output": entry.toolOutput,
+			"tool_error":  entry.toolError,
 		})
 		if err := rpc.WriteMessage(guestWS, &rpc.JSONRPCMessage{
 			JSONRPC: "2.0", ID: jsonID(2), Method: "guest.log", Params: logParams,
@@ -197,6 +212,27 @@ func validateServerLogs(t *testing.T, srv *server.Server, taskID string, expecte
 		}
 		if entries[i].Level != expected.level {
 			t.Errorf("entry %d: expected level %q, got %q", i, expected.level, entries[i].Level)
+		}
+		// Only check structured fields for tool entries
+		if expected.level == "tool" {
+			if entries[i].ToolType != expected.toolType {
+				t.Errorf("entry %d: expected tool_type %q, got %q", i, expected.toolType, entries[i].ToolType)
+			}
+			if entries[i].ToolName != expected.toolName {
+				t.Errorf("entry %d: expected tool_name %q, got %q", i, expected.toolName, entries[i].ToolName)
+			}
+			if entries[i].ToolID != expected.toolID {
+				t.Errorf("entry %d: expected tool_id %q, got %q", i, expected.toolID, entries[i].ToolID)
+			}
+			if entries[i].ToolArgs != expected.toolArgs {
+				t.Errorf("entry %d: expected tool_args %q, got %q", i, expected.toolArgs, entries[i].ToolArgs)
+			}
+			if entries[i].ToolOutput != expected.toolOutput {
+				t.Errorf("entry %d: expected tool_output %q, got %q", i, expected.toolOutput, entries[i].ToolOutput)
+			}
+			if entries[i].ToolError != expected.toolError {
+				t.Errorf("entry %d: expected tool_error %v, got %v", i, expected.toolError, entries[i].ToolError)
+			}
 		}
 	}
 }
@@ -310,7 +346,9 @@ const { chromium } = require('playwright');
   // Phase 2: Click task → Task Detail view
   // =====================================================================
   console.log('=== Phase 2: Task Detail ===');
-  await page.click('.task-item');
+  // Must use clickEl() — page.click() does NOT fire onclick attribute
+  // handlers on elements rendered via innerHTML (which is how task items work).
+  await clickEl('.task-item');
   await page.waitForSelector('.task-detail-header', { timeout: 5000 });
 
   // Verify URL updated
@@ -380,6 +418,7 @@ const { chromium } = require('playwright');
       logMsgCount: logMsgs.length,
       hasPlainMsg: Array.from(logMsgs).some(m => m.textContent?.includes("Let me check")),
       hasSystemMsg: Array.from(logMsgs).some(m => m.classList.contains('system')),
+      hasIntroMsg: Array.from(logMsgs).some(m => m.textContent?.includes("I'll help you")),
       hasToolMarkersOutsideBlocks,
       promptVisible: document.querySelector('.task-detail-prompt') !== null,
     };
@@ -399,8 +438,11 @@ const { chromium } = require('playwright');
     { name: 'first block status "done"', pass: detailResult.toolStatuses[0] === 'done' },
     { name: 'second block status "error"', pass: detailResult.toolStatuses[1] === 'error' },
     { name: 'first block has <pre> for output', pass: detailResult.toolOutputsHavePre[0] },
+    { name: 'second block has <pre> for output', pass: detailResult.toolOutputsHavePre[1] },
     { name: 'first output contains JSON', pass: detailResult.toolOutputContents[0].includes("example-app") },
+    { name: 'second output contains JSON', pass: detailResult.toolOutputContents[1].includes("example-app") },
     { name: 'plain text message between tools', pass: detailResult.hasPlainMsg },
+    { name: 'intro text message present', pass: detailResult.hasIntroMsg },
     { name: 'system messages present', pass: detailResult.hasSystemMsg },
     { name: 'no tool markers outside blocks', pass: !detailResult.hasToolMarkersOutsideBlocks },
     { name: 'prompt visible', pass: detailResult.promptVisible },

@@ -17,11 +17,19 @@ import (
 )
 
 // LogEntry represents a log entry sent from a guest to the host.
+// For tool call events, structured fields (ToolType, ToolName, etc.)
+// carry the machine-readable data alongside the formatted Line string.
 type LogEntry struct {
-	TaskID    string    `json:"task_id"`
-	Line      string    `json:"line"`
-	Level     string    `json:"level,omitempty"`
-	Timestamp time.Time `json:"timestamp,omitempty"`
+	TaskID     string    `json:"task_id"`
+	Line       string    `json:"line"`
+	Level      string    `json:"level,omitempty"`
+	Timestamp  time.Time `json:"timestamp,omitempty"`
+	ToolType   string    `json:"tool_type,omitempty"`   // "start", "output", "end"
+	ToolName   string    `json:"tool_name,omitempty"`   // e.g. "bash", "read"
+	ToolID     string    `json:"tool_id,omitempty"`     // unique tool call identifier
+	ToolArgs   string    `json:"tool_args,omitempty"`   // arguments/parameters
+	ToolOutput string    `json:"tool_output,omitempty"` // captured output
+	ToolError  bool      `json:"tool_error,omitempty"`  // true if tool ended with error
 }
 
 // TaskResult represents the result of a task execution.
@@ -46,11 +54,13 @@ type TaskCancel struct {
 	Reason string `json:"reason,omitempty"`
 }
 
-// LogCallback is a function that sends a log line to the host.
-type LogCallback func(taskID, line string) error
+// LogCallback is a function that sends a log entry to the host.
+// For tool call events, the entry should include structured fields
+// (ToolType, ToolName, etc.) alongside the formatted Line string.
+type LogCallback func(entry LogEntry) error
 
 // Handler is a function that handles task execution.
-type Handler func(ctx context.Context, task TaskAssignment, log LogCallback) (*TaskResult, error)
+type Handler func(ctx context.Context, task TaskAssignment, sendLog LogCallback) (*TaskResult, error)
 
 // Guest is the client-side guest that connects to the Check-In Host.
 type Guest struct {
@@ -260,12 +270,12 @@ func (g *Guest) Heartbeat() error {
 }
 
 // SendLog sends a log entry to the Check-In Host.
-func (g *Guest) SendLog(taskID, line string) error {
-	entry := LogEntry{
-		TaskID:    taskID,
-		Line:      line,
-		Level:     "info",
-		Timestamp: time.Now(),
+// For tool call events, the entry should include structured fields
+// (ToolType, ToolName, etc.) alongside the formatted Line string.
+func (g *Guest) SendLog(entry LogEntry) error {
+	entry.Timestamp = time.Now()
+	if entry.Level == "" {
+		entry.Level = "info"
 	}
 
 	err := g.client.SendNotification("guest.log", entry)
@@ -428,7 +438,7 @@ func (g *Guest) ExecuteTask(task TaskAssignment) (*TaskResult, error) {
 	g.log.Printf("[TASK] tags: %v", task.Tags)
 
 	// Send log that task started
-	if err := g.SendLog(task.TaskID, "Task started"); err != nil {
+	if err := g.SendLog(LogEntry{TaskID: task.TaskID, Line: "Task started", Level: "system"}); err != nil {
 		g.log.Printf("failed to send task start log: %v", err)
 	}
 
@@ -448,7 +458,7 @@ func (g *Guest) ExecuteTask(task TaskAssignment) (*TaskResult, error) {
 	}
 
 	g.log.Printf("[TASK] task %s completed successfully", task.TaskID)
-	if err := g.SendLog(task.TaskID, "Task completed successfully"); err != nil {
+	if err := g.SendLog(LogEntry{TaskID: task.TaskID, Line: "Task completed successfully", Level: "system"}); err != nil {
 		g.log.Printf("failed to send task complete log: %v", err)
 	}
 

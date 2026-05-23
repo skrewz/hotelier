@@ -115,7 +115,7 @@ func TestPIHandler_ExecuteTask(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 
-	result, err := h.ExecuteTask(ctx, task, func(taskID, line string) error {
+	result, err := h.ExecuteTask(ctx, task, func(entry LogEntry) error {
 		return nil
 	})
 	if err != nil {
@@ -158,11 +158,11 @@ func TestPIHandler_FullDeltaSentAsOneEntry(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	_, _ = h.ExecuteTask(ctx, task, func(taskID, line string) error {
+	_, _ = h.ExecuteTask(ctx, task, func(entry LogEntry) error {
 		mu.Lock()
 		defer mu.Unlock()
-		lines = append(lines, line)
-		lineSet[line] = true
+		lines = append(lines, entry.Line)
+		lineSet[entry.Line] = true
 		return nil
 	})
 
@@ -414,10 +414,10 @@ func TestPIHandler_ExecuteTaskLogsWorkingDir(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	_, _ = h.ExecuteTask(ctx, task, func(taskID, line string) error {
+	_, _ = h.ExecuteTask(ctx, task, func(entry LogEntry) error {
 		mu.Lock()
 		defer mu.Unlock()
-		lines = append(lines, line)
+		lines = append(lines, entry.Line)
 		return nil
 	})
 
@@ -463,10 +463,10 @@ func TestPIHandler_FinalOutputPreservesNewlines(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	_, _ = h.ExecuteTask(ctx, task, func(taskID, line string) error {
+	_, _ = h.ExecuteTask(ctx, task, func(entry LogEntry) error {
 		mu.Lock()
 		defer mu.Unlock()
-		lines = append(lines, line)
+		lines = append(lines, entry.Line)
 		return nil
 	})
 
