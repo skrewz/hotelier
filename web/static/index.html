@@ -493,15 +493,6 @@
             return pre;
         }
 
-        function toggleToolBlock(toolId) {
-            const body = document.getElementById('tool-body-' + toolId);
-            const chevron = body?.previousElementSibling?.querySelector('.tool-chevron');
-            if (body) {
-                body.classList.toggle('open');
-                if (chevron) chevron.classList.toggle('open');
-            }
-        }
-
         function escapeHtml(str) {
             const div = document.createElement('div');
             div.textContent = str;
@@ -780,7 +771,6 @@
                     }
                 } catch (e) {}
             };
-            ws.onclose = () => setTimeout(connectWS, 5000);
         }
 
         // parseToolLine extracts tool metadata from a [TOOL_START/OUTPUT/END] line.
@@ -985,7 +975,7 @@
             logBreadcrumb = [date];
             const view = document.getElementById('log-view');
             try {
-                const res = await fetch('/api/logs/' + date + '/tasks');
+                const res = await fetch('/api/logs/' + date);
                 if (!res.ok) {
                     view.innerHTML = '<div class="empty-state"><span>⚠️</span>No tasks found for ' + date + '</div>';
                     return;

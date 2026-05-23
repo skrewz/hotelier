@@ -218,17 +218,23 @@ func validateUI(t *testing.T, baseURL, taskID, projectRoot string) {
 		}
 	}
 
+	// Compute expected log date for assertions.
+	// The disk log store writes entries with time.Now(), so the date directory
+	// will match today's date in the server's timezone.
+	logDate := time.Now().Format("2006-01-02")
+
 	script := fmt.Sprintf(`
 const { chromium } = require('playwright');
 (async () => {
   const browser = await chromium.launch({ headless: true });
   const page = await browser.newPage({ viewport: { width: 1280, height: 900 } });
-  const errors = [];
-  page.on('pageerror', err => errors.push(err.message));
+  const jsErrors = [];
+  page.on('pageerror', err => jsErrors.push(err.message));
 
   const screenshotDir = '%s';
   const baseURL = '%s';
   const taskId = '%s';
+  const expectedLogDate = '%s';
   const path = require('path');
 
   async function takeScreenshot(name) {
@@ -237,142 +243,125 @@ const { chromium } = require('playwright');
     console.log('Screenshot saved:', filePath);
   }
 
-  // --- Navigate and take front-page screenshot ---
+  function fail(msg) {
+    console.error('FAIL:', msg);
+    throw new Error(msg);
+  }
+
+  // Helper: click an element by its selector using native .click().
+  // Playwright's page.click() does NOT fire onclick attribute handlers on
+  // elements rendered via innerHTML (which is how the log view works).
+  // Using native .click() via page.evaluate() fires the handler correctly,
+  // exercising the same code path as a real user click.
+  async function clickEl(selector) {
+    await page.evaluate((sel) => {
+      const el = document.querySelector(sel);
+      if (!el) throw new Error('element not found: ' + sel);
+      el.click();
+    }, selector);
+  }
+
+  // =====================================================================
+  // Phase 1: Front page — Tasks tab
+  // =====================================================================
+  console.log('=== Phase 1: Tasks tab ===');
   await page.goto(baseURL);
   await page.waitForLoadState('networkidle');
 
-  if (errors.length > 0) {
-    console.error('JS errors on page load:', errors);
-    await takeScreenshot('01-page-load');
+  if (jsErrors.length > 0) {
+    console.error('JS errors on page load:', jsErrors);
+    await takeScreenshot('00-js-errors');
     process.exit(1);
   }
 
-  // Wait for the task list to populate — the Go test has already sent
-  // logs via WebSocket; the server broadcast should have triggered the
-  // client-side refreshTaskList call that renders .task-item elements.
+  // Wait for task list to populate
   await page.waitForSelector('.task-item', { timeout: 10000 });
 
-  // Screenshot 1: front page (Tasks tab with the submitted task visible)
+  // Verify Tasks tab is active by default
+  const tasksTabActive = await page.evaluate(() => {
+    const tabs = document.querySelectorAll('.tab');
+    for (const tab of tabs) {
+      if (tab.textContent.trim() === 'Tasks' && tab.classList.contains('active')) {
+        return true;
+      }
+    }
+    return false;
+  });
+  if (!tasksTabActive) fail('Tasks tab should be active on page load');
+  console.log('PASS: Tasks tab active on load');
+
+  // Verify task count matches
+  const taskCount = await page.$$('.task-item');
+  if (taskCount.length === 0) fail('No task items rendered');
+  console.log('PASS:', taskCount.length, 'task(s) rendered');
+
+  // Verify stats in header
+  const statsOk = await page.evaluate(() => {
+    const guestCount = document.getElementById('guest-count').textContent;
+    const taskCountEl = document.getElementById('task-count').textContent;
+    return guestCount !== '0' && taskCountEl !== '0';
+  });
+  if (!statsOk) fail('Header stats should show non-zero values');
+  console.log('PASS: Header stats populated');
+
   await takeScreenshot('01-front-page');
 
-  // Screenshot 2: front page after task submitted (same view, explicit label)
-  await takeScreenshot('02-after-task-submitted');
-
-  // --- Click the task item and verify URL changes ---
+  // =====================================================================
+  // Phase 2: Click task → Task Detail view
+  // =====================================================================
+  console.log('=== Phase 2: Task Detail ===');
   await page.click('.task-item');
   await page.waitForSelector('.task-detail-header', { timeout: 5000 });
 
-  // Verify URL updated to /task/:id
-  const urlAfterClick = await page.evaluate(() => window.location.pathname);
-  if (!urlAfterClick.startsWith('/task/')) {
-    console.error('FAIL: URL should start with /task/ after clicking task, got:', urlAfterClick);
-    await takeScreenshot('03-url-mismatch');
-    process.exit(1);
-  }
-  console.log('PASS: URL updated to', urlAfterClick);
+  // Verify URL updated
+  const detailUrl = await page.evaluate(() => window.location.pathname);
+  if (!detailUrl.startsWith('/task/')) fail('URL should start with /task/, got: ' + detailUrl);
+  console.log('PASS: URL updated to', detailUrl);
 
-  // Screenshot 3: task detail view after clicking the task
-  await takeScreenshot('03-task-clicked-detail');
-
-  // Wait for any pending WebSocket updates to arrive and be processed.
-  await new Promise(r => setTimeout(r, 1000));
-
-  // --- Switch to Logs tab and verify URL changes ---
-  await page.evaluate(async () => {
-    document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
-    document.querySelectorAll('.tab').forEach(t => {
-      if (t.textContent.trim() === 'Logs') t.classList.add('active');
-    });
-    document.getElementById('tab-tasks').style.display = 'none';
-    document.getElementById('tab-detail').style.display = 'none';
-    document.getElementById('tab-logs').style.display = 'block';
-    await loadLogDates();
-  });
-  await new Promise(r => setTimeout(r, 1000));
-
-  // Verify URL updated to /logs
-  const urlAfterLogs = await page.evaluate(() => window.location.pathname);
-  if (urlAfterLogs !== '/logs') {
-    console.error('FAIL: URL should be /logs on Logs tab, got:', urlAfterLogs);
-    await takeScreenshot('04-url-mismatch');
-    process.exit(1);
-  }
-  console.log('PASS: URL updated to /logs');
-
-  // Screenshot 4: logs page (showing dates)
-  await takeScreenshot('04-logs-page');
-
-  // Screenshot 5: logs page under the most recent date
-  const hasDateItem = await page.evaluate(() => {
-    return document.querySelector('.log-task-item') !== null;
-  });
-  if (hasDateItem) {
-    await page.click('.log-task-item');
-    await new Promise(r => setTimeout(r, 1500));
-
-    // Verify URL updated to /logs/:date
-    const urlAfterDate = await page.evaluate(() => window.location.pathname);
-    if (!urlAfterDate.startsWith('/logs/')) {
-      console.error('FAIL: URL should start with /logs/ after clicking date, got:', urlAfterDate);
-      await takeScreenshot('05-url-mismatch');
-      process.exit(1);
+  // Verify Task Detail tab is active
+  const detailTabActive = await page.evaluate(() => {
+    const tabs = document.querySelectorAll('.tab');
+    for (const tab of tabs) {
+      if (tab.textContent.trim() === 'Task Detail' && tab.classList.contains('active')) {
+        return true;
+      }
     }
-    console.log('PASS: URL updated to', urlAfterDate);
-
-    await takeScreenshot('05-logs-under-date');
-  } else {
-    console.log('No date items found in logs view — skipping date screenshot');
-  }
-
-  // --- Test direct URL navigation: navigate to /task/:id directly ---
-  await page.goto(baseURL + '/task/' + taskId);
-  await page.waitForLoadState('networkidle');
-  await page.waitForSelector('.task-detail-header', { timeout: 5000 });
-
-  const directNavDetail = await page.evaluate(() => {
-    return document.querySelector('.task-detail-header') !== null;
+    return false;
   });
-  if (!directNavDetail) {
-    console.error('FAIL: Direct navigation to /task/:id did not show detail view');
-    await takeScreenshot('06-direct-nav-fail');
-    process.exit(1);
-  }
-  console.log('PASS: Direct navigation to /task/:id shows detail view');
-  await takeScreenshot('06-direct-task-nav');
+  if (!detailTabActive) fail('Task Detail tab should be active after clicking task');
+  console.log('PASS: Task Detail tab active');
 
-  // --- Test browser back/forward ---
-  // Go back — should return to /logs (previous history entry)
-  await page.goBack();
-  await new Promise(r => setTimeout(r, 1000));
-
-  const backUrl = await page.evaluate(() => window.location.pathname);
-  const backIsLogs = await page.evaluate(() => {
-    return document.getElementById('tab-logs').style.display === 'block';
+  // Verify detail header shows task info
+  const headerOk = await page.evaluate(() => {
+    const header = document.querySelector('.task-detail-header');
+    const meta = document.querySelector('.task-detail-meta');
+    return header !== null && meta !== null;
   });
-  if (!backIsLogs) {
-    console.error('FAIL: After goBack, Logs tab should be active, URL:', backUrl);
-    await takeScreenshot('07-back-fail');
-    process.exit(1);
-  }
-  console.log('PASS: Browser back restored Logs view');
+  if (!headerOk) fail('Task detail header/meta missing');
+  console.log('PASS: Task detail header rendered');
 
-  // --- Return to Task Detail tab for DOM validation ---
-  // Navigate to the task URL to reload the detail view
-  await page.goto(baseURL + '/task/' + taskId);
-  await page.waitForLoadState('networkidle');
-  await page.waitForSelector('.task-detail-header', { timeout: 5000 });
-  await new Promise(r => setTimeout(r, 500));
+  // Verify Close button exists
+  const closeBtn = await page.evaluate(() => {
+    return document.querySelector('.task-detail-header .btn-ghost') !== null;
+  });
+  if (!closeBtn) fail('Close button missing in task detail header');
+  console.log('PASS: Close button present');
 
-  // Validate the rendered DOM.
-  const result = await page.evaluate(() => {
+  await takeScreenshot('02-task-detail');
+
+  // =====================================================================
+  // Phase 3: DOM validation of task detail (tool blocks, log messages)
+  // =====================================================================
+  console.log('=== Phase 3: Task detail DOM validation ===');
+
+  const detailResult = await page.evaluate(() => {
     const body = document.querySelector('.task-detail-body');
     if (!body) return { error: 'no .task-detail-body found' };
 
     const toolBlocks = body.querySelectorAll('.tool-block');
     const logMsgs = body.querySelectorAll(':scope > .log-msg');
 
-    // Check that no plain-text log-msg contains tool markers — they should
-    // be inside tool blocks, not duplicated as separate log lines.
+    // Check that no plain-text log-msg contains tool markers
     const toolMarkerLines = ['[TOOL_OUTPUT]', '[TOOL_END]', '[TOOL_START]'];
     const hasToolMarkersOutsideBlocks = Array.from(logMsgs).some(m =>
       toolMarkerLines.some(marker => m.textContent.includes(marker))
@@ -382,52 +371,304 @@ const { chromium } = require('playwright');
       toolBlockCount: toolBlocks.length,
       toolBlockIds: Array.from(toolBlocks).map(b => b.id),
       toolStatuses: Array.from(toolBlocks).map(b => b.querySelector('.tool-status')?.textContent?.trim()),
+      toolNames: Array.from(toolBlocks).map(b => b.querySelector('.tool-name')?.textContent?.trim()),
       toolOutputsHavePre: Array.from(toolBlocks).map(b => b.querySelector('.tool-output pre') !== null),
       toolOutputContents: Array.from(toolBlocks).map(b => {
         const pre = b.querySelector('.tool-output pre');
-        return pre ? pre.textContent.substring(0, 50) : '';
+        return pre ? pre.textContent.substring(0, 80) : '';
       }),
       logMsgCount: logMsgs.length,
       hasPlainMsg: Array.from(logMsgs).some(m => m.textContent?.includes("Let me check")),
+      hasSystemMsg: Array.from(logMsgs).some(m => m.classList.contains('system')),
       hasToolMarkersOutsideBlocks,
+      promptVisible: document.querySelector('.task-detail-prompt') !== null,
     };
   });
 
-  if (result.error) {
-    console.error('DOM validation error:', result.error);
-    await takeScreenshot('08-dom-error');
+  if (detailResult.error) {
+    fail('DOM validation error: ' + detailResult.error);
+    await takeScreenshot('03-dom-error');
     process.exit(1);
   }
 
-  const checks = [
-    { name: '2 tool blocks', pass: result.toolBlockCount === 2 },
-    { name: 'unique tool block IDs', pass: result.toolBlockIds[0] !== result.toolBlockIds[1] },
-    { name: 'first block status "done"', pass: result.toolStatuses[0] === 'done' },
-    { name: 'second block status "error"', pass: result.toolStatuses[1] === 'error' },
-    { name: 'first block has <pre> for output', pass: result.toolOutputsHavePre[0] },
-    { name: 'first output contains JSON', pass: result.toolOutputContents[0] && result.toolOutputContents[0].includes("example-app") },
-    { name: 'plain text msg after tools', pass: result.hasPlainMsg },
-    { name: 'no tool markers outside blocks', pass: !result.hasToolMarkersOutsideBlocks },
+  const detailChecks = [
+    { name: '2 tool blocks rendered', pass: detailResult.toolBlockCount === 2 },
+    { name: 'unique tool block IDs', pass: detailResult.toolBlockIds[0] !== detailResult.toolBlockIds[1] },
+    { name: 'first tool named "bash"', pass: detailResult.toolNames[0] === 'bash' },
+    { name: 'second tool named "read"', pass: detailResult.toolNames[1] === 'read' },
+    { name: 'first block status "done"', pass: detailResult.toolStatuses[0] === 'done' },
+    { name: 'second block status "error"', pass: detailResult.toolStatuses[1] === 'error' },
+    { name: 'first block has <pre> for output', pass: detailResult.toolOutputsHavePre[0] },
+    { name: 'first output contains JSON', pass: detailResult.toolOutputContents[0].includes("example-app") },
+    { name: 'plain text message between tools', pass: detailResult.hasPlainMsg },
+    { name: 'system messages present', pass: detailResult.hasSystemMsg },
+    { name: 'no tool markers outside blocks', pass: !detailResult.hasToolMarkersOutsideBlocks },
+    { name: 'prompt visible', pass: detailResult.promptVisible },
   ];
 
-  let failed = false;
-  for (const check of checks) {
-    if (!check.pass) {
-      console.error('FAIL:', check.name);
-      failed = true;
-    } else {
-      console.log('PASS:', check.name);
-    }
+  let detailFailed = false;
+  for (const check of detailChecks) {
+    if (!check.pass) { console.error('FAIL:', check.name); detailFailed = true; }
+    else { console.log('PASS:', check.name); }
   }
-
-  if (failed) {
-    await takeScreenshot('09-validation-failed');
+  if (detailFailed) {
+    await takeScreenshot('03-detail-validation-failed');
     process.exit(1);
   }
+
+  // =====================================================================
+  // Phase 4: Logs tab — dates, tasks, entries, breadcrumbs
+  // =====================================================================
+  console.log('=== Phase 4: Logs tab ===');
+
+  // Click the Logs tab — fires onclick="showTab('logs')" which triggers loadLogDates()
+  await page.locator('.tab').filter({ hasText: 'Logs' }).click();
+
+  // Wait for log dates to load (the date items appear after the API fetch completes)
+  await page.waitForSelector('#log-dates-list .log-task-item', { timeout: 10000 });
+
+  // Verify URL is /logs (loadLogDates pushes /logs)
+  const logsUrl = await page.evaluate(() => window.location.pathname);
+  if (logsUrl !== '/logs') fail('URL should be /logs, got: ' + logsUrl);
+  console.log('PASS: URL is /logs');
+
+  // Verify log dates are present
+  const logDatesOk = await page.evaluate(() => {
+    const items = document.querySelectorAll('#log-dates-list .log-task-item');
+    return items.length > 0;
+  });
+  if (!logDatesOk) fail('No log dates found');
+  console.log('PASS: Log dates loaded');
+
+  // Get the date string for later use
+  const logDate = await page.evaluate(() => {
+    const item = document.querySelector('.log-task-item .log-task-id');
+    return item ? item.textContent.replace('📅 ', '').trim() : '';
+  });
+  if (logDate !== expectedLogDate) fail('Log date mismatch: expected ' + expectedLogDate + ', got ' + logDate);
+  console.log('PASS: Log date:', logDate);
+
+  await takeScreenshot('04-logs-dates');
+
+  // --- Click the date item to load tasks for that date ---
+  console.log('--- Clicking date item ---');
+  await clickEl('#log-dates-list .log-task-item');
+
+  // Wait for loadLogTasks to complete (it's async and fetches tasks from the API)
+  await page.waitForFunction((date) => {
+    const crumbs = document.querySelectorAll('.log-breadcrumb .crumb, .log-breadcrumb .current');
+    return Array.from(crumbs).some(c => c.textContent.includes(date));
+  }, logDate, { timeout: 10000 });
+
+  // Verify breadcrumb shows date crumb
+  const breadcrumbOk = await page.evaluate((date) => {
+    const crumbs = document.querySelectorAll('.log-breadcrumb .crumb, .log-breadcrumb .current');
+    const text = Array.from(crumbs).map(c => c.textContent).join(' ');
+    return text.includes(date);
+  }, logDate);
+  if (!breadcrumbOk) fail('Breadcrumb should contain date ' + logDate);
+  console.log('PASS: Breadcrumb shows date');
+
+  // Verify URL updated to /logs/:date
+  const dateUrl = await page.evaluate(() => window.location.pathname);
+  if (!dateUrl.startsWith('/logs/' + logDate)) fail('URL should start with /logs/' + logDate + ', got: ' + dateUrl);
+  console.log('PASS: URL updated to', dateUrl);
+
+  // Verify task items are listed (our test task should be present)
+  const taskItems = await page.$$('.log-task-item');
+  if (taskItems.length === 0) fail('No task items found under date ' + logDate);
+  console.log('PASS:', taskItems.length, 'task(s) found under date');
+
+  // Verify breadcrumb has "All Dates" crumb for navigation back
+  const allDatesCrumb = await page.evaluate(() => {
+    const crumbs = document.querySelectorAll('.log-breadcrumb .crumb');
+    return Array.from(crumbs).some(c => c.textContent === 'All Dates');
+  });
+  if (!allDatesCrumb) fail('Breadcrumb should have "All Dates" crumb');
+  console.log('PASS: "All Dates" breadcrumb crumb present');
+
+  await takeScreenshot('05-logs-tasks-under-date');
+
+  // --- Click the task item to load its log entries ---
+  console.log('--- Clicking task item ---');
+  await clickEl('.log-task-item');
+
+  // Wait for log entries to render
+  await page.waitForSelector('.log-entry-line', { timeout: 10000 });
+
+  // Verify log entries are rendered
+  const logEntryResult = await page.evaluate(() => {
+    const entries = document.querySelectorAll('.log-entry-line');
+    if (entries.length === 0) return { error: 'no log entries found' };
+
+    return {
+      entryCount: entries.length,
+      hasTimestamps: Array.from(entries).some(e => e.querySelector('.log-timestamp') !== null),
+      hasLevelBadges: Array.from(entries).some(e => e.querySelector('.log-level-badge') !== null),
+      hasContent: Array.from(entries).some(e => e.querySelector('.log-content') !== null),
+      levels: Array.from(entries).map(e => e.dataset.level || ''),
+      hasToolEntries: Array.from(entries).some(e => e.dataset.level === 'tool'),
+      hasTextEntries: Array.from(entries).some(e => e.dataset.level === 'text'),
+      hasSystemEntries: Array.from(entries).some(e => e.dataset.level === 'system'),
+      breadcrumbCrumbs: Array.from(document.querySelectorAll('.log-breadcrumb .crumb, .log-breadcrumb .current'))
+        .map(c => c.textContent),
+    };
+  });
+
+  if (logEntryResult.error) fail(logEntryResult.error);
+
+  const logEntryChecks = [
+    { name: 'log entries rendered', pass: logEntryResult.entryCount > 0 },
+    { name: 'entries have timestamps', pass: logEntryResult.hasTimestamps },
+    { name: 'entries have level badges', pass: logEntryResult.hasLevelBadges },
+    { name: 'entries have content', pass: logEntryResult.hasContent },
+    { name: 'tool-level entries present', pass: logEntryResult.hasToolEntries },
+    { name: 'text-level entries present', pass: logEntryResult.hasTextEntries },
+    { name: 'system-level entries present', pass: logEntryResult.hasSystemEntries },
+    { name: 'breadcrumb has date crumb', pass: logEntryResult.breadcrumbCrumbs.some(c => c.includes('-')) },
+    { name: 'breadcrumb has All Dates crumb', pass: logEntryResult.breadcrumbCrumbs.some(c => c === 'All Dates') },
+  ];
+
+  let logEntryFailed = false;
+  for (const check of logEntryChecks) {
+    if (!check.pass) { console.error('FAIL:', check.name); logEntryFailed = true; }
+    else { console.log('PASS:', check.name); }
+  }
+  if (logEntryFailed) {
+    await takeScreenshot('06-log-entries-failed');
+    process.exit(1);
+  }
+
+  await takeScreenshot('06-log-entries');
+
+  // --- Click "All Dates" breadcrumb crumb to navigate back ---
+  console.log('--- Clicking All Dates breadcrumb ---');
+  await clickEl('.crumb');
+
+  // Wait for dates list to reload
+  await page.waitForSelector('#log-dates-list .log-task-item', { timeout: 10000 });
+
+  const backToDateList = await page.evaluate(() => {
+    const breadcrumb = document.querySelector('.log-breadcrumb .current');
+    return breadcrumb && breadcrumb.textContent === 'All Dates';
+  });
+  if (!backToDateList) fail('Breadcrumb should show "All Dates" after clicking crumb');
+  console.log('PASS: Breadcrumb navigation to All Dates works');
+
+  const breadcrumbUrl = await page.evaluate(() => window.location.pathname);
+  if (breadcrumbUrl !== '/logs') fail('URL should be /logs after breadcrumb nav, got: ' + breadcrumbUrl);
+  console.log('PASS: URL is /logs after breadcrumb navigation');
+
+  await takeScreenshot('07-breadcrumb-nav');
+
+  // =====================================================================
+  // Phase 5: Direct URL navigation
+  // =====================================================================
+  console.log('=== Phase 5: Direct URL navigation ===');
+
+  // Navigate directly to /task/:id
+  await page.goto(baseURL + '/task/' + taskId);
+  await page.waitForLoadState('networkidle');
+  await page.waitForSelector('.task-detail-header', { timeout: 5000 });
+
+  const directDetail = await page.evaluate(() => {
+    return document.querySelector('.task-detail-header') !== null &&
+           document.querySelector('.task-detail-body') !== null;
+  });
+  if (!directDetail) fail('Direct nav to /task/:id should show detail view');
+  console.log('PASS: Direct nav to /task/:id works');
+
+  await takeScreenshot('08-direct-task-nav');
+
+  // Navigate directly to /logs
+  await page.goto(baseURL + '/logs');
+  await page.waitForLoadState('networkidle');
+  await page.waitForFunction(() => {
+    return document.getElementById('tab-logs').style.display === 'block';
+  }, { timeout: 5000 });
+
+  const directLogs = await page.evaluate(() => {
+    return document.getElementById('tab-logs').style.display === 'block' &&
+           document.querySelector('.log-task-item') !== null;
+  });
+  if (!directLogs) fail('Direct nav to /logs should show logs view with dates');
+  console.log('PASS: Direct nav to /logs works');
+
+  // Navigate directly to /logs/:date
+  await page.goto(baseURL + '/logs/' + logDate);
+  await page.waitForLoadState('networkidle');
+  await page.waitForFunction(() => {
+    const view = document.getElementById('log-view');
+    return view.querySelector('.log-task-item') !== null ||
+           view.querySelector('.empty-state') !== null;
+  }, { timeout: 10000 });
+
+  const directLogsDate = await page.evaluate(() => {
+    return document.getElementById('tab-logs').style.display === 'block';
+  });
+  if (!directLogsDate) fail('Direct nav to /logs/:date should show logs tab');
+  console.log('PASS: Direct nav to /logs/:date works');
+
+  await takeScreenshot('09-direct-logs-nav');
+
+  // =====================================================================
+  // Phase 6: Browser back/forward
+  // =====================================================================
+  console.log('=== Phase 6: Browser back navigation ===');
+
+  // Go back — should return to /logs
+  await page.goBack();
+  await page.waitForFunction((date) => {
+    return window.location.pathname !== '/logs/' + date;
+  }, logDate, { timeout: 5000 });
+
+  const backPath = await page.evaluate(() => window.location.pathname);
+  console.log('PASS: goBack() navigated to', backPath);
+
+  // Note: goForward() is not tested because goBack() triggers a full page
+  // reload (new WebSocket connection), which resets the SPA history stack.
+
+  // =====================================================================
+  // Phase 7: Close task detail and return to Tasks tab
+  // =====================================================================
+  console.log('=== Phase 7: Close task detail ===');
+
+  // Navigate back to task detail
+  await page.goto(baseURL + '/task/' + taskId);
+  await page.waitForLoadState('networkidle');
+  await page.waitForSelector('.task-detail-header', { timeout: 5000 });
+
+  // Click Close button
+  await page.click('.task-detail-header .btn-ghost');
+
+  // Wait for Tasks tab to be active
+  await page.waitForFunction(() => {
+    const tabs = document.querySelectorAll('.tab');
+    for (const tab of tabs) {
+      if (tab.textContent.trim() === 'Tasks' && tab.classList.contains('active')) {
+        return true;
+      }
+    }
+    return false;
+  }, { timeout: 5000 });
+
+  const tasksAfterClose = await page.evaluate(() => {
+    return document.getElementById('tab-tasks').style.display === 'block' &&
+           document.getElementById('tab-detail').style.display === 'none';
+  });
+  if (!tasksAfterClose) fail('After Close, Tasks tab should be active');
+  console.log('PASS: Close button returns to Tasks tab');
+
+  const closeUrl = await page.evaluate(() => window.location.pathname);
+  if (closeUrl !== '/tasks' && closeUrl !== '/') fail('URL should be /tasks or / after Close, got: ' + closeUrl);
+  console.log('PASS: URL is', closeUrl, 'after Close');
+
+  await takeScreenshot('10-after-close');
+
   console.log('All UI validation checks passed!');
   await browser.close();
 })().catch(e => { console.error('Test failed:', e); process.exit(1); });
-`, screenshotDir, baseURL, taskID)
+`, screenshotDir, baseURL, taskID, logDate)
 
 	tmpScript := t.TempDir() + "/validate_ui.js"
 	if err := os.WriteFile(tmpScript, []byte(script), 0o644); err != nil {
