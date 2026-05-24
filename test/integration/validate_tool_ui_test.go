@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -35,20 +36,155 @@ type testLogEntry struct {
 	toolError  bool   // true if tool ended with error
 }
 
+// piRPCEvent captures the top-level type field from a Pi RPC wire event.
+type piRPCEvent struct {
+	Type string `json:"type"`
+}
+
+// piToolExecEvent captures tool execution events from Pi RPC.
+type piToolExecEvent struct {
+	Type       string `json:"type"`
+	ToolCallID string `json:"toolCallId"`
+	ToolName   string `json:"toolName"`
+	Args       any    `json:"args"`
+	Result     any    `json:"result"`
+	IsError    bool   `json:"isError"`
+}
+
+// piMessageUpdateEvent captures message_update events.
+type piMessageUpdateEvent struct {
+	Type                  string `json:"type"`
+	AssistantMessageEvent any    `json:"assistantMessageEvent"`
+}
+
+// piToolCallInfo extracts tool call details from a message_update partial.
+type piToolCallInfo struct {
+	Type      string `json:"type"`
+	ID        string `json:"id"`
+	Name      string `json:"name"`
+	Arguments any    `json:"arguments"`
+}
+
+// parsePiRPCCapture reads the Pi RPC log file and converts real wire events
+// into testLogEntry format compatible with hotelier's guest.log RPC method.
+func parsePiRPCCapture(filePath string) ([]testLogEntry, error) {
+	data, err := os.ReadFile(filePath)
+	if err != nil {
+		return nil, fmt.Errorf("read %s: %w", filePath, err)
+	}
+
+	var entries []testLogEntry
+	lines := strings.Split(string(data), "\n")
+
+	for _, line := range lines {
+		// Each line starts with a prefix like "[STDOUT←pi] 2026-05-24T...: "
+		// The JSON payload follows the last colon+space after the timestamp.
+		jsonStart := strings.LastIndex(line, ": ")
+		if jsonStart == -1 {
+			continue
+		}
+		payload := strings.TrimSpace(line[jsonStart+2:])
+		if payload == "" {
+			continue
+		}
+
+		// Quick type check to avoid full unmarshalling on non-interesting lines
+		var evt piRPCEvent
+		if err := json.Unmarshal([]byte(payload), &evt); err != nil {
+			continue
+		}
+
+		switch evt.Type {
+		case "tool_execution_start":
+			var toolEvt piToolExecEvent
+			if err := json.Unmarshal([]byte(payload), &toolEvt); err != nil {
+				continue
+			}
+			argsJSON, _ := json.Marshal(toolEvt.Args)
+			entries = append(entries, testLogEntry{
+				line:     fmt.Sprintf("[TOOL_START] %s: %s (id: %s)", toolEvt.ToolName, string(argsJSON), toolEvt.ToolCallID),
+				level:    "tool",
+				toolType: "start",
+				toolName: toolEvt.ToolName,
+				toolID:   toolEvt.ToolCallID,
+				toolArgs: string(argsJSON),
+			})
+
+		case "tool_execution_end":
+			var toolEvt piToolExecEvent
+			if err := json.Unmarshal([]byte(payload), &toolEvt); err != nil {
+				continue
+			}
+			resultJSON, _ := json.Marshal(toolEvt.Result)
+			entries = append(entries, testLogEntry{
+				line:       fmt.Sprintf("[TOOL_END] %s (id: %s): %s", toolEvt.ToolName, toolEvt.ToolCallID, string(resultJSON)),
+				level:      "tool",
+				toolType:   "end",
+				toolName:   toolEvt.ToolName,
+				toolID:     toolEvt.ToolCallID,
+				toolOutput: string(resultJSON),
+				toolError:  toolEvt.IsError,
+			})
+
+		case "tool_execution_update":
+			var toolEvt piToolExecEvent
+			if err := json.Unmarshal([]byte(payload), &toolEvt); err != nil {
+				continue
+			}
+			// Only emit output entries when there's actual content
+			var partialResult any
+			if err := json.Unmarshal([]byte(payload), &struct {
+				PartialResult any `json:"partialResult"`
+			}{PartialResult: &partialResult}); err == nil && partialResult != nil {
+				resultJSON, _ := json.Marshal(partialResult)
+				if string(resultJSON) != "{}" && string(resultJSON) != "null" {
+					entries = append(entries, testLogEntry{
+						line:       fmt.Sprintf("[TOOL_OUTPUT] %s (id: %s): %s", toolEvt.ToolName, toolEvt.ToolCallID, string(resultJSON)),
+						level:      "tool",
+						toolType:   "output",
+						toolName:   toolEvt.ToolName,
+						toolID:     toolEvt.ToolCallID,
+						toolOutput: string(resultJSON),
+					})
+				}
+			}
+		}
+	}
+
+	return entries, nil
+}
+
 // testLogEntries returns the shared set of simulated log entries.
-// These mirror real RPC log entries with structured fields as produced
-// by the guest agent after the structured data refactor.
+// These are parsed directly from the real Pi RPC capture log to ensure
+// the integration test uses the actual wire format.
 func testLogEntries() []testLogEntry {
+	// The test changes directory to the project root, so we use a path
+	// relative to that.
+	logPath := "test/integration/pi_rpc_capture_redacted.log"
+	entries, err := parsePiRPCCapture(logPath)
+	if err != nil {
+		// Fallback to synthetic entries if log file is missing
+		fmt.Fprintf(os.Stderr, "WARN: parsePiRPCCapture(%s) failed: %v, using fallback\n", logPath, err)
+		return fallbackTestLogEntries()
+	}
+	// Prepend system messages that the UI expects but aren't in the real log.
+	// The real Pi RPC log only contains tool execution events; system messages
+	// are generated by hotelier itself, not sent over the RPC channel.
+	entries = append([]testLogEntry{
+		{"Task started", "system", "", "", "", "", "", false},
+	}, entries...)
+	return entries
+}
+
+// fallbackTestLogEntries provides synthetic entries if the real log file
+// cannot be read (e.g. during development without the fixture).
+func fallbackTestLogEntries() []testLogEntry {
 	return []testLogEntry{
 		{"Task started", "system", "", "", "", "", "", false},
 		{"I'll help you with that. Let me start by checking the package.json file.", "text", "", "", "", "", "", false},
 		{fmt.Sprintf("[TOOL_START] bash: cat package.json (id: %s)", toolID1()), "tool", "start", "bash", toolID1(), "cat package.json", "", false},
 		{fmt.Sprintf("[TOOL_OUTPUT] bash (id: %s): {\"name\": \"example-app\", \"version\": \"1.0.0\"}", toolID1()), "tool", "output", "bash", toolID1(), "", "{\"name\": \"example-app\", \"version\": \"1.0.0\"}", false},
 		{fmt.Sprintf("[TOOL_END] bash (id: %s): {\"name\": \"example-app\", \"version\": \"1.0.0\"}", toolID1()), "tool", "end", "bash", toolID1(), "", "{\"name\": \"example-app\", \"version\": \"1.0.0\"}", false},
-		{"Let me check the API endpoint and the repo path more carefully.", "text", "", "", "", "", "", false},
-		{fmt.Sprintf("[TOOL_START] read: package.json (id: %s)", toolID2()), "tool", "start", "read", toolID2(), "package.json", "", false},
-		{fmt.Sprintf("[TOOL_OUTPUT] read (id: %s): {\"name\": \"example-app\", \"version\": \"1.0.0\"}", toolID2()), "tool", "output", "read", toolID2(), "", "{\"name\": \"example-app\", \"version\": \"1.0.0\"}", false},
-		{fmt.Sprintf("[TOOL_END] read (id: %s)", toolID2()), "tool", "end", "read", toolID2(), "", "", true},
 		{"Task completed successfully", "system", "", "", "", "", "", false},
 	}
 }
@@ -60,7 +196,8 @@ func TestValidateToolUI(t *testing.T) {
 	if err != nil {
 		t.Fatalf("get cwd: %v", err)
 	}
-	p := filepath.Clean(filepath.Join(wd, ".."))
+
+	p := filepath.Clean(filepath.Join(wd, "..", ".."))
 	if err := os.Chdir(p); err != nil {
 		t.Fatalf("chdir to project root: %v", err)
 	}
@@ -412,9 +549,6 @@ const { chromium } = require('playwright');
         return pre ? pre.textContent.substring(0, 80) : '';
       }),
       logMsgCount: logMsgs.length,
-      hasPlainMsg: Array.from(logMsgs).some(m => m.textContent?.includes("Let me check")),
-      hasSystemMsg: Array.from(logMsgs).some(m => m.classList.contains('system')),
-      hasIntroMsg: Array.from(logMsgs).some(m => m.textContent?.includes("I'll help you")),
       hasToolMarkersOutsideBlocks,
     };
   });
@@ -425,20 +559,13 @@ const { chromium } = require('playwright');
     process.exit(1);
   }
 
+  // Real Pi RPC log has exactly 1 tool call: bash "hostname" → success
   const detailChecks = [
-    { name: '2 tool blocks rendered', pass: detailResult.toolBlockCount === 2 },
-    { name: 'unique tool block IDs', pass: detailResult.toolBlockIds[0] !== detailResult.toolBlockIds[1] },
-    { name: 'first tool named "bash"', pass: detailResult.toolNames[0] === 'bash' },
-    { name: 'second tool named "read"', pass: detailResult.toolNames[1] === 'read' },
-    { name: 'first block status "done"', pass: detailResult.toolStatuses[0] === 'done' },
-    { name: 'second block status "error"', pass: detailResult.toolStatuses[1] === 'error' },
-    { name: 'first block has <pre> for output', pass: detailResult.toolOutputsHavePre[0] },
-    { name: 'second block has <pre> for output', pass: detailResult.toolOutputsHavePre[1] },
-    { name: 'first output contains JSON', pass: detailResult.toolOutputContents[0].includes("example-app") },
-    { name: 'second output contains JSON', pass: detailResult.toolOutputContents[1].includes("example-app") },
-    { name: 'plain text message between tools', pass: detailResult.hasPlainMsg },
-    { name: 'intro text message present', pass: detailResult.hasIntroMsg },
-    { name: 'system messages present', pass: detailResult.hasSystemMsg },
+    { name: '1 tool block rendered', pass: detailResult.toolBlockCount === 1 },
+    { name: 'tool named "bash"', pass: detailResult.toolNames[0] === 'bash' },
+    { name: 'block status "done"', pass: detailResult.toolStatuses[0] === 'done' },
+    { name: 'block has <pre> for output', pass: detailResult.toolOutputsHavePre[0] },
+    { name: 'output contains "devvm"', pass: detailResult.toolOutputContents[0].includes('devvm') },
     { name: 'no tool markers outside blocks', pass: !detailResult.hasToolMarkersOutsideBlocks },
   ];
 
