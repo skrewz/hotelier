@@ -916,13 +916,14 @@ const { chromium } = require('playwright');
 		t.Fatalf("Playwright UI validation failed: %v", err)
 	}
 
-	// List any screenshots taken
+	// List screenshots taken — fail if none were produced
 	files, _ := os.ReadDir(screenshotDir)
-	if len(files) > 0 {
-		t.Log("Screenshots taken:")
-		for _, f := range files {
-			t.Logf("  %s", filepath.Join(screenshotDir, f.Name()))
-		}
+	if len(files) == 0 {
+		t.Fatal("no screenshots produced — Playwright validation may not have run correctly")
+	}
+	t.Log("Screenshots taken:")
+	for _, f := range files {
+		t.Logf("  %s", filepath.Join(screenshotDir, f.Name()))
 	}
 }
 
