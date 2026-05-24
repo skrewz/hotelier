@@ -27,7 +27,7 @@ test-race: ## Run tests with race detector
 	@echo "Race detector passed"
 
 test-integration: ## Run integration tests (Playwright UI validation)
-	$(GO) test -race -tags=integration -count=1 ./test/
+	$(GO) test -race -tags=integration -count=1 ./test/integration/
 	@echo "Integration tests passed"
 
 lint: ## Run go vet and check formatting with gofumpt

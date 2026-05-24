@@ -49,7 +49,7 @@ If the screenshot shows any of the issues from the previous commit (tool output 
 
 ## Test ownership and test-suite deliberation
 
-The integration test suite (`test/validate_tool_ui_test.go`) is **your responsibility** — not the user's. Treat it as living code that evolves alongside the UI.
+The integration test suite (`test/integration/validate_tool_ui_test.go`) is **your responsibility** — not the user's. Treat it as living code that evolves alongside the UI.
 
 At the end of every turn where you modify client-side code, deliberate on these questions **before handing back**:
 
@@ -68,7 +68,7 @@ At the end of every turn where you modify client-side code, deliberate on these 
 
 **Rule of thumb:** If the UI can look wrong in ways that structural assertions can't catch, a screenshot is the safety net. When in doubt, add one.
 
-**How to extend the test:** The Playwright script is embedded inline in `validateUI()` inside `test/validate_tool_ui_test.go`. To add a screenshot, call `await takeScreenshot('04-descriptive-name')` at the appropriate point in the script. To add new log entries, extend `testLogEntries()`. To add assertions, extend the `checks` array in the inline script. To change the user interaction sequence (e.g. add a new step between clicking the task and validating), insert `await` calls before the `page.evaluate()` block.
+**How to extend the test:** The Playwright script is embedded inline in `validateUI()` inside `test/integration/validate_tool_ui_test.go`. To add a screenshot, call `await takeScreenshot('04-descriptive-name')` at the appropriate point in the script. To add new log entries, extend `testLogEntries()`. To add assertions, extend the `checks` array in the inline script. To change the user interaction sequence (e.g. add a new step between clicking the task and validating), insert `await` calls before the `page.evaluate()` block.
 
 ## Manual Playwright smoke test
 

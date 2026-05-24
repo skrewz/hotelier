@@ -1,8 +1,8 @@
 //go:build integration
 
-// Package test provides integration tests for the hotelier UI.
-// Run with: go test -tags=integration ./test/ -run TestValidateToolUI
-package test
+// Package integration provides integration tests for the hotelier UI.
+// Run with: go test -tags=integration ./test/integration/ -run TestValidateToolUI
+package integration
 
 import (
 	"encoding/json"
