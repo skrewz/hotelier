@@ -20,11 +20,22 @@ import (
 )
 
 // Entry represents a single log line persisted to disk.
+// For tool call events, the Line field contains the original formatted
+// string for backwards compatibility, but structured fields (ToolType,
+// ToolName, etc.) carry the machine-readable data.
 type Entry struct {
 	TaskID    string    `json:"task_id"`
 	Line      string    `json:"line"`
 	Level     string    `json:"level,omitempty"`
 	Timestamp time.Time `json:"timestamp"`
+
+	// Structured tool call fields (only set when Level == "tool")
+	ToolType   string `json:"tool_type,omitempty"`   // "start", "output", "end"
+	ToolName   string `json:"tool_name,omitempty"`   // e.g. "bash", "read"
+	ToolID     string `json:"tool_id,omitempty"`     // unique tool call identifier
+	ToolArgs   string `json:"tool_args,omitempty"`   // arguments/parameters
+	ToolOutput string `json:"tool_output,omitempty"` // captured output
+	ToolError  bool   `json:"tool_error,omitempty"`  // true if tool ended with error
 }
 
 // LogStore persists task logs to the filesystem in a date-partitioned structure.

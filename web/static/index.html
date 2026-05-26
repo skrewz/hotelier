@@ -962,6 +962,7 @@
                 // Use rich tool-block rendering (same as task detail view)
                 const isRunning = false; // Logs view is static; streaming handled separately
                 let currentToolBlock = null;
+                let entriesHtml = '';
 
                 entries.forEach((log) => {
                     const level = log.level || '';
@@ -971,7 +972,7 @@
                         if (log.tool_type === 'start') {
                             if (currentToolBlock) {
                                 // Flush previous incomplete block
-                                html += buildToolBlockHTML(
+                                entriesHtml += buildToolBlockHTML(
                                     currentToolBlock.toolName, currentToolBlock.toolId,
                                     currentToolBlock.args, currentToolBlock.output, 'running'
                                 );
@@ -997,7 +998,7 @@
                                 currentToolBlock.status = log.tool_error ? 'error' : 'success';
                             }
                             // Build and append the complete tool block now that we have all output
-                            html += buildToolBlockHTML(
+                            entriesHtml += buildToolBlockHTML(
                                 currentToolBlock.toolName, currentToolBlock.toolId,
                                 currentToolBlock.args, currentToolBlock.output,
                                 currentToolBlock.status
@@ -1009,7 +1010,7 @@
 
                     // Non-tool log lines
                     if (currentToolBlock) {
-                        html += buildToolBlockHTML(
+                        entriesHtml += buildToolBlockHTML(
                             currentToolBlock.toolName, currentToolBlock.toolId,
                             currentToolBlock.args, currentToolBlock.output, 'running'
                         );
@@ -1024,19 +1025,19 @@
                     } else {
                         msgHtml = `<div class="log-msg guest"><div class="md-rendered">${renderMarkdown(log.line)}</div></div>`;
                     }
-                    html += msgHtml;
+                    entriesHtml += msgHtml;
                 });
 
                 // Close any remaining open tool block
                 if (currentToolBlock) {
-                    html += buildToolBlockHTML(
+                    entriesHtml += buildToolBlockHTML(
                         currentToolBlock.toolName, currentToolBlock.toolId,
                         currentToolBlock.args, currentToolBlock.output, 'running'
                     );
                     currentToolBlock = null;
                 }
 
-                html += '<div id="log-entries-list">' + html + '</div>';
+                html += '<div id="log-entries-list">' + entriesHtml + '</div>';
             }
             view.innerHTML = html;
         }

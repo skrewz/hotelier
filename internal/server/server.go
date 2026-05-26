@@ -533,10 +533,16 @@ func (s *Server) handleGuestLog(ctx context.Context, params json.RawMessage) (in
 			// Persist to disk if configured
 			if s.diskLogStore != nil {
 				_ = s.diskLogStore.Append(logstore.Entry{
-					TaskID:    e.TaskID,
-					Line:      e.Line,
-					Level:     e.Level,
-					Timestamp: e.Timestamp,
+					TaskID:     e.TaskID,
+					Line:       e.Line,
+					Level:      e.Level,
+					Timestamp:  e.Timestamp,
+					ToolType:   e.ToolType,
+					ToolName:   e.ToolName,
+					ToolID:     e.ToolID,
+					ToolArgs:   e.ToolArgs,
+					ToolOutput: e.ToolOutput,
+					ToolError:  e.ToolError,
 				})
 			}
 			s.hub.SendNotification("", rpc.ConnectionRoleBrowser, "task.log", map[string]interface{}{
