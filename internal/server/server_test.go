@@ -1994,6 +1994,116 @@ func TestHandleGuestLog_ToolFieldsFromAccumulator(t *testing.T) {
 	}
 }
 
+// TestHandleTaskRerun_Success creates a task, completes it, then re-runs it.
+// The new task should have the same prompt/repos/tags but a different ID.
+func TestHandleTaskRerun_Success(t *testing.T) {
+	srv := newTestServer(t)
+
+	// Create original task
+	origTask := map[string]interface{}{
+		"id":     "original-task",
+		"repos":  []string{"/repo"},
+		"prompt": "Build a feature",
+		"tags":   []string{"business-default"},
+	}
+	body, _ := json.Marshal(origTask)
+	req := httptest.NewRequest(http.MethodPost, "/api/tasks", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	srv.HandleTasks(w, req)
+
+	if w.Code != http.StatusCreated {
+		t.Fatalf("expected 201 for original task, got %d", w.Code)
+	}
+
+	// Re-run the task
+	rerunReq := httptest.NewRequest(http.MethodPost, "/api/tasks/original-task/rerun", nil)
+	rerunW := httptest.NewRecorder()
+	srv.HandleTaskDetail(rerunW, rerunReq)
+
+	if rerunW.Code != http.StatusCreated {
+		t.Fatalf("expected 201 for rerun, got %d", rerunW.Code)
+	}
+
+	var newTask queue.Task
+	if err := json.Unmarshal(rerunW.Body.Bytes(), &newTask); err != nil {
+		t.Fatalf("failed to unmarshal rerun response: %v", err)
+	}
+
+	// New task should have different ID
+	if newTask.ID == "original-task" {
+		t.Errorf("expected new task to have a different ID, got %s", newTask.ID)
+	}
+
+	// But same prompt, repos, tags
+	if newTask.Prompt != "Build a feature" {
+		t.Errorf("expected prompt 'Build a feature', got %s", newTask.Prompt)
+	}
+	if len(newTask.Repos) != 1 || newTask.Repos[0] != "/repo" {
+		t.Errorf("expected repos ['/repo'], got %v", newTask.Repos)
+	}
+	if len(newTask.Tags) != 1 || newTask.Tags[0] != "business-default" {
+		t.Errorf("expected tags ['business-default'], got %v", newTask.Tags)
+	}
+	if newTask.Status != queue.TaskStatusPending {
+		t.Errorf("expected PENDING status, got %s", newTask.Status)
+	}
+}
+
+// TestHandleTaskRerun_NotFound returns 404 when the original task does not exist.
+func TestHandleTaskRerun_NotFound(t *testing.T) {
+	srv := newTestServer(t)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/tasks/nonexistent-task/rerun", nil)
+	w := httptest.NewRecorder()
+	srv.HandleTaskDetail(w, req)
+
+	if w.Code != http.StatusNotFound {
+		t.Errorf("expected 404, got %d", w.Code)
+	}
+}
+
+// TestHandleTaskRerun_EmptyID returns 400 when the task ID is empty.
+func TestHandleTaskRerun_EmptyID(t *testing.T) {
+	srv := newTestServer(t)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/tasks//rerun", nil)
+	w := httptest.NewRecorder()
+	srv.HandleTaskDetail(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("expected 400, got %d", w.Code)
+	}
+}
+
+// TestHandleTaskRerun_GET returns 405 for non-POST methods.
+func TestHandleTaskRerun_MethodNotAllowed(t *testing.T) {
+	srv := newTestServer(t)
+
+	// Create original task
+	origTask := map[string]interface{}{
+		"id":     "original-task",
+		"repos":  []string{"/repo"},
+		"prompt": "Build a feature",
+	}
+	body, _ := json.Marshal(origTask)
+	req := httptest.NewRequest(http.MethodPost, "/api/tasks", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	srv.HandleTasks(w, req)
+
+	// GET should not trigger rerun
+	getReq := httptest.NewRequest(http.MethodGet, "/api/tasks/original-task/rerun", nil)
+	getW := httptest.NewRecorder()
+	srv.HandleTaskDetail(getW, getReq)
+
+	// GET on /api/tasks/:id returns the task detail (200), not a rerun
+	// The rerun path is a sub-path, so GET should return 405
+	if getW.Code != http.StatusMethodNotAllowed {
+		t.Errorf("expected 405 for GET on rerun path, got %d", getW.Code)
+	}
+}
+
 // TestHandleGuestLog_ToolErrorFields verifies that [TOOL_END] with [ERROR]
 // is correctly parsed and the tool_error flag is set.
 func TestHandleGuestLog_ToolErrorFields(t *testing.T) {

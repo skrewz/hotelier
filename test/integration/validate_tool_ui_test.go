@@ -929,6 +929,70 @@ const { chromium } = require('playwright');
 
   await takeScreenshot('09-breadcrumb-nav');
 
+  // =====================================================================
+  // Phase 9: Re-run button — creates a new task from an existing one
+  // =====================================================================
+  console.log('=== Phase 9: Re-run button ===');
+
+  // Navigate to task detail (where the re-run button lives)
+  await page.goto(baseURL + '/task/' + taskId);
+  await page.waitForLoadState('networkidle');
+  await page.waitForSelector('.task-detail-body .tool-block', { timeout: 5000 });
+
+  // Verify the re-run button is present
+  const rerunBtnPresent = await page.evaluate(() => {
+    const btn = Array.from(document.querySelectorAll('.task-detail-header button'))
+      .find(b => b.textContent.includes('Re-run'));
+    return btn !== null;
+  });
+  if (!rerunBtnPresent) fail('Re-run button should be present in task detail header');
+  console.log('PASS: Re-run button present');
+
+  // Capture task count before re-run
+  const taskCountBefore = await page.evaluate(() => {
+    return document.querySelectorAll('.task-item').length;
+  });
+  console.log('Task count before re-run:', taskCountBefore);
+
+  // Click the re-run button — fires onclick="rerunTask(taskId)"
+  // Use attribute selector — clickEl() uses document.querySelector() which
+  // does NOT support Playwright's :has-text() pseudo-selector.
+  await clickEl('button[onclick^="rerunTask"]');
+
+  // Wait for the task list to refresh (new task appears)
+  await page.waitForFunction((count) => {
+    return document.querySelectorAll('.task-item').length > count;
+  }, taskCountBefore, { timeout: 10000 });
+
+  // Verify task count increased
+  const taskCountAfter = await page.evaluate(() => {
+    return document.querySelectorAll('.task-item').length;
+  });
+  if (taskCountAfter <= taskCountBefore) fail('Task count should increase after re-run');
+  console.log('PASS: Task count increased from', taskCountBefore, 'to', taskCountAfter);
+
+  // Verify we navigated to the new task (detail view should show a different ID)
+  const rerunNavOk = await page.evaluate((origId) => {
+    const idEl = document.querySelector('.task-detail-id');
+    if (!idEl) return false;
+    // The ID element contains the task ID followed by a status badge
+    const text = idEl.textContent.trim();
+    const currentId = text.split(' ')[0]; // first token is the ID
+    return currentId !== origId;
+  }, taskId);
+  if (!rerunNavOk) fail('Should navigate to new task after re-run');
+  console.log('PASS: Navigated to new task after re-run');
+
+  // Verify the new task has the same prompt
+  const rerunPromptOk = await page.evaluate(() => {
+    const promptEl = document.querySelector('.task-detail-prompt');
+    return promptEl && promptEl.textContent.includes('Simulate tool calls');
+  });
+  if (!rerunPromptOk) fail('Re-run task should have the same prompt');
+  console.log('PASS: Re-run task has same prompt');
+
+  await takeScreenshot('10-rerun-task');
+
   console.log('All UI validation checks passed!');
   await browser.close();
 })().catch(e => { console.error('Test failed:', e); process.exit(1); });

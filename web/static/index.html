@@ -620,7 +620,10 @@
                         <div class="task-detail-id">${escapeHtml(task.id)} <span class="badge ${badgeClass}">${task.status}</span></div>
                         <div class="task-detail-meta">${task.assigned_to ? 'Guest: ' + escapeHtml(task.assigned_to) : 'Unassigned'} · ${logs.length} log entries</div>
                     </div>
-                    <button class="btn btn-sm btn-ghost" onclick="closeTaskDetail()">Close</button>
+                    <div style="display:flex;gap:0.5rem;align-items:center;">
+                        <button class="btn btn-sm btn-ghost" onclick="rerunTask('${task.id}')">🔄 Re-run</button>
+                        <button class="btn btn-sm btn-ghost" onclick="closeTaskDetail()">Close</button>
+                    </div>
                 </div>
                 <div class="task-detail-prompt">${promptHtml}</div>
                 <div class="task-detail-body"></div>
@@ -675,6 +678,25 @@
                 }
             } catch (e) {
                 console.error('submit failed:', e);
+            }
+        }
+
+        // rerunTask creates a new task from an existing one.
+        async function rerunTask(taskId) {
+            try {
+                const res = await fetch('/api/tasks/' + taskId + '/rerun', {
+                    method: 'POST',
+                });
+                if (!res.ok) {
+                    alert('Failed to re-run task');
+                    return;
+                }
+                const newTask = await res.json();
+                refresh();
+                // Navigate to the new task
+                selectTask(newTask.id);
+            } catch (e) {
+                console.error('rerun failed:', e);
             }
         }
 

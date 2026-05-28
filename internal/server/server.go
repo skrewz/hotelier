@@ -1083,7 +1083,16 @@ func (s *Server) handleCreateTask(w http.ResponseWriter, r *http.Request) {
 // handleTaskDetail handles the /api/tasks/:id endpoint.
 // HandleTaskDetail handles the /api/tasks/:id endpoint.
 func (s *Server) HandleTaskDetail(w http.ResponseWriter, r *http.Request) {
-	taskID := strings.TrimPrefix(r.URL.Path, "/api/tasks/")
+	path := strings.TrimPrefix(r.URL.Path, "/api/tasks/")
+
+	// Check for rerun sub-path: /api/tasks/:id/rerun
+	if strings.HasSuffix(path, "/rerun") {
+		taskID := strings.TrimSuffix(path, "/rerun")
+		s.handleTaskRerun(w, r, taskID)
+		return
+	}
+
+	taskID := path
 	if taskID == "" {
 		http.Error(w, "task id required", http.StatusBadRequest)
 		return
@@ -1103,6 +1112,50 @@ func (s *Server) HandleTaskDetail(w http.ResponseWriter, r *http.Request) {
 		"logs":      logs,
 		"log_count": len(logs),
 	})
+}
+
+// handleTaskRerun creates a new task from an existing one.
+// POST /api/tasks/:id/rerun — clones the task's prompt, repos, and tags
+// into a fresh task with a new ID.
+func (s *Server) handleTaskRerun(w http.ResponseWriter, r *http.Request, taskID string) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	if taskID == "" {
+		http.Error(w, "task id required", http.StatusBadRequest)
+		return
+	}
+
+	orig, exists := s.taskQueue.Get(taskID)
+	if !exists {
+		http.Error(w, "task not found", http.StatusNotFound)
+		return
+	}
+
+	// Clone the task with a new ID
+	newTask := &queue.Task{
+		ID:     fmt.Sprintf("task-%d", time.Now().UnixNano()),
+		Repos:  orig.Repos,
+		Prompt: orig.Prompt,
+		Tags:   orig.Tags,
+	}
+
+	if err := s.taskQueue.Add(newTask); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	// Try to assign to an available guest
+	guests := s.registry.FindAvailableGuests(newTask.Tags)
+	if len(guests) > 0 {
+		s.tryAssignTask(guests[0].ID)
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusCreated)
+	json.NewEncoder(w).Encode(newTask)
 }
 
 // handleGuests handles the /api/guests endpoint.
