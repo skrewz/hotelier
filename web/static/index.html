@@ -717,12 +717,18 @@
                             params = msg.params || {};
                         }
 
-                        // Accumulate log in memory
+                        // Accumulate log in memory with structured tool fields
                         const logEntry = {
                             task_id: params.task_id,
                             line: params.line,
                             level: params.level || 'info',
-                            timestamp: new Date().toISOString()
+                            timestamp: new Date().toISOString(),
+                            tool_type:   params.tool_type,
+                            tool_name:   params.tool_name,
+                            tool_id:     params.tool_id,
+                            tool_args:   params.tool_args,
+                            tool_output: params.tool_output,
+                            tool_error:  params.tool_error,
                         };
                         if (!taskLogs[params.task_id]) {
                             taskLogs[params.task_id] = [];
