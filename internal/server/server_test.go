@@ -1859,3 +1859,183 @@ func TestTryAssignTask_AssignsToIdleGuest(t *testing.T) {
 		t.Errorf("expected guest state RUNNING, got %s", regGuest.State)
 	}
 }
+
+// TestHandleGuestLog_ToolFieldsFromAccumulator verifies that tool messages
+// which arrive with empty level (and are detected by the accumulator via
+// prefix matching) still get structured tool fields populated in the stored
+// entry. This is the root cause of the "Cannot read properties of null
+// (reading 'toolName')" crash: the accumulator sets level to "tool" but the
+// emit callback checked req.Level instead of e.Level, so structured fields
+// were never copied.
+func TestHandleGuestLog_ToolFieldsFromAccumulator(t *testing.T) {
+	srv := newTestServer(t)
+	hub := srv.Hub()
+	go hub.Run()
+
+	// Create a task
+	task := map[string]interface{}{
+		"repos":  []string{"/repo"},
+		"prompt": "tool fields test",
+	}
+	body, _ := json.Marshal(task)
+	req := httptest.NewRequest(http.MethodPost, "/api/tasks", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	srv.HandleTasks(w, req)
+
+	var createdTask queue.Task
+	json.Unmarshal(w.Body.Bytes(), &createdTask)
+
+	// Send tool messages with EMPTY level — simulating the path where the
+	// accumulator detects the [TOOL_*] prefix and sets level to "tool".
+	// The structured fields should still be populated from the line content.
+	toolLines := []map[string]interface{}{
+		{
+			"task_id": createdTask.ID,
+			"line":    "[TOOL_START] read_file: /etc/passwd (id: t1)",
+			"level":   "", // empty — accumulator will detect tool prefix
+		},
+		{
+			"task_id": createdTask.ID,
+			"line":    "[TOOL_OUTPUT] read_file (id: t1): file contents here",
+			"level":   "",
+		},
+		{
+			"task_id": createdTask.ID,
+			"line":    "[TOOL_END] read_file (id: t1): result output",
+			"level":   "",
+		},
+	}
+
+	for _, tl := range toolLines {
+		params, _ := json.Marshal(tl)
+		hub.Dispatch("guest.log", params)
+	}
+
+	// Fetch the task detail to get stored logs
+	req2 := httptest.NewRequest(http.MethodGet, fmt.Sprintf("/api/tasks/%s", createdTask.ID), nil)
+	w2 := httptest.NewRecorder()
+	srv.HandleTaskDetail(w2, req2)
+
+	if w2.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w2.Code)
+	}
+
+	var detailResponse map[string]interface{}
+	if err := json.Unmarshal(w2.Body.Bytes(), &detailResponse); err != nil {
+		t.Fatalf("failed to unmarshal: %v", err)
+	}
+
+	logs, ok := detailResponse["logs"].([]interface{})
+	if !ok {
+		t.Fatal("expected 'logs' field in response")
+	}
+
+	if len(logs) != 3 {
+		t.Fatalf("expected 3 log entries, got %d", len(logs))
+	}
+
+	// Verify each tool entry has structured fields populated
+	for i, rawLog := range logs {
+		logEntry, ok := rawLog.(map[string]interface{})
+		if !ok {
+			t.Fatalf("log entry %d: expected map, got %T", i, rawLog)
+		}
+
+		if logEntry["level"] != "tool" {
+			t.Errorf("entry %d: expected level 'tool', got %q", i, logEntry["level"])
+		}
+
+		toolType, hasType := logEntry["tool_type"]
+		if !hasType || toolType == "" {
+			t.Errorf("entry %d: expected non-empty tool_type, got %v (line: %q)", i, toolType, logEntry["line"])
+		}
+
+		toolName, hasName := logEntry["tool_name"]
+		if !hasName || toolName == "" {
+			t.Errorf("entry %d: expected non-empty tool_name, got %v (line: %q)", i, toolName, logEntry["line"])
+		}
+
+		toolID, hasID := logEntry["tool_id"]
+		if !hasID || toolID == "" {
+			t.Errorf("entry %d: expected non-empty tool_id, got %v (line: %q)", i, toolID, logEntry["line"])
+		}
+	}
+
+	// Verify specific values
+	startEntry := logs[0].(map[string]interface{})
+	if startEntry["tool_type"] != "start" {
+		t.Errorf("start entry: expected tool_type 'start', got %v", startEntry["tool_type"])
+	}
+	if startEntry["tool_name"] != "read_file" {
+		t.Errorf("start entry: expected tool_name 'read_file', got %v", startEntry["tool_name"])
+	}
+	if startEntry["tool_id"] != "t1" {
+		t.Errorf("start entry: expected tool_id 't1', got %v", startEntry["tool_id"])
+	}
+	if startEntry["tool_args"] != "/etc/passwd" {
+		t.Errorf("start entry: expected tool_args '/etc/passwd', got %v", startEntry["tool_args"])
+	}
+
+	outputEntry := logs[1].(map[string]interface{})
+	if outputEntry["tool_type"] != "output" {
+		t.Errorf("output entry: expected tool_type 'output', got %v", outputEntry["tool_type"])
+	}
+	if outputEntry["tool_output"] != "file contents here" {
+		t.Errorf("output entry: expected tool_output 'file contents here', got %v", outputEntry["tool_output"])
+	}
+
+	endEntry := logs[2].(map[string]interface{})
+	if endEntry["tool_type"] != "end" {
+		t.Errorf("end entry: expected tool_type 'end', got %v", endEntry["tool_type"])
+	}
+	if endEntry["tool_output"] != "result output" {
+		t.Errorf("end entry: expected tool_output 'result output', got %v", endEntry["tool_output"])
+	}
+}
+
+// TestHandleGuestLog_ToolErrorFields verifies that [TOOL_END] with [ERROR]
+// is correctly parsed and the tool_error flag is set.
+func TestHandleGuestLog_ToolErrorFields(t *testing.T) {
+	srv := newTestServer(t)
+	hub := srv.Hub()
+	go hub.Run()
+
+	task := map[string]interface{}{
+		"repos":  []string{"/repo"},
+		"prompt": "tool error test",
+	}
+	body, _ := json.Marshal(task)
+	req := httptest.NewRequest(http.MethodPost, "/api/tasks", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	srv.HandleTasks(w, req)
+
+	var createdTask queue.Task
+	json.Unmarshal(w.Body.Bytes(), &createdTask)
+
+	// Send a tool error message with empty level
+	params, _ := json.Marshal(map[string]interface{}{
+		"task_id": createdTask.ID,
+		"line":    "[TOOL_END] bash (id: t2): [ERROR] exit code 1",
+		"level":   "",
+	})
+	hub.Dispatch("guest.log", params)
+
+	// Fetch logs
+	req2 := httptest.NewRequest(http.MethodGet, fmt.Sprintf("/api/tasks/%s", createdTask.ID), nil)
+	w2 := httptest.NewRecorder()
+	srv.HandleTaskDetail(w2, req2)
+
+	var detailResponse map[string]interface{}
+	json.Unmarshal(w2.Body.Bytes(), &detailResponse)
+	logs := detailResponse["logs"].([]interface{})
+
+	endEntry := logs[0].(map[string]interface{})
+	if endEntry["tool_error"] != true {
+		t.Errorf("expected tool_error true, got %v", endEntry["tool_error"])
+	}
+	if endEntry["tool_output"] != "exit code 1" {
+		t.Errorf("expected tool_output 'exit code 1', got %v", endEntry["tool_output"])
+	}
+}

@@ -489,6 +489,79 @@ func (s *Server) handleGuestHeartbeat(ctx context.Context, params json.RawMessag
 	}, nil
 }
 
+// parseToolLine extracts structured tool fields from a raw log line.
+// Returns (populated, true) if the line matches a known tool format.
+// Tool line formats:
+//
+//	[TOOL_START] tool_name: args (id: tool_id)
+//	[TOOL_OUTPUT] tool_name (id: tool_id): output content
+//	[TOOL_END] tool_name (id: tool_id): result output
+//	[TOOL_END] tool_name (id: tool_id): [ERROR] error message
+func parseToolLine(line string) (toolType, toolName, toolID, toolArgs, toolOutput string, toolError bool, ok bool) {
+	var prefix string
+	switch {
+	case strings.HasPrefix(line, "[TOOL_START] "):
+		prefix = "[TOOL_START] "
+		toolType = "start"
+	case strings.HasPrefix(line, "[TOOL_OUTPUT] "):
+		prefix = "[TOOL_OUTPUT] "
+		toolType = "output"
+	case strings.HasPrefix(line, "[TOOL_END] "):
+		prefix = "[TOOL_END] "
+		toolType = "end"
+	default:
+		return "", "", "", "", "", false, false
+	}
+
+	rest := strings.TrimPrefix(line, prefix)
+
+	// Find " (id: " to split name/args from id
+	idIdx := strings.Index(rest, " (id: ")
+	if idIdx < 0 {
+		return "", "", "", "", "", false, false
+	}
+
+	// Everything before " (id: " is either "tool_name" or "tool_name: args"
+	preID := rest[:idIdx]
+
+	if toolType == "start" {
+		// Format: "tool_name: args"
+		colonIdx := strings.Index(preID, ": ")
+		if colonIdx > 0 {
+			toolName = preID[:colonIdx]
+			toolArgs = preID[colonIdx+2:]
+		} else {
+			toolName = preID
+		}
+	} else {
+		// Format: "tool_name" (no args for output/end)
+		toolName = preID
+	}
+
+	// Extract tool_id: between "(id: " and ")"
+	idStart := idIdx + len(" (id: ")
+	idEnd := strings.Index(rest[idStart:], ")")
+	if idEnd < 0 {
+		return "", "", "", "", "", false, false
+	}
+	toolID = rest[idStart : idStart+idEnd]
+
+	// After ")" there may be ": output" or ": [ERROR] output"
+	afterID := rest[idStart+idEnd+1:] // skip ")"
+
+	if strings.HasPrefix(afterID, ": ") {
+		output := afterID[2:]
+		if strings.HasPrefix(output, "[ERROR] ") {
+			toolError = true
+			toolOutput = strings.TrimPrefix(output, "[ERROR] ")
+		} else {
+			toolOutput = output
+		}
+	}
+
+	return toolType, toolName, toolID, toolArgs, toolOutput, toolError, true
+}
+
 // handleGuestLog handles incoming log entries from guests.
 // For tool call events, the guest sends structured fields (tool_type,
 // tool_name, tool_id, etc.) alongside the formatted line string.
@@ -520,7 +593,10 @@ func (s *Server) handleGuestLog(ctx context.Context, params json.RawMessage) (in
 		req.Line,
 		req.Level,
 		func(e TaskLogEntry) {
-			// Populate structured tool call fields
+			// Populate structured tool call fields.
+			// First try the request fields (guest sent them directly).
+			// Then fall back to parsing from the line (accumulator detected
+			// the tool prefix but the original request had empty level).
 			if req.Level == "tool" || req.ToolType != "" {
 				e.ToolType = req.ToolType
 				e.ToolName = req.ToolName
@@ -528,6 +604,11 @@ func (s *Server) handleGuestLog(ctx context.Context, params json.RawMessage) (in
 				e.ToolArgs = req.ToolArgs
 				e.ToolOutput = req.ToolOutput
 				e.ToolError = req.ToolError
+			}
+			// If the entry has level "tool" (set by accumulator) but
+			// structured fields are empty, parse them from the line.
+			if e.Level == "tool" && e.ToolType == "" {
+				e.ToolType, e.ToolName, e.ToolID, e.ToolArgs, e.ToolOutput, e.ToolError, _ = parseToolLine(e.Line)
 			}
 			s.logStore.Add(e)
 			// Persist to disk if configured
