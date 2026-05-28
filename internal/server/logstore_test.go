@@ -173,7 +173,7 @@ func TestLogAPI_DatesEndpoint(t *testing.T) {
 	}
 }
 
-// TestLogAPI_TasksEndpoint verifies /api/logs/:date returns task list.
+// TestLogAPI_TasksEndpoint verifies /api/logs/:date returns task summaries with timestamps.
 func TestLogAPI_TasksEndpoint(t *testing.T) {
 	dir, err := os.MkdirTemp("", "hotelier-logapi-tasks-*")
 	if err != nil {
@@ -188,15 +188,18 @@ func TestLogAPI_TasksEndpoint(t *testing.T) {
 	}
 	srv := New(cfg)
 
+	tsA := time.Date(2026, 5, 10, 8, 30, 0, 0, time.UTC)
+	tsB := time.Date(2026, 5, 10, 10, 15, 0, 0, time.UTC)
+
 	srv.diskLogStore.Append(logstore.Entry{
 		TaskID:    "task-a",
 		Line:      "log a",
-		Timestamp: time.Date(2026, 5, 10, 0, 0, 0, 0, time.UTC),
+		Timestamp: tsA,
 	})
 	srv.diskLogStore.Append(logstore.Entry{
 		TaskID:    "task-b",
 		Line:      "log b",
-		Timestamp: time.Date(2026, 5, 10, 0, 0, 0, 0, time.UTC),
+		Timestamp: tsB,
 	})
 
 	req := httptest.NewRequest(http.MethodGet, "/api/logs/2026-05-10", nil)
@@ -210,9 +213,27 @@ func TestLogAPI_TasksEndpoint(t *testing.T) {
 	var response map[string]interface{}
 	json.Unmarshal(w.Body.Bytes(), &response)
 
-	tasks := response["tasks"].([]interface{})
-	if len(tasks) != 2 {
-		t.Errorf("expected 2 tasks, got %d", len(tasks))
+	summaries := response["summaries"].([]interface{})
+	if len(summaries) != 2 {
+		t.Fatalf("expected 2 summaries, got %d", len(summaries))
+	}
+
+	// Verify first summary
+	first := summaries[0].(map[string]interface{})
+	if first["task_id"] != "task-a" {
+		t.Errorf("expected task_id 'task-a', got %v", first["task_id"])
+	}
+	if first["start_timestamp"] == nil {
+		t.Error("expected start_timestamp to be present")
+	}
+
+	// Verify second summary
+	second := summaries[1].(map[string]interface{})
+	if second["task_id"] != "task-b" {
+		t.Errorf("expected task_id 'task-b', got %v", second["task_id"])
+	}
+	if second["start_timestamp"] == nil {
+		t.Error("expected start_timestamp to be present")
 	}
 }
 

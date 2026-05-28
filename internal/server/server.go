@@ -1239,20 +1239,20 @@ func (s *Server) HandleLogEntry(w http.ResponseWriter, r *http.Request) {
 
 	switch len(parts) {
 	case 1:
-		// /api/logs/:date → list tasks for this date
+		// /api/logs/:date → list tasks for this date (with starting timestamps)
 		if parts[0] == "" {
 			http.Error(w, "date required", http.StatusBadRequest)
 			return
 		}
-		tasks, err := s.diskLogStore.ListTasks(parts[0])
+		summaries, err := s.diskLogStore.ListTasksWithTimestamps(parts[0])
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
 		json.NewEncoder(w).Encode(map[string]interface{}{
-			"date":  parts[0],
-			"tasks": tasks,
-			"count": len(tasks),
+			"date":      parts[0],
+			"summaries": summaries,
+			"count":     len(summaries),
 		})
 
 	case 2:

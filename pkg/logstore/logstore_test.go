@@ -242,6 +242,54 @@ func TestLogStore_AppendPreservesTimestamp(t *testing.T) {
 	}
 }
 
+func TestLogStore_ListTasksWithTimestamps(t *testing.T) {
+	s, dir := newTestLogStore(t)
+	defer os.RemoveAll(dir)
+
+	tsA := time.Date(2026, 5, 10, 8, 30, 0, 0, time.UTC)
+	tsB := time.Date(2026, 5, 10, 10, 15, 0, 0, time.UTC)
+
+	s.Append(Entry{TaskID: "task-a", Line: "A1", Level: "info", Timestamp: tsA})
+	s.Append(Entry{TaskID: "task-b", Line: "B1", Level: "info", Timestamp: tsB})
+	s.Append(Entry{TaskID: "task-a", Line: "A2", Level: "info", Timestamp: tsA.Add(5 * time.Minute)})
+
+	summaries, err := s.ListTasksWithTimestamps("2026-05-10")
+	if err != nil {
+		t.Fatalf("list tasks with timestamps: %v", err)
+	}
+	if len(summaries) != 2 {
+		t.Fatalf("expected 2 tasks, got %d", len(summaries))
+	}
+
+	// Summaries are sorted by task ID
+	if summaries[0].TaskID != "task-a" {
+		t.Errorf("expected first task 'task-a', got %q", summaries[0].TaskID)
+	}
+	if !summaries[0].StartTimestamp.Equal(tsA) {
+		t.Errorf("expected task-a start %v, got %v", tsA, summaries[0].StartTimestamp)
+	}
+
+	if summaries[1].TaskID != "task-b" {
+		t.Errorf("expected second task 'task-b', got %q", summaries[1].TaskID)
+	}
+	if !summaries[1].StartTimestamp.Equal(tsB) {
+		t.Errorf("expected task-b start %v, got %v", tsB, summaries[1].StartTimestamp)
+	}
+}
+
+func TestLogStore_ListTasksWithTimestamps_Empty(t *testing.T) {
+	s, dir := newTestLogStore(t)
+	defer os.RemoveAll(dir)
+
+	summaries, err := s.ListTasksWithTimestamps("2026-05-10")
+	if err != nil {
+		t.Fatalf("list tasks with timestamps on empty date: %v", err)
+	}
+	if len(summaries) != 0 {
+		t.Errorf("expected 0 tasks, got %d", len(summaries))
+	}
+}
+
 func TestLogStore_JSONLFormat(t *testing.T) {
 	s, dir := newTestLogStore(t)
 	defer os.RemoveAll(dir)

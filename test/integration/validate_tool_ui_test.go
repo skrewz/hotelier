@@ -644,6 +644,16 @@ const { chromium } = require('playwright');
   if (taskItems.length === 0) fail('No task items found under date ' + logDate);
   console.log('PASS:', taskItems.length, 'task(s) found under date');
 
+  // Verify task items show start timestamps (not "click to view")
+  const hasTimestamps = await page.evaluate(() => {
+    const countEls = document.querySelectorAll('.log-task-item .log-task-count');
+    if (countEls.length === 0) return false;
+    // Timestamps should contain digits (date/time), not "click to view"
+    return Array.from(countEls).every(el => /\d/.test(el.textContent));
+  });
+  if (!hasTimestamps) fail('Task items should display start timestamps, not "click to view"');
+  console.log('PASS: Task items display start timestamps');
+
   // Verify breadcrumb has "All Dates" crumb for navigation back
   const allDatesCrumb = await page.evaluate(() => {
     const crumbs = document.querySelectorAll('.log-breadcrumb .crumb');

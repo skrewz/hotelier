@@ -15,6 +15,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"sync"
 	"time"
 )
@@ -124,6 +125,68 @@ func (s *LogStore) ListDates() ([]string, error) {
 		}
 	}
 	return dates, nil
+}
+
+// TaskSummary holds a task ID and its earliest (starting) timestamp.
+type TaskSummary struct {
+	TaskID         string    `json:"task_id"`
+	StartTimestamp time.Time `json:"start_timestamp"`
+}
+
+// ListTasksWithTimestamps returns all tasks for a given date along with
+// the earliest (starting) timestamp for each task, sorted by task ID.
+func (s *LogStore) ListTasksWithTimestamps(date string) ([]TaskSummary, error) {
+	entries, err := os.ReadDir(filepath.Join(s.dir, date))
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("read date dir %s: %w", date, err)
+	}
+
+	var summaries []TaskSummary
+	for _, e := range entries {
+		if !e.IsDir() {
+			continue
+		}
+		taskID := e.Name()
+		// Read the first line of the JSONL file to get the earliest timestamp
+		logPath := filepath.Join(s.dir, date, taskID, "logs.jsonl")
+		data, err := os.ReadFile(logPath)
+		if err != nil {
+			// If we can't read the file, skip this task
+			continue
+		}
+
+		// Find the first non-empty line and parse its timestamp
+		var firstTimestamp time.Time
+		found := false
+		for _, line := range splitLines(data) {
+			if isEmptyLine(line) {
+				continue
+			}
+			var entry Entry
+			if err := json.Unmarshal(line, &entry); err != nil {
+				break // Malformed line; stop looking
+			}
+			firstTimestamp = entry.Timestamp
+			found = true
+			break
+		}
+		if found {
+			summaries = append(summaries, TaskSummary{
+				TaskID:         taskID,
+				StartTimestamp: firstTimestamp,
+			})
+		}
+	}
+
+	// Sort by task ID for deterministic output
+	sort.Slice(summaries, func(i, j int) bool {
+		return summaries[i].TaskID < summaries[j].TaskID
+	})
+
+	return summaries, nil
 }
 
 // ListTasks returns all task directories for a given date, sorted ascending.

@@ -929,29 +929,33 @@
                     return;
                 }
                 const data = await res.json();
-                renderLogTaskList(date, data.tasks || [], data.count || 0);
+                renderLogTaskList(date, data.summaries || [], data.count || 0);
             } catch (e) {
                 view.innerHTML = '<div class="empty-state"><span>⚠️</span>Failed to load tasks: ' + escapeHtml(e.message) + '</div>';
             }
         }
 
-        function renderLogTaskList(date, tasks, count) {
+        function renderLogTaskList(date, summaries, count) {
             const view = document.getElementById('log-view');
             let html = '<div class="log-breadcrumb">';
             html += '<span class="crumb" onclick="loadLogDates()">All Dates</span>';
             html += '<span class="separator">›</span>';
             html += '<span class="current">' + date + ' (' + count + ' tasks)</span>';
             html += '</div>';
-            if (tasks.length === 0) {
+            if (summaries.length === 0) {
                 html += '<div class="empty-state"><span>📭</span>No tasks for this date</div>';
             } else {
                 html += '<div id="log-tasks-list">';
-                html += tasks.map(t => `
-                    <div class="log-task-item" onclick="loadLogEntries('${date}', '${t}')">
-                        <span class="log-task-id">🔖 ${escapeHtml(t)}</span>
-                        <span class="log-task-count">click to view</span>
-                    </div>
-                `).join('');
+                html += summaries.map(s => {
+                    const ts = s.start_timestamp
+                        ? new Date(s.start_timestamp).toLocaleString()
+                        : 'unknown';
+                    return `
+                    <div class="log-task-item" onclick="loadLogEntries('${date}', '${s.task_id}')">
+                        <span class="log-task-id">🔖 ${escapeHtml(s.task_id)}</span>
+                        <span class="log-task-count">${ts}</span>
+                    </div>`;
+                }).join('');
                 html += '</div>';
             }
             view.innerHTML = html;
