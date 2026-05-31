@@ -64,6 +64,7 @@ func isGitURL(s string) bool {
 
 // PIHandler executes tasks using the pi AI guest via RPC subprocess.
 type PIHandler struct {
+	baseCWD string // original working directory, used for path resolution
 	client  *pi.PiClient
 	log     *log.Logger
 	debug   bool
@@ -74,6 +75,11 @@ type PIHandler struct {
 // NewPIHandler creates a new PIHandler.
 func NewPIHandler(cwd string, provider, model, thinkingLevel string) *PIHandler {
 	return NewPIHandlerDebug(cwd, provider, model, thinkingLevel, false)
+}
+
+// BaseCWD returns the original working directory set during construction.
+func (h *PIHandler) BaseCWD() string {
+	return h.baseCWD
 }
 
 // NewPIHandlerDebug creates a new PIHandler with optional RPC debug logging.
@@ -89,9 +95,10 @@ func NewPIHandlerDebug(cwd string, provider, model, thinkingLevel string, debug 
 		Debug:         debug,
 	}
 	return &PIHandler{
-		client: pi.NewClient(cfg),
-		log:    logger,
-		debug:  debug,
+		baseCWD: cwd,
+		client:  pi.NewClient(cfg),
+		log:     logger,
+		debug:   debug,
 	}
 }
 
@@ -353,7 +360,7 @@ func (h *PIHandler) prepareRepos(ctx context.Context, taskID string, repos []str
 	if len(repos) == 0 {
 		// No repos — create a task-specific directory so the guest has a
 		// clean, isolated working directory instead of the base CWD.
-		taskDir := filepath.Join(h.client.CWD(), "tasks", taskID)
+		taskDir := filepath.Join(h.baseCWD, "tasks", taskID)
 		if err := os.MkdirAll(taskDir, 0o755); err != nil {
 			return "", fmt.Errorf("create task dir %s: %w", taskDir, err)
 		}
@@ -362,7 +369,7 @@ func (h *PIHandler) prepareRepos(ctx context.Context, taskID string, repos []str
 	}
 
 	// Create a task-specific directory under the base CWD.
-	taskDir := filepath.Join(h.client.CWD(), "tasks", taskID)
+	taskDir := filepath.Join(h.baseCWD, "tasks", taskID)
 	if err := os.MkdirAll(taskDir, 0o755); err != nil {
 		return "", fmt.Errorf("create task dir %s: %w", taskDir, err)
 	}
@@ -393,10 +400,11 @@ func (h *PIHandler) prepareRepos(ctx context.Context, taskID string, repos []str
 				workDir = clonePath
 			}
 		} else {
-			// Local path — resolve relative to the task dir
+			// Local path — resolve relative to the base CWD (not the task dir).
+			// The repo is expected to exist under the base working directory.
 			resolved := repo
 			if !filepath.IsAbs(repo) {
-				resolved = filepath.Join(taskDir, repo)
+				resolved = filepath.Join(h.baseCWD, repo)
 			}
 			absPath, err := filepath.Abs(resolved)
 			if err != nil {

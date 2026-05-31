@@ -271,8 +271,9 @@ func TestPIHandler_PrepareReposLocal(t *testing.T) {
 	})
 
 	h := &PIHandler{
-		client: client,
-		log:    log.New(io.Discard, "", 0),
+		baseCWD: baseDir,
+		client:  client,
+		log:     log.New(io.Discard, "", 0),
 	}
 
 	taskDir, err := h.prepareRepos(context.Background(), "task-1", []string{repoDir}, nil)
@@ -310,8 +311,9 @@ func TestPIHandler_PrepareReposNoRepos(t *testing.T) {
 	})
 
 	h := &PIHandler{
-		client: client,
-		log:    log.New(io.Discard, "", 0),
+		baseCWD: baseDir,
+		client:  client,
+		log:     log.New(io.Discard, "", 0),
 	}
 
 	taskDir, err := h.prepareRepos(context.Background(), "task-1", []string{}, nil)
@@ -328,6 +330,134 @@ func TestPIHandler_PrepareReposNoRepos(t *testing.T) {
 	// The directory should exist.
 	if _, err := os.Stat(taskDir); err != nil {
 		t.Errorf("task dir %s should exist: %v", taskDir, err)
+	}
+}
+
+// TestPIHandler_PrepareReposAfterResetClient verifies that prepareRepos uses
+// the original base CWD even after resetClient replaces the pi client with
+// a task-specific working directory. This is a regression test for the bug
+// where nested tasks produced paths like:
+//
+//	/base/tasks/task-1/tasks/task-2/repo
+//
+// instead of:
+//
+//	/base/tasks/task-2/repo
+func TestPIHandler_PrepareReposAfterResetClient(t *testing.T) {
+	baseDir, err := os.MkdirTemp("", "hotelier-base-*")
+	if err != nil {
+		t.Fatalf("create temp base dir: %v", err)
+	}
+	defer os.RemoveAll(baseDir)
+
+	client := pi.NewClient(pi.PiClientConfig{
+		CWD: baseDir,
+		Log: log.New(io.Discard, "", 0),
+	})
+
+	h := &PIHandler{
+		baseCWD: baseDir,
+		client:  client,
+		log:     log.New(io.Discard, "", 0),
+	}
+
+	// First task — no repos, creates a task directory
+	taskDir1, err := h.prepareRepos(context.Background(), "task-1", []string{}, nil)
+	if err != nil {
+		t.Fatalf("first prepareRepos failed: %v", err)
+	}
+
+	// Verify first task dir is under baseDir
+	expectedDir1 := filepath.Join(baseDir, "tasks", "task-1")
+	if taskDir1 != expectedDir1 {
+		t.Errorf("first task dir = %q, want %q", taskDir1, expectedDir1)
+	}
+
+	// Simulate resetClient: replace the client with one whose CWD is the
+	// first task's working directory (this is what ExecuteTask does)
+	newClient := pi.NewClient(pi.PiClientConfig{
+		CWD: taskDir1,
+		Log: log.New(io.Discard, "", 0),
+	})
+	h.client = newClient
+
+	// Second task — should still use baseDir, NOT taskDir1
+	taskDir2, err := h.prepareRepos(context.Background(), "task-2", []string{}, nil)
+	if err != nil {
+		t.Fatalf("second prepareRepos failed: %v", err)
+	}
+
+	// The second task dir should be under baseDir, NOT nested under taskDir1.
+	// Bug: it would be taskDir1/tasks/task-2 instead of baseDir/tasks/task-2.
+	expectedDir2 := filepath.Join(baseDir, "tasks", "task-2")
+	if taskDir2 != expectedDir2 {
+		t.Errorf("second task dir = %q, want %q (base CWD leaked into task dir)", taskDir2, expectedDir2)
+	}
+
+	// Verify the directory was actually created at the correct path
+	if _, err := os.Stat(expectedDir2); os.IsNotExist(err) {
+		t.Errorf("expected task dir %s to exist", expectedDir2)
+	}
+}
+
+// TestPIHandler_PrepareReposRelativePathAfterResetClient verifies that
+// relative repo paths are resolved against the base CWD, not a previous
+// task's working directory.
+func TestPIHandler_PrepareReposRelativePathAfterResetClient(t *testing.T) {
+	baseDir, err := os.MkdirTemp("", "hotelier-base-*")
+	if err != nil {
+		t.Fatalf("create temp base dir: %v", err)
+	}
+	defer os.RemoveAll(baseDir)
+
+	// Create a local repo relative to baseDir
+	repoDir := filepath.Join(baseDir, "s-git", "nightrider")
+	if err := os.MkdirAll(repoDir, 0o755); err != nil {
+		t.Fatalf("create repo dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(repoDir, "README.md"), []byte("repo"), 0o644); err != nil {
+		t.Fatalf("write README: %v", err)
+	}
+
+	client := pi.NewClient(pi.PiClientConfig{
+		CWD: baseDir,
+		Log: log.New(io.Discard, "", 0),
+	})
+
+	h := &PIHandler{
+		baseCWD: baseDir,
+		client:  client,
+		log:     log.New(io.Discard, "", 0),
+	}
+
+	// First task — no repos
+	taskDir1, err := h.prepareRepos(context.Background(), "task-1", []string{}, nil)
+	if err != nil {
+		t.Fatalf("first prepareRepos failed: %v", err)
+	}
+
+	// Simulate resetClient
+	newClient := pi.NewClient(pi.PiClientConfig{
+		CWD: taskDir1,
+		Log: log.New(io.Discard, "", 0),
+	})
+	h.client = newClient
+
+	// Second task — uses a relative repo path that exists under baseDir
+	taskDir2, err := h.prepareRepos(context.Background(), "task-2", []string{"s-git/nightrider"}, nil)
+	if err != nil {
+		t.Fatalf("second prepareRepos failed: %v", err)
+	}
+
+	// The working directory should be the repo under baseDir, not under taskDir1.
+	expectedWD := repoDir
+	if taskDir2 != expectedWD {
+		t.Errorf("working dir = %q, want %q", taskDir2, expectedWD)
+	}
+
+	// Verify the path actually exists
+	if _, err := os.Stat(taskDir2); os.IsNotExist(err) {
+		t.Errorf("working dir %s does not exist", taskDir2)
 	}
 }
 
@@ -349,8 +479,9 @@ func TestPIHandler_PrepareReposCloning(t *testing.T) {
 	})
 
 	h := &PIHandler{
-		client: client,
-		log:    log.New(io.Discard, "", 0),
+		baseCWD: baseDir,
+		client:  client,
+		log:     log.New(io.Discard, "", 0),
 	}
 
 	// Use a small public repo for testing
