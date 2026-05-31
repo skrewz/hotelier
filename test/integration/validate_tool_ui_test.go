@@ -324,9 +324,32 @@ func TestValidateToolUI(t *testing.T) {
 	// Step 4: Validate server-side log store has correct entries.
 	validateServerLogs(t, srv, taskID, logEntries)
 
+	// Step 4b: Create a failed task to verify error display in the UI.
+	failedTaskID := fmt.Sprintf("ui-test-failed-task-%d", time.Now().UnixNano())
+	failedTask := &queue.Task{
+		ID:     failedTaskID,
+		Repos:  []string{"/tmp/test-repo"},
+		Prompt: "A task that should fail",
+		Tags:   []string{"business-default"},
+	}
+	if err := srv.TaskQueue().Add(failedTask); err != nil {
+		t.Fatalf("add failed task: %v", err)
+	}
+	if err := srv.TaskQueue().Assign(failedTaskID, "ui-test-guest"); err != nil {
+		t.Fatalf("assign failed task: %v", err)
+	}
+	if err := srv.TaskQueue().Start(failedTaskID); err != nil {
+		t.Fatalf("start failed task: %v", err)
+	}
+	const failureReason = "pi subprocess exited with code 1: compilation failed"
+	if err := srv.TaskQueue().Fail(failedTaskID, failureReason); err != nil {
+		t.Fatalf("fail task: %v", err)
+	}
+	t.Logf("Failed task created: %s (reason: %s)", failedTaskID, failureReason)
+
 	// Step 5: Validate UI rendering via Playwright by exercising the real
 	// user flow: navigate → task list → click task → detail view.
-	validateUI(t, baseURL, taskID, projectRoot)
+	validateUI(t, baseURL, taskID, failedTaskID, failureReason, projectRoot)
 }
 
 func validateServerLogs(t *testing.T, srv *server.Server, taskID string, expectedEntries []testLogEntry) {
@@ -376,7 +399,7 @@ func validateServerLogs(t *testing.T, srv *server.Server, taskID string, expecte
 	}
 }
 
-func validateUI(t *testing.T, baseURL, taskID, projectRoot string) {
+func validateUI(t *testing.T, baseURL, taskID, failedTaskID, failureReason, projectRoot string) {
 	// Allow overriding the screenshot directory via env var for manual inspection.
 	// When set, screenshots survive t.TempDir() cleanup.
 	overrideDir := os.Getenv("SCREENSHOT_DIR")
@@ -409,6 +432,8 @@ const { chromium } = require('playwright');
   const screenshotDir = '%s';
   const baseURL = '%s';
   const taskId = '%s';
+  const failedTaskId = '%s';
+  const failureReason = '%s';
   const expectedLogDate = '%s';
   const path = require('path');
 
@@ -1003,10 +1028,90 @@ const { chromium } = require('playwright');
 
   await takeScreenshot('10-rerun-task');
 
+  // =====================================================================
+  // Phase 10: Failed task — error reason displayed in task list and detail
+  // =====================================================================
+  console.log('=== Phase 10: Failed task error display ===');
+
+  // Navigate to Tasks tab to see the failed task in the list
+  await page.locator('.tab').filter({ hasText: 'Tasks' }).click();
+  await page.waitForFunction(() => {
+    return document.getElementById('tab-tasks').style.display === 'block';
+  }, { timeout: 5000 });
+
+  // Verify the failed task shows an error indicator in the task list
+  const failedTaskInList = await page.evaluate((fid) => {
+    const items = document.querySelectorAll('.task-item');
+    for (const item of items) {
+      const idEl = item.querySelector('.task-id');
+      if (!idEl) continue;
+      if (idEl.textContent.includes(fid)) {
+        // Check for error indicator (⚠ with red text)
+        const prompts = item.querySelectorAll('.task-prompt');
+        for (const p of prompts) {
+          if (p.textContent.includes('⚠')) {
+            return { found: true, errorText: p.textContent.trim() };
+          }
+        }
+        return { found: true, hasError: false };
+      }
+    }
+    return { found: false };
+  }, failedTaskId);
+
+  if (!failedTaskInList.found) {
+    fail('Failed task not found in task list');
+  }
+  if (!failedTaskInList.hasError && !failedTaskInList.errorText) {
+    fail('Failed task should show error indicator (⚠) in task list');
+  }
+  console.log('PASS: Failed task shows error indicator in task list:', failedTaskInList.errorText || 'yes');
+
+  await takeScreenshot('11-failed-task-list');
+
+  // Click the failed task to see the detail view
+  await page.evaluate((fid) => {
+    const items = document.querySelectorAll('.task-item');
+    for (const item of items) {
+      const idEl = item.querySelector('.task-id');
+      if (idEl && idEl.textContent.includes(fid)) {
+        item.click();
+        break;
+      }
+    }
+  }, failedTaskId);
+
+  // Wait for task detail to load
+  await page.waitForSelector('.task-detail-header', { timeout: 5000 });
+
+  // Verify the error banner is displayed in the detail view
+  const failedTaskDetail = await page.evaluate((reason) => {
+    const errorBanner = document.querySelector('.task-error');
+    if (!errorBanner) return { hasBanner: false };
+    const label = errorBanner.querySelector('.task-error-label')?.textContent?.trim();
+    const text = errorBanner.querySelector('.task-error-text')?.textContent?.trim();
+    return { hasBanner: true, label, text };
+  }, failureReason);
+
+  if (!failedTaskDetail.hasBanner) {
+    fail('Failed task detail should show error banner (.task-error)');
+    await takeScreenshot('12-failed-detail-no-banner');
+    process.exit(1);
+  }
+  if (failedTaskDetail.label !== 'Failure Reason') {
+    fail('Error banner label should be "Failure Reason", got: ' + failedTaskDetail.label);
+  }
+  if (!failedTaskDetail.text || !failedTaskDetail.text.includes('compilation failed')) {
+    fail('Error banner should contain failure reason, got: ' + failedTaskDetail.text);
+  }
+  console.log('PASS: Failed task detail shows error banner with reason:', failedTaskDetail.text);
+
+  await takeScreenshot('12-failed-task-detail');
+
   console.log('All UI validation checks passed!');
   await browser.close();
 })().catch(e => { console.error('Test failed:', e); process.exit(1); });
-`, screenshotDir, baseURL, taskID, logDate)
+`, screenshotDir, baseURL, taskID, failedTaskID, failureReason, logDate)
 
 	tmpScript := t.TempDir() + "/validate_ui.js"
 	if err := os.WriteFile(tmpScript, []byte(script), 0o644); err != nil {
