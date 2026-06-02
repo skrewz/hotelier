@@ -51,17 +51,6 @@ func parseRepoRef(repo string) (url, ref string) {
 	return repo, ""
 }
 
-// isGitURL returns true if the string looks like a git remote URL.
-func isGitURL(s string) bool {
-	if strings.Contains(s, "://") {
-		return true
-	}
-	if strings.HasPrefix(s, "git@") && strings.Contains(s, ":") {
-		return true
-	}
-	return false
-}
-
 // PIHandler executes tasks using the pi AI guest via RPC subprocess.
 type PIHandler struct {
 	baseCWD string // original working directory, used for path resolution
@@ -353,9 +342,9 @@ func (h *PIHandler) ExecuteTask(ctx context.Context, task TaskAssignment, sendLo
 	}
 }
 
-// prepareRepos clones any remote repos into a task-specific directory and
+// prepareRepos clones repos into a task-specific directory and
 // returns the path to use as the working directory for the pi subprocess.
-// Local paths are resolved as-is; remote URLs are cloned.
+// All repos are treated as git URLs and cloned; local paths are not supported.
 func (h *PIHandler) prepareRepos(ctx context.Context, taskID string, repos []string, sendLog func(LogEntry) error) (string, error) {
 	if len(repos) == 0 {
 		// No repos — create a task-specific directory so the guest has a
@@ -377,50 +366,29 @@ func (h *PIHandler) prepareRepos(ctx context.Context, taskID string, repos []str
 	var workDir string
 
 	for _, repo := range repos {
-		if isGitURL(repo) {
-			// Clone remote repo into taskDir
-			repoURL, repoRef := parseRepoRef(repo)
-			repoName := filepath.Base(strings.TrimSuffix(repoURL, ".git"))
-			clonePath := filepath.Join(taskDir, repoName)
-			h.log.Printf("[GIT] cloning %s -> %s", repo, clonePath)
-			cloneArgs := []string{"clone", "--depth", "1"}
-			if repoRef != "" {
-				cloneArgs = append(cloneArgs, "--branch", repoRef)
-			}
-			cloneArgs = append(cloneArgs, repoURL, clonePath)
-			cloneCmd := exec.CommandContext(ctx, "git", cloneArgs...)
-			out, err := cloneCmd.CombinedOutput()
-			if err != nil {
-				return "", fmt.Errorf("git clone %s: %w (output: %s)", repo, err, string(out))
-			}
-			h.log.Printf("[GIT] cloned %s", repo)
-			if workDir == "" {
-				// Use the cloned repo as the working directory.
-				// If multiple remote repos are specified, pick the first one.
-				workDir = clonePath
-			}
-		} else {
-			// Local path — resolve relative to the base CWD (not the task dir).
-			// The repo is expected to exist under the base working directory.
-			resolved := repo
-			if !filepath.IsAbs(repo) {
-				resolved = filepath.Join(h.baseCWD, repo)
-			}
-			absPath, err := filepath.Abs(resolved)
-			if err != nil {
-				return "", fmt.Errorf("resolve local repo path %s: %w", repo, err)
-			}
-			h.log.Printf("[REPO] using local repo: %s", absPath)
-			if workDir == "" {
-				// Use the local repo path as the working directory.
-				// If multiple local repos are specified, pick the first one.
-				workDir = absPath
-			}
+		repoURL, repoRef := parseRepoRef(repo)
+		repoName := filepath.Base(strings.TrimSuffix(repoURL, ".git"))
+		clonePath := filepath.Join(taskDir, repoName)
+		h.log.Printf("[GIT] cloning %s -> %s", repo, clonePath)
+		cloneArgs := []string{"clone", "--depth", "1"}
+		if repoRef != "" {
+			cloneArgs = append(cloneArgs, "--branch", repoRef)
+		}
+		cloneArgs = append(cloneArgs, repoURL, clonePath)
+		cloneCmd := exec.CommandContext(ctx, "git", cloneArgs...)
+		out, err := cloneCmd.CombinedOutput()
+		if err != nil {
+			return "", fmt.Errorf("git clone %s: %w (output: %s)", repo, err, string(out))
+		}
+		h.log.Printf("[GIT] cloned %s", repo)
+		if workDir == "" {
+			// Use the cloned repo as the working directory.
+			// If multiple repos are specified, pick the first one.
+			workDir = clonePath
 		}
 	}
 
-	// If no remote repos were cloned (only local paths or none), use taskDir
-	// as the working directory so the guest can navigate to the local repos.
+	// If no repos were cloned, use taskDir as the working directory.
 	if workDir == "" {
 		workDir = taskDir
 	}

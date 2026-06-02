@@ -204,9 +204,6 @@ func TestParseRepoRef(t *testing.T) {
 		{"git@github.com:user/repo@feature", "git@github.com:user/repo", "feature"},
 		// SSH URLs with .git and ref
 		{"git@github.com:user/repo.git@main", "git@github.com:user/repo.git", "main"},
-		// Local paths — no parsing
-		{"/local/path/to/repo", "/local/path/to/repo", ""},
-		{"relative/path/repo", "relative/path/repo", ""},
 		{"", "", ""},
 	}
 
@@ -218,81 +215,6 @@ func TestParseRepoRef(t *testing.T) {
 		if ref != tc.wantRef {
 			t.Errorf("parseRepoRef(%q) ref = %q, want %q", tc.input, ref, tc.wantRef)
 		}
-	}
-}
-
-// TestIsGitURL verifies the isGitURL helper correctly identifies remote URLs.
-func TestIsGitURL(t *testing.T) {
-	tests := []struct {
-		input    string
-		expected bool
-	}{
-		{"https://github.com/user/repo.git", true},
-		{"git@github.com:user/repo.git", true},
-		{"ssh://git@host:path/repo.git", true},
-		{"/local/path/to/repo", false},
-		{"relative/path/repo", false},
-		{"", false},
-	}
-
-	for _, tc := range tests {
-		result := isGitURL(tc.input)
-		if result != tc.expected {
-			t.Errorf("isGitURL(%q) = %v, want %v", tc.input, result, tc.expected)
-		}
-	}
-}
-
-// TestPIHandler_PrepareReposLocal verifies that local repo paths are resolved
-// and the working directory is set correctly.
-func TestPIHandler_PrepareReposLocal(t *testing.T) {
-	// Create a temp dir to act as a "repo"
-	repoDir, err := os.MkdirTemp("", "hotelier-repo-*")
-	if err != nil {
-		t.Fatalf("create temp repo dir: %v", err)
-	}
-	defer os.RemoveAll(repoDir)
-
-	// Create a file in the repo so we can verify it exists
-	if err := os.WriteFile(filepath.Join(repoDir, "test.txt"), []byte("hello"), 0o644); err != nil {
-		t.Fatalf("write test file: %v", err)
-	}
-
-	baseDir, err := os.MkdirTemp("", "hotelier-base-*")
-	if err != nil {
-		t.Fatalf("create temp base dir: %v", err)
-	}
-	defer os.RemoveAll(baseDir)
-
-	// Create a handler with the base dir as CWD
-	client := pi.NewClient(pi.PiClientConfig{
-		CWD: baseDir,
-		Log: log.New(io.Discard, "", 0),
-	})
-
-	h := &PIHandler{
-		baseCWD: baseDir,
-		client:  client,
-		log:     log.New(io.Discard, "", 0),
-	}
-
-	taskDir, err := h.prepareRepos(context.Background(), "task-1", []string{repoDir}, nil)
-	if err != nil {
-		t.Fatalf("prepareRepos failed: %v", err)
-	}
-
-	// For local repos, the working directory should be the resolved repo path.
-	expectedWD, err := filepath.Abs(repoDir)
-	if err != nil {
-		t.Fatalf("abs %s: %v", repoDir, err)
-	}
-	if taskDir != expectedWD {
-		t.Errorf("working dir %q should be %q", taskDir, expectedWD)
-	}
-
-	// The repo should be accessible (we just verify the path is valid)
-	if _, err := os.Stat(expectedWD); err != nil {
-		t.Errorf("repo dir %s should exist: %v", expectedWD, err)
 	}
 }
 
@@ -400,67 +322,6 @@ func TestPIHandler_PrepareReposAfterResetClient(t *testing.T) {
 	}
 }
 
-// TestPIHandler_PrepareReposRelativePathAfterResetClient verifies that
-// relative repo paths are resolved against the base CWD, not a previous
-// task's working directory.
-func TestPIHandler_PrepareReposRelativePathAfterResetClient(t *testing.T) {
-	baseDir, err := os.MkdirTemp("", "hotelier-base-*")
-	if err != nil {
-		t.Fatalf("create temp base dir: %v", err)
-	}
-	defer os.RemoveAll(baseDir)
-
-	// Create a local repo relative to baseDir
-	repoDir := filepath.Join(baseDir, "s-git", "nightrider")
-	if err := os.MkdirAll(repoDir, 0o755); err != nil {
-		t.Fatalf("create repo dir: %v", err)
-	}
-	if err := os.WriteFile(filepath.Join(repoDir, "README.md"), []byte("repo"), 0o644); err != nil {
-		t.Fatalf("write README: %v", err)
-	}
-
-	client := pi.NewClient(pi.PiClientConfig{
-		CWD: baseDir,
-		Log: log.New(io.Discard, "", 0),
-	})
-
-	h := &PIHandler{
-		baseCWD: baseDir,
-		client:  client,
-		log:     log.New(io.Discard, "", 0),
-	}
-
-	// First task — no repos
-	taskDir1, err := h.prepareRepos(context.Background(), "task-1", []string{}, nil)
-	if err != nil {
-		t.Fatalf("first prepareRepos failed: %v", err)
-	}
-
-	// Simulate resetClient
-	newClient := pi.NewClient(pi.PiClientConfig{
-		CWD: taskDir1,
-		Log: log.New(io.Discard, "", 0),
-	})
-	h.client = newClient
-
-	// Second task — uses a relative repo path that exists under baseDir
-	taskDir2, err := h.prepareRepos(context.Background(), "task-2", []string{"s-git/nightrider"}, nil)
-	if err != nil {
-		t.Fatalf("second prepareRepos failed: %v", err)
-	}
-
-	// The working directory should be the repo under baseDir, not under taskDir1.
-	expectedWD := repoDir
-	if taskDir2 != expectedWD {
-		t.Errorf("working dir = %q, want %q", taskDir2, expectedWD)
-	}
-
-	// Verify the path actually exists
-	if _, err := os.Stat(taskDir2); os.IsNotExist(err) {
-		t.Errorf("working dir %s does not exist", taskDir2)
-	}
-}
-
 // TestPIHandler_PrepareReposCloning verifies that remote URLs trigger git clone.
 func TestPIHandler_PrepareReposCloning(t *testing.T) {
 	if _, err := exec.LookPath("git"); err != nil {
@@ -500,73 +361,6 @@ func TestPIHandler_PrepareReposCloning(t *testing.T) {
 	if _, err := os.Stat(repoPath); os.IsNotExist(err) {
 		t.Errorf("cloned repo %s should exist", repoPath)
 	}
-}
-
-// TestPIHandler_ExecuteTaskLogsWorkingDir verifies that ExecuteTask logs
-// the working directory and the pi subprocess spawn.
-func TestPIHandler_ExecuteTaskLogsWorkingDir(t *testing.T) {
-	if _, err := exec.LookPath("pi"); err != nil {
-		t.Skip("pi not installed")
-	}
-
-	// Create a temp dir as a "repo"
-	repoDir, err := os.MkdirTemp("", "hotelier-repo-*")
-	if err != nil {
-		t.Fatalf("create temp repo dir: %v", err)
-	}
-	defer os.RemoveAll(repoDir)
-
-	// Write a file so we can verify the working dir
-	if err := os.WriteFile(filepath.Join(repoDir, "test.txt"), []byte("hello"), 0o644); err != nil {
-		t.Fatalf("write test file: %v", err)
-	}
-
-	baseDir, err := os.MkdirTemp("", "hotelier-base-*")
-	if err != nil {
-		t.Fatalf("create temp base dir: %v", err)
-	}
-	defer os.RemoveAll(baseDir)
-
-	h := NewPIHandler(baseDir, "", "", "")
-	if err := h.Start(context.Background()); err != nil {
-		t.Fatalf("start failed: %v", err)
-	}
-	defer h.Stop(context.Background())
-
-	task := TaskAssignment{
-		TaskID: "test-workdir-task",
-		Repos:  []string{repoDir},
-		Prompt: "cat test.txt",
-	}
-
-	var mu sync.Mutex
-	var lines []string
-
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-
-	_, _ = h.ExecuteTask(ctx, task, func(entry LogEntry) error {
-		mu.Lock()
-		defer mu.Unlock()
-		lines = append(lines, entry.Line)
-		return nil
-	})
-
-	mu.Lock()
-	defer mu.Unlock()
-
-	// Verify that a working directory log line was emitted
-	foundWorkdir := false
-	for _, line := range lines {
-		if strings.Contains(line, "[WORKDIR]") || strings.Contains(line, "working directory") {
-			foundWorkdir = true
-			break
-		}
-	}
-	// The PI handler logs to its own logger, not via sendLog,
-	// so we check that the task dir was created
-	// (the working dir log is a pi-handler internal log, not a task log)
-	_ = foundWorkdir
 }
 
 // TestPIHandler_FinalOutputPreservesNewlines verifies that the model's
