@@ -5,6 +5,8 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Hotelier — Guest Queue Dashboard</title>
     <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/prismjs@1.30.0/prism.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/prismjs@1.30.0/components/prism-bash.min.js"></script>
     <style>
         * { margin: 0; padding: 0; box-sizing: border-box; }
         html, body { height: 100%; overflow: hidden; }
@@ -105,7 +107,6 @@
         .tool-block-header:hover { background: #253347; }
         .tool-block-header .tool-icon { margin-right: 0.5rem; }
         .tool-block-header .tool-name { font-weight: 600; color: #f59e0b; font-family: 'SF Mono', 'Fira Code', monospace; }
-        .tool-block-header .tool-id { color: #64748b; font-size: 0.7rem; font-family: 'SF Mono', 'Fira Code', monospace; margin-left: 0.5rem; }
         .tool-block-header .tool-status { margin-left: 0.75rem; font-size: 0.7rem; font-weight: 600; text-transform: uppercase; }
         .tool-block-header .tool-status.running { color: #f59e0b; }
         .tool-block-header .tool-status.success { color: #22c55e; }
@@ -118,6 +119,21 @@
         .tool-block-body .tool-output { padding: 0.5rem 0.75rem; font-size: 0.75rem; color: #cbd5e1; font-family: 'SF Mono', 'Fira Code', monospace; white-space: pre-wrap; word-break: break-all; max-height: 300px; overflow-y: auto; border-top: 1px solid #1e293b; }
         .tool-block-body .tool-output pre { margin: 0; white-space: pre-wrap; word-break: break-all; font-family: inherit; font-size: inherit; color: inherit; }
         .tool-block-body .tool-output .output-label { color: #475569; font-size: 0.65rem; text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 0.25rem; }
+
+        /* Subtle bash command-line highlighting (Prism.js tokens) */
+        .command-line { font-family: 'SF Mono', 'Fira Code', monospace; font-size: 0.75rem; color: #cbd5e1; margin-left: 0.5rem; }
+        .command-line .token.function       { color: #8ddb8c; }
+        .command-line .token.parameter      { color: #6cb6ff; }
+        .command-line .token.string         { color: #96d0ff; }
+        .command-line .token.operator       { color: #768390; }
+        .command-line .token.keyword        { color: #f47067; }
+        .command-line .token.comment        { color: #64748b; }
+        .command-line .token.variable       { color: #f69d50; }
+        .command-line .token.punctuation    { color: #475569; }
+        .command-line .token.builtin        { color: #8ddb8c; }
+        .command-line .token.class-name     { color: #dcbdfb; }
+        .command-line .token.url            { color: #96d0ff; }
+        .command-line-plain { font-family: 'SF Mono', 'Fira Code', monospace; font-size: 0.75rem; color: #94a3b8; margin-left: 0.5rem; }
 
         .streaming-cursor::after { content: '▊'; animation: blink 1s infinite; color: #22c55e; }
         @keyframes blink { 0%, 50% { opacity: 1; } 51%, 100% { opacity: 0; } }
@@ -401,18 +417,49 @@
             return block ? block.toolId : '';
         }
 
+        // renderCommandLineHeader returns the HTML fragment that replaces the
+        // old tool-ID span.  For "bash" tools it renders a Prism.js-highlighted
+        // command line; for all other tools it shows the raw args plainly.
+        function renderCommandLineHeader(toolName, args) {
+            if (!args || args.trim() === '') return '';
+            if (toolName === 'bash') {
+                // tool_args is JSON-encoded: {"command":"hostname"}
+                // Extract the actual command string for display.
+                try {
+                    const parsed = JSON.parse(args);
+                    if (parsed.command) {
+                        args = parsed.command;
+                    }
+                } catch (_) {
+                    // Not valid JSON — use as-is
+                }
+                return `<span class="command-line language-bash">${escapeHtml(args)}</span>`;
+            }
+            return `<span class="command-line-plain">${escapeHtml(args)}</span>`;
+        }
+
+        // highlightCommandLines finds all .command-line.language-bash elements
+        // inside the given container and runs Prism.highlightElement on them.
+        function highlightCommandLines(container) {
+            if (typeof Prism === 'undefined') return;
+            container.querySelectorAll('.command-line.language-bash').forEach(el => {
+                Prism.highlightElement(el);
+            });
+        }
+
         function renderToolBlockStart(block, timeStr, cursorClass) {
             // Create the tool block div in the DOM using a fragment
             const frag = document.createDocumentFragment();
             const div = document.createElement('div');
             div.className = 'tool-block';
             div.id = 'tool-' + block.toolId;
+            const cmdLine = renderCommandLineHeader(block.toolName, block.args);
             div.innerHTML = `
                 <div class="tool-block-header" onclick="toggleToolBlock('${block.toolId}')">
                     <div>
                         <span class="tool-icon">🔧</span>
                         <span class="tool-name">${escapeHtml(block.toolName)}</span>
-                        <span class="tool-id">${block.toolId}</span>
+                        ${cmdLine}
                     </div>
                     <div style="display:flex;align-items:center;gap:0.5rem;">
                         <span class="tool-status running">running</span>
@@ -425,11 +472,14 @@
                 </div>
             `;
             frag.appendChild(div);
+            highlightCommandLines(div);
             return frag;
         }
 
         // buildToolBlockHTML creates a complete tool-block div as innerHTML.
         // Used by renderTaskDetail which builds the full view at once.
+        // Completed blocks (done/error) are rendered open so the output is
+        // visible immediately; running blocks stay collapsed.
         function buildToolBlockHTML(toolName, toolId, args, output, status) {
             const statusClass = status === 'error' ? 'error' : 'success';
             const statusLabel = status === 'error' ? 'error' : 'done';
@@ -437,19 +487,24 @@
             const outputHtml = output
                 ? `<div class="tool-output"><div class="output-label">Output</div><pre>${escapeHtml(output)}</pre></div>`
                 : '<div class="tool-output"><div class="output-label">Output</div></div>';
+            const cmdLine = renderCommandLineHeader(toolName, args);
+            // Open completed blocks so output is visible without clicking
+            const isDone = status === 'success' || status === 'error';
+            const bodyOpen = isDone ? ' open' : '';
+            const chevronOpen = isDone ? ' open' : '';
             return `<div class="tool-block" id="tool-${toolId}">
                 <div class="tool-block-header" onclick="toggleToolBlock('${toolId}')">
                     <div>
                         <span class="tool-icon">🔧</span>
                         <span class="tool-name">${escapeHtml(toolName)}</span>
-                        <span class="tool-id">${toolId}</span>
+                        ${cmdLine}
                     </div>
                     <div style="display:flex;align-items:center;gap:0.5rem;">
                         <span class="tool-status ${statusClass}">${statusLabel}</span>
-                        <span class="tool-chevron">▶</span>
+                        <span class="tool-chevron${chevronOpen}">▶</span>
                     </div>
                 </div>
-                <div class="tool-block-body" id="tool-body-${toolId}">
+                <div class="tool-block-body${bodyOpen}" id="tool-body-${toolId}">
                     ${argsHtml}${outputHtml}
                 </div>
             </div>`;
@@ -462,6 +517,7 @@
 
             const statusClass = block.status === 'error' ? 'error' : 'success';
             const statusLabel = block.status === 'error' ? 'error' : 'done';
+            const cmdLine = renderCommandLineHeader(block.toolName, block.args);
 
             // Update header
             const header = blockEl.querySelector('.tool-block-header');
@@ -469,13 +525,14 @@
                 <div>
                     <span class="tool-icon">🔧</span>
                     <span class="tool-name">${escapeHtml(block.toolName)}</span>
-                    <span class="tool-id">${block.toolId}</span>
+                    ${cmdLine}
                 </div>
                 <div style="display:flex;align-items:center;gap:0.5rem;">
                     <span class="tool-status ${statusClass}">${statusLabel}</span>
                     <span class="tool-chevron">▶</span>
                 </div>
             `;
+            highlightCommandLines(blockEl);
 
             // Update body: append result to output as pre-formatted text
             const bodyEl = blockEl.querySelector('.tool-block-body');
@@ -697,6 +754,7 @@
             `;
             const detailBody = detailContainer.querySelector('.task-detail-body');
             detailBody.innerHTML = logsHtml;
+            highlightCommandLines(detailBody);
             view.innerHTML = '';
             view.appendChild(detailContainer);
 
@@ -877,18 +935,23 @@
                     if (block) {
                         const statusClass = logEntry.tool_error ? 'error' : 'success';
                         const statusLabel = logEntry.tool_error ? 'error' : 'done';
+                        // Reconstruct args from the existing tool-args div
+                        const argsEl = block.querySelector('.tool-args');
+                        const args = argsEl ? argsEl.textContent : '';
+                        const cmdLine = renderCommandLineHeader(logEntry.tool_name, args);
                         const header = block.querySelector('.tool-block-header');
                         header.innerHTML = `
                             <div>
                                 <span class="tool-icon">🔧</span>
                                 <span class="tool-name">${escapeHtml(logEntry.tool_name)}</span>
-                                <span class="tool-id">${logEntry.tool_id}</span>
+                                ${cmdLine}
                             </div>
                             <div style="display:flex;align-items:center;gap:0.5rem;">
                                 <span class="tool-status ${statusClass}">${statusLabel}</span>
                                 <span class="tool-chevron">▶</span>
                             </div>
                         `;
+                        highlightCommandLines(block);
                         const bodyEl = block.querySelector('.tool-block-body');
                         let outputDiv = bodyEl.querySelector('.tool-output');
                         if (!outputDiv) {
@@ -1161,6 +1224,7 @@
                 html += '<div id="log-entries-list">' + entriesHtml + '</div>';
             }
             view.innerHTML = html;
+            highlightCommandLines(view);
         }
 
         // Handle browser back/forward — re-dispatch to the correct view.

@@ -578,6 +578,13 @@ const { chromium } = require('playwright');
         const pre = b.querySelector('.tool-output pre');
         return pre ? pre.textContent.substring(0, 80) : '';
       }),
+      // Command line assertions: tool ID should NOT be present, command line should be
+      toolHasCommandLine: Array.from(toolBlocks).map(b => b.querySelector('.command-line') !== null),
+      toolHasNoToolId: Array.from(toolBlocks).map(b => b.querySelector('.tool-id') === null),
+      toolCommandLineText: Array.from(toolBlocks).map(b => {
+        const cl = b.querySelector('.command-line');
+        return cl ? cl.textContent.trim() : '';
+      }),
       thinkingBlockCount: thinkingBlocks.length,
       thinkingBlockContents: Array.from(thinkingBlocks).map(b => {
         const content = b.querySelector('.thinking-content');
@@ -603,6 +610,9 @@ const { chromium } = require('playwright');
     { name: 'block has <pre> for output', pass: detailResult.toolOutputsHavePre[0] },
     { name: 'output contains "devvm"', pass: detailResult.toolOutputContents[0].includes('devvm') },
     { name: 'no tool markers outside blocks', pass: !detailResult.hasToolMarkersOutsideBlocks },
+    { name: 'tool block has command-line span', pass: detailResult.toolHasCommandLine[0] === true },
+    { name: 'tool block has NO tool-id span', pass: detailResult.toolHasNoToolId[0] === true },
+    { name: 'command line shows "hostname"', pass: detailResult.toolCommandLineText[0] === 'hostname' },
     { name: '1 thinking block rendered', pass: detailResult.thinkingBlockCount === 1 },
     { name: 'thinking block has header', pass: detailResult.thinkingHasHeader[0] === true },
     { name: 'thinking block has content', pass: detailResult.thinkingBlockContents[0].length > 0 },
