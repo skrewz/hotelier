@@ -75,9 +75,16 @@ func (s *TaskLogStore) Count(taskID string) int {
 
 // LogAccumulator buffers guest text deltas and flushes them as complete messages.
 // This prevents the UI from receiving hundreds of tiny fragments per response.
+//
+// Delta types (text, thinking, info, empty) are batched. Non-delta types
+// (tool, system, error) bypass the buffer and are emitted immediately.
+// When a non-delta level arrives, any pending delta buffer is flushed first.
+// When the delta level changes (e.g. text→thinking), the previous buffer
+// is flushed with its level before accumulating the new level.
 type LogAccumulator struct {
 	mu          sync.Mutex
 	buffer      map[string]string // taskID -> accumulated text
+	bufferLevel map[string]string // taskID -> level of current buffer ("text", "thinking", etc.)
 	lastFlush   map[string]time.Time
 	flushPeriod time.Duration
 	log         *log.Logger
@@ -87,10 +94,45 @@ type LogAccumulator struct {
 func NewLogAccumulator(logger *log.Logger) *LogAccumulator {
 	return &LogAccumulator{
 		buffer:      make(map[string]string),
+		bufferLevel: make(map[string]string),
 		lastFlush:   make(map[string]time.Time),
 		flushPeriod: 1 * time.Second, // flush every second of inactivity
 		log:         logger,
 	}
+}
+
+// isDeltaLevel returns true if the level is a streaming delta type that
+// should be batched (text, thinking, info, or empty).
+func isDeltaLevel(level string) bool {
+	return level == "text" || level == "thinking" || level == "info" || level == ""
+}
+
+// effectiveLevel returns the canonical level for a delta. Empty string
+// and "info" are mapped to "text" for backwards compatibility.
+// "thinking" is preserved so the frontend can render it distinctly.
+func effectiveLevel(level string) string {
+	switch level {
+	case "", "info":
+		return "text"
+	default:
+		return level
+	}
+}
+
+// flushBuffer flushes the pending buffer for a task with its stored level.
+// Must be called with a.mu held.
+func (a *LogAccumulator) flushBuffer(taskID string, emit func(TaskLogEntry)) {
+	buf, ok := a.buffer[taskID]
+	if !ok || buf == "" {
+		return
+	}
+	lvl := a.bufferLevel[taskID]
+	if lvl == "" {
+		lvl = "text"
+	}
+	a.emitNow(taskID, buf, lvl, emit)
+	delete(a.buffer, taskID)
+	delete(a.bufferLevel, taskID)
 }
 
 // Feed adds a log line to the accumulator and flushes if needed.
@@ -100,48 +142,45 @@ func (a *LogAccumulator) Feed(taskID, line, level string, emit func(entry TaskLo
 
 	now := time.Now()
 
-	// Tool/system/error messages go through immediately.
-	// "info" and empty level are treated as text deltas and batched,
-	// unless the line is a tool message (detected by prefix).
-
 	// Detect tool messages by prefix even when level is empty.
 	isToolMsg := strings.HasPrefix(line, "[TOOL_START]") ||
 		strings.HasPrefix(line, "[TOOL_OUTPUT]") ||
 		strings.HasPrefix(line, "[TOOL_END]")
 
-	if level != "" && level != "text" && level != "info" {
-		// Explicit non-text level: send immediately.
-		// Flush any pending text buffer first
-		if buf, ok := a.buffer[taskID]; ok {
-			a.emitNow(taskID, buf, "text", emit)
-			delete(a.buffer, taskID)
-		}
-		a.emitNow(taskID, line, level, emit)
-		return
-	}
-
-	// Tool messages bypass the buffer — send immediately.
 	if isToolMsg {
-		// Flush any pending text buffer first
-		if buf, ok := a.buffer[taskID]; ok {
-			a.emitNow(taskID, buf, "text", emit)
-			delete(a.buffer, taskID)
-		}
+		// Tool messages bypass the buffer — flush any pending buffer first.
+		a.flushBuffer(taskID, emit)
 		a.emitNow(taskID, line, "tool", emit)
 		return
 	}
 
-	// Check if we should flush due to inactivity
-	if last, ok := a.lastFlush[taskID]; ok && now.Sub(last) > a.flushPeriod {
-		// Flush existing buffer
-		if buf, ok := a.buffer[taskID]; ok {
-			a.emitNow(taskID, buf, "text", emit)
-			delete(a.buffer, taskID)
-		}
+	if !isDeltaLevel(level) {
+		// Explicit non-delta level (system, error): send immediately.
+		// Flush any pending delta buffer first.
+		a.flushBuffer(taskID, emit)
+		a.emitNow(taskID, line, level, emit)
+		return
+	}
+
+	// Delta type (text, thinking, info, or empty).
+	effLevel := effectiveLevel(level)
+
+	// If the delta level changed from the current buffer, flush the old buffer.
+	if oldLevel, ok := a.bufferLevel[taskID]; ok && oldLevel != effLevel {
+		a.flushBuffer(taskID, emit)
+	}
+
+	// Check if we should flush due to inactivity (only if buffer exists
+	// and hasn't been flushed by level change above).
+	if _, ok := a.buffer[taskID]; !ok {
+		// Fresh buffer — no inactivity check needed.
+	} else if last, ok := a.lastFlush[taskID]; ok && now.Sub(last) > a.flushPeriod {
+		a.flushBuffer(taskID, emit)
 	}
 
 	// Append to buffer
 	a.buffer[taskID] += line
+	a.bufferLevel[taskID] = effLevel
 	a.lastFlush[taskID] = now
 }
 
@@ -158,11 +197,7 @@ func (a *LogAccumulator) FlushAll(emit func(entry TaskLogEntry)) {
 	sort.Strings(taskIDs)
 
 	for _, taskID := range taskIDs {
-		buf := a.buffer[taskID]
-		if buf != "" {
-			a.emitNow(taskID, buf, "text", emit)
-		}
-		delete(a.buffer, taskID)
+		a.flushBuffer(taskID, emit)
 	}
 }
 

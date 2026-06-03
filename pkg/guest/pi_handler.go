@@ -218,6 +218,18 @@ func (h *PIHandler) ExecuteTask(ctx context.Context, task TaskAssignment, sendLo
 				return
 			}
 
+			if pi.IsThinkingDelta(event) {
+				delta := pi.ExtractThinkingDelta(event)
+				if delta != "" {
+					// Send thinking deltas as "thinking" level.
+					// The server-side accumulator will batch these into complete messages.
+					if err := sendLog(LogEntry{TaskID: task.TaskID, Line: delta, Level: "thinking"}); err != nil {
+						h.log.Printf("[PI] failed to send thinking log: %v", err)
+					}
+				}
+				continue
+			}
+
 			if pi.IsTextDelta(event) {
 				delta := pi.ExtractTextDelta(event)
 				if delta != "" {

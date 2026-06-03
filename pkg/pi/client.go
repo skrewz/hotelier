@@ -340,6 +340,44 @@ func IsTextDelta(event Event) bool {
 	return delta.Type == "text_delta"
 }
 
+// IsThinkingDelta checks if the event is a thinking delta.
+// Thinking deltas are produced when the model has extended thinking enabled.
+func IsThinkingDelta(event Event) bool {
+	if event.AssistantMessageEvent == nil {
+		return false
+	}
+
+	var delta struct {
+		Type string `json:"type"`
+	}
+	if err := json.Unmarshal(event.AssistantMessageEvent, &delta); err != nil {
+		return false
+	}
+
+	return delta.Type == "thinking_delta"
+}
+
+// ExtractThinkingDelta extracts thinking content from thinking_delta events.
+func ExtractThinkingDelta(event Event) string {
+	if event.AssistantMessageEvent == nil {
+		return ""
+	}
+
+	var delta struct {
+		Type  string `json:"type"`
+		Delta string `json:"delta"`
+	}
+	if err := json.Unmarshal(event.AssistantMessageEvent, &delta); err != nil {
+		return ""
+	}
+
+	if delta.Type == "thinking_delta" {
+		return delta.Delta
+	}
+
+	return ""
+}
+
 // IsGuestEnd checks if the event is a guest completion event.
 func IsGuestEnd(event Event) bool {
 	return event.Type == "guest_end" || event.Type == "agent_end"

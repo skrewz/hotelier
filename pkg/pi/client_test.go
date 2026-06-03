@@ -2,6 +2,7 @@ package pi
 
 import (
 	"context"
+	"encoding/json"
 	"os/exec"
 	"testing"
 	"time"
@@ -65,5 +66,152 @@ func TestPiClient_StopActuallyTerminatesProcess(t *testing.T) {
 	}
 	if !state.Exited() {
 		t.Fatal("pi subprocess should have exited after Stop")
+	}
+}
+
+func TestIsThinkingDelta(t *testing.T) {
+	tests := []struct {
+		name     string
+		event    Event
+		expected bool
+	}{
+		{
+			name:     "nil assistantMessageEvent",
+			event:    Event{},
+			expected: false,
+		},
+		{
+			name:     "thinking_delta type",
+			event:    Event{AssistantMessageEvent: json.RawMessage(`{"type":"thinking_delta","delta":"let me think"}`)},
+			expected: true,
+		},
+		{
+			name:     "text_delta type",
+			event:    Event{AssistantMessageEvent: json.RawMessage(`{"type":"text_delta","delta":"hello"}`)},
+			expected: false,
+		},
+		{
+			name:     "unknown type",
+			event:    Event{AssistantMessageEvent: json.RawMessage(`{"type":"image_delta"}`)},
+			expected: false,
+		},
+		{
+			name:     "malformed JSON",
+			event:    Event{AssistantMessageEvent: json.RawMessage(`not json`)},
+			expected: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := IsThinkingDelta(tt.event)
+			if got != tt.expected {
+				t.Errorf("IsThinkingDelta() = %v, want %v", got, tt.expected)
+			}
+		})
+	}
+}
+
+func TestExtractThinkingDelta(t *testing.T) {
+	tests := []struct {
+		name     string
+		event    Event
+		expected string
+	}{
+		{
+			name:     "nil assistantMessageEvent",
+			event:    Event{},
+			expected: "",
+		},
+		{
+			name:     "thinking_delta with content",
+			event:    Event{AssistantMessageEvent: json.RawMessage(`{"type":"thinking_delta","delta":"let me think about this"}`)},
+			expected: "let me think about this",
+		},
+		{
+			name:     "thinking_delta empty delta",
+			event:    Event{AssistantMessageEvent: json.RawMessage(`{"type":"thinking_delta","delta":""}`)},
+			expected: "",
+		},
+		{
+			name:     "text_delta should return empty",
+			event:    Event{AssistantMessageEvent: json.RawMessage(`{"type":"text_delta","delta":"hello"}`)},
+			expected: "",
+		},
+		{
+			name:     "malformed JSON",
+			event:    Event{AssistantMessageEvent: json.RawMessage(`not json`)},
+			expected: "",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := ExtractThinkingDelta(tt.event)
+			if got != tt.expected {
+				t.Errorf("ExtractThinkingDelta() = %q, want %q", got, tt.expected)
+			}
+		})
+	}
+}
+
+func TestIsTextDelta(t *testing.T) {
+	tests := []struct {
+		name     string
+		event    Event
+		expected bool
+	}{
+		{
+			name:     "nil assistantMessageEvent",
+			event:    Event{},
+			expected: false,
+		},
+		{
+			name:     "text_delta type",
+			event:    Event{AssistantMessageEvent: json.RawMessage(`{"type":"text_delta","delta":"hello"}`)},
+			expected: true,
+		},
+		{
+			name:     "thinking_delta type",
+			event:    Event{AssistantMessageEvent: json.RawMessage(`{"type":"thinking_delta","delta":"thinking"}`)},
+			expected: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := IsTextDelta(tt.event)
+			if got != tt.expected {
+				t.Errorf("IsTextDelta() = %v, want %v", got, tt.expected)
+			}
+		})
+	}
+}
+
+func TestExtractTextDelta(t *testing.T) {
+	tests := []struct {
+		name     string
+		event    Event
+		expected string
+	}{
+		{
+			name:     "text_delta with content",
+			event:    Event{AssistantMessageEvent: json.RawMessage(`{"type":"text_delta","delta":"hello world"}`)},
+			expected: "hello world",
+		},
+		{
+			name:     "thinking_delta should return empty",
+			event:    Event{AssistantMessageEvent: json.RawMessage(`{"type":"thinking_delta","delta":"thinking"}`)},
+			expected: "",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := ExtractTextDelta(tt.event)
+			if got != tt.expected {
+				t.Errorf("ExtractTextDelta() = %q, want %q", got, tt.expected)
+			}
+		})
 	}
 }

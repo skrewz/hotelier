@@ -1493,6 +1493,173 @@ func TestLogAccumulator_TextBufferFlushedBeforeTool(t *testing.T) {
 	}
 }
 
+// TestLogAccumulator_ThinkingDeltasBatched verifies that thinking deltas
+// are batched like text deltas but emitted with level "thinking".
+func TestLogAccumulator_ThinkingDeltasBatched(t *testing.T) {
+	logger := log.New(io.Discard, "", 0)
+	acc := NewLogAccumulator(logger)
+
+	var emitted []TaskLogEntry
+	emit := func(e TaskLogEntry) {
+		emitted = append(emitted, e)
+	}
+
+	// Thinking deltas should accumulate
+	acc.Feed("task-1", "Let me think ", "thinking", emit)
+	acc.Feed("task-1", "about this", "thinking", emit)
+
+	// Nothing emitted yet — still buffering
+	if len(emitted) != 0 {
+		t.Fatalf("expected 0 emitted entries during buffer, got %d", len(emitted))
+	}
+
+	// Flush
+	acc.FlushAll(emit)
+
+	if len(emitted) != 1 {
+		t.Fatalf("expected 1 emitted entry after flush, got %d", len(emitted))
+	}
+	if emitted[0].Line != "Let me think about this" {
+		t.Errorf("expected 'Let me think about this', got %q", emitted[0].Line)
+	}
+	if emitted[0].Level != "thinking" {
+		t.Errorf("expected level 'thinking', got %q", emitted[0].Level)
+	}
+}
+
+// TestLogAccumulator_ThinkingTextLevelTransition verifies that when
+// thinking deltas are buffered and text deltas arrive, the thinking
+// buffer is flushed first with level "thinking", then text accumulates.
+func TestLogAccumulator_ThinkingTextLevelTransition(t *testing.T) {
+	logger := log.New(io.Discard, "", 0)
+	acc := NewLogAccumulator(logger)
+
+	var emitted []TaskLogEntry
+	emit := func(e TaskLogEntry) {
+		emitted = append(emitted, e)
+	}
+
+	// Thinking deltas accumulate
+	acc.Feed("task-1", "Let me think ", "thinking", emit)
+	acc.Feed("task-1", "about this", "thinking", emit)
+
+	// Text delta arrives — should flush thinking buffer first
+	acc.Feed("task-1", "Here is my answer", "text", emit)
+
+	// Should have 1 entry: the flushed thinking block
+	if len(emitted) != 1 {
+		t.Fatalf("expected 1 emitted entry after level transition, got %d", len(emitted))
+	}
+	if emitted[0].Line != "Let me think about this" {
+		t.Errorf("entry 0: expected 'Let me think about this', got %q", emitted[0].Line)
+	}
+	if emitted[0].Level != "thinking" {
+		t.Errorf("entry 0: expected level 'thinking', got %q", emitted[0].Level)
+	}
+
+	// Flush remaining text
+	acc.FlushAll(emit)
+
+	if len(emitted) != 2 {
+		t.Fatalf("expected 2 emitted entries total, got %d", len(emitted))
+	}
+	if emitted[1].Line != "Here is my answer" {
+		t.Errorf("entry 1: expected 'Here is my answer', got %q", emitted[1].Line)
+	}
+	if emitted[1].Level != "text" {
+		t.Errorf("entry 1: expected level 'text', got %q", emitted[1].Level)
+	}
+}
+
+// TestLogAccumulator_TextThinkingTextTransition verifies the full cycle:
+// text → thinking → text, with each buffer flushed on level change.
+func TestLogAccumulator_TextThinkingTextTransition(t *testing.T) {
+	logger := log.New(io.Discard, "", 0)
+	acc := NewLogAccumulator(logger)
+
+	var emitted []TaskLogEntry
+	emit := func(e TaskLogEntry) {
+		emitted = append(emitted, e)
+	}
+
+	// Text accumulates
+	acc.Feed("task-1", "First ", "text", emit)
+	acc.Feed("task-1", "sentence.", "text", emit)
+
+	// Thinking arrives — flushes text buffer
+	acc.Feed("task-1", "Hmm, ", "thinking", emit)
+	acc.Feed("task-1", "let me reconsider.", "thinking", emit)
+
+	// Text arrives again — flushes thinking buffer
+	acc.Feed("task-1", "Actually, ", "text", emit)
+	acc.Feed("task-1", "here's my answer.", "text", emit)
+
+	// Should have 2 entries so far: text flushed, thinking flushed
+	if len(emitted) != 2 {
+		t.Fatalf("expected 2 emitted entries after transitions, got %d", len(emitted))
+	}
+	if emitted[0].Line != "First sentence." {
+		t.Errorf("entry 0: expected 'First sentence.', got %q", emitted[0].Line)
+	}
+	if emitted[0].Level != "text" {
+		t.Errorf("entry 0: expected level 'text', got %q", emitted[0].Level)
+	}
+	if emitted[1].Line != "Hmm, let me reconsider." {
+		t.Errorf("entry 1: expected 'Hmm, let me reconsider.', got %q", emitted[1].Line)
+	}
+	if emitted[1].Level != "thinking" {
+		t.Errorf("entry 1: expected level 'thinking', got %q", emitted[1].Level)
+	}
+
+	// Flush remaining text
+	acc.FlushAll(emit)
+
+	if len(emitted) != 3 {
+		t.Fatalf("expected 3 emitted entries total, got %d", len(emitted))
+	}
+	if emitted[2].Line != "Actually, here's my answer." {
+		t.Errorf("entry 2: expected \"Actually, here's my answer.\", got %q", emitted[2].Line)
+	}
+	if emitted[2].Level != "text" {
+		t.Errorf("entry 2: expected level 'text', got %q", emitted[2].Level)
+	}
+}
+
+// TestLogAccumulator_ToolFlushesThinkingBuffer verifies that a tool message
+// flushes any pending thinking buffer.
+func TestLogAccumulator_ToolFlushesThinkingBuffer(t *testing.T) {
+	logger := log.New(io.Discard, "", 0)
+	acc := NewLogAccumulator(logger)
+
+	var emitted []TaskLogEntry
+	emit := func(e TaskLogEntry) {
+		emitted = append(emitted, e)
+	}
+
+	// Thinking accumulates
+	acc.Feed("task-1", "Let me think ", "thinking", emit)
+	acc.Feed("task-1", "about this", "thinking", emit)
+
+	// Tool message should flush thinking buffer
+	acc.Feed("task-1", "[TOOL_START] bash: ls (id: t1)", "tool", emit)
+
+	if len(emitted) != 2 {
+		t.Fatalf("expected 2 emitted entries, got %d", len(emitted))
+	}
+	if emitted[0].Line != "Let me think about this" {
+		t.Errorf("entry 0: expected 'Let me think about this', got %q", emitted[0].Line)
+	}
+	if emitted[0].Level != "thinking" {
+		t.Errorf("entry 0: expected level 'thinking', got %q", emitted[0].Level)
+	}
+	if emitted[1].Line != "[TOOL_START] bash: ls (id: t1)" {
+		t.Errorf("entry 1: expected tool start, got %q", emitted[1].Line)
+	}
+	if emitted[1].Level != "tool" {
+		t.Errorf("entry 1: expected level 'tool', got %q", emitted[1].Level)
+	}
+}
+
 // TestIntegration_TaskLogBroadcast verifies that when a guest sends a task.log
 // notification via RPC, the server stores it, broadcasts it via WebSocket, and
 // the receiving connection gets the notification.
