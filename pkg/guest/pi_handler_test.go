@@ -218,6 +218,65 @@ func TestParseRepoRef(t *testing.T) {
 	}
 }
 
+// TestPIHandler_OperationalLogsSentViaCallback verifies that operational
+// messages (repo preparation, subprocess spawning) are sent via the sendLog
+// callback so they appear in the server's log store. This is a regression
+// test for the bug where fast tasks produced no visible logs because
+// operational messages were only written to stdout.
+func TestPIHandler_OperationalLogsSentViaCallback(t *testing.T) {
+	baseDir, err := os.MkdirTemp("", "hotelier-base-*")
+	if err != nil {
+		t.Fatalf("create temp base dir: %v", err)
+	}
+	defer os.RemoveAll(baseDir)
+
+	client := pi.NewClient(pi.PiClientConfig{
+		CWD: baseDir,
+		Log: log.New(io.Discard, "", 0),
+	})
+
+	h := &PIHandler{
+		baseCWD: baseDir,
+		client:  client,
+		log:     log.New(io.Discard, "", 0),
+	}
+
+	var mu sync.Mutex
+	var logEntries []LogEntry
+	sendLog := func(entry LogEntry) error {
+		mu.Lock()
+		defer mu.Unlock()
+		logEntries = append(logEntries, entry)
+		return nil
+	}
+
+	_, err = h.prepareRepos(context.Background(), "task-1", []string{}, sendLog)
+	if err != nil {
+		t.Fatalf("prepareRepos failed: %v", err)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+
+	// Should have received at least one operational log entry.
+	if len(logEntries) == 0 {
+		t.Fatal("expected operational log entries from prepareRepos, got none")
+	}
+
+	// Verify the entries have the expected properties.
+	for _, entry := range logEntries {
+		if entry.TaskID != "task-1" {
+			t.Errorf("expected task_id 'task-1', got %q", entry.TaskID)
+		}
+		if entry.Level != "system" {
+			t.Errorf("expected level 'system', got %q", entry.Level)
+		}
+		if entry.Line == "" {
+			t.Error("expected non-empty log line")
+		}
+	}
+}
+
 // TestPIHandler_PrepareReposNoRepos verifies that when no repos are specified,
 // the handler creates and returns a task-specific directory.
 func TestPIHandler_PrepareReposNoRepos(t *testing.T) {

@@ -153,6 +153,11 @@ func (h *PIHandler) ExecuteTask(ctx context.Context, task TaskAssignment, sendLo
 	h.log.Printf("[PI] repos: %v", task.Repos)
 	h.log.Printf("[PI] prompt: %s", task.Prompt)
 
+	// Send operational log that task execution is starting.
+	if err := sendLog(LogEntry{TaskID: task.TaskID, Line: fmt.Sprintf("Executing task %s", task.TaskID), Level: "system"}); err != nil {
+		h.log.Printf("[PI] failed to send operational log: %v", err)
+	}
+
 	// Clone any remote repos and determine the working directory.
 	workDir, err := h.prepareRepos(ctx, task.TaskID, task.Repos, sendLog)
 	if err != nil {
@@ -166,16 +171,25 @@ func (h *PIHandler) ExecuteTask(ctx context.Context, task TaskAssignment, sendLo
 	// We need to do this because the client was created with the base CWD,
 	// but we want the pi subprocess to run inside the cloned repo tree.
 	h.log.Printf("[PI] spawning pi subprocess in: %s", workDir)
+	if err := sendLog(LogEntry{TaskID: task.TaskID, Line: fmt.Sprintf("Spawning pi subprocess in: %s", workDir), Level: "system"}); err != nil {
+		h.log.Printf("[PI] failed to send operational log: %v", err)
+	}
 	if err := h.resetClient(ctx, workDir); err != nil {
 		return nil, fmt.Errorf("reset pi client with working dir %s: %w", workDir, err)
 	}
 
 	// Send the prompt
 	h.log.Printf("[PI] sending prompt to pi (client running: %v)", h.client.IsRunning())
+	if err := sendLog(LogEntry{TaskID: task.TaskID, Line: "Sending prompt to pi", Level: "system"}); err != nil {
+		h.log.Printf("[PI] failed to send operational log: %v", err)
+	}
 	if err := h.client.Prompt(ctx, prompt); err != nil {
 		return nil, fmt.Errorf("send prompt: %w", err)
 	}
 	h.log.Printf("[PI] prompt sent, waiting for events")
+	if err := sendLog(LogEntry{TaskID: task.TaskID, Line: "Prompt sent, waiting for events", Level: "system"}); err != nil {
+		h.log.Printf("[PI] failed to send operational log: %v", err)
+	}
 
 	// Collect streaming output
 	var mu sync.Mutex
@@ -366,6 +380,9 @@ func (h *PIHandler) prepareRepos(ctx context.Context, taskID string, repos []str
 			return "", fmt.Errorf("create task dir %s: %w", taskDir, err)
 		}
 		h.log.Printf("[WORKDIR] no repos specified, using task dir: %s", taskDir)
+		if sendLog != nil {
+			_ = sendLog(LogEntry{TaskID: taskID, Line: fmt.Sprintf("Using task directory: %s", taskDir), Level: "system"})
+		}
 		return taskDir, nil
 	}
 
@@ -382,6 +399,9 @@ func (h *PIHandler) prepareRepos(ctx context.Context, taskID string, repos []str
 		repoName := filepath.Base(strings.TrimSuffix(repoURL, ".git"))
 		clonePath := filepath.Join(taskDir, repoName)
 		h.log.Printf("[GIT] cloning %s -> %s", repo, clonePath)
+		if sendLog != nil {
+			_ = sendLog(LogEntry{TaskID: taskID, Line: fmt.Sprintf("Cloning %s -> %s", repo, clonePath), Level: "system"})
+		}
 		cloneArgs := []string{"clone", "--depth", "1"}
 		if repoRef != "" {
 			cloneArgs = append(cloneArgs, "--branch", repoRef)
@@ -393,6 +413,9 @@ func (h *PIHandler) prepareRepos(ctx context.Context, taskID string, repos []str
 			return "", fmt.Errorf("git clone %s: %w (output: %s)", repo, err, string(out))
 		}
 		h.log.Printf("[GIT] cloned %s", repo)
+		if sendLog != nil {
+			_ = sendLog(LogEntry{TaskID: taskID, Line: fmt.Sprintf("Cloned %s", repo), Level: "system"})
+		}
 		if workDir == "" {
 			// Use the cloned repo as the working directory.
 			// If multiple repos are specified, pick the first one.
