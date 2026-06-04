@@ -360,6 +360,14 @@
                 renderGuests(guests);
                 renderTasks(tasks);
                 updateStats(guests, tasks);
+
+                // Fallback: refresh active task detail to pick up status
+                // changes that may have been missed by WebSocket events.
+                // This ensures the status badge and log count stay current
+                // even if the WebSocket connection was briefly interrupted.
+                if (activeTaskId) {
+                    refreshTaskDetail(activeTaskId);
+                }
             } catch (e) {
                 console.error('refresh failed:', e);
             }
@@ -848,7 +856,7 @@
                         // Parse params — may be a string or already an object
                         let params = {};
                         if (typeof msg.params === 'string') {
-                            try { params = JSON.parse(msg.params); } catch(e) {}
+                            try { params = JSON.parse(msg.params); } catch(e) { console.error('failed to parse task.updated params:', e); }
                         } else {
                             params = msg.params || {};
                         }
@@ -861,7 +869,7 @@
                         // Parse params — params may be a string (JSON-encoded) or already an object
                         let params = {};
                         if (typeof msg.params === 'string') {
-                            try { params = JSON.parse(msg.params); } catch(e) { params = {}; }
+                            try { params = JSON.parse(msg.params); } catch(e) { console.error('failed to parse task.log params:', e); params = {}; }
                         } else {
                             params = msg.params || {};
                         }
@@ -889,7 +897,9 @@
                             appendLogToDetail(logEntry);
                         }
                     }
-                } catch (e) {}
+                } catch (e) {
+                    console.error('WebSocket message handling error:', e);
+                }
             };
         }
 

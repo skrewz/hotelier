@@ -230,6 +230,11 @@ type Server struct {
 	mu             sync.RWMutex
 	webDir         string
 	templateDir    string
+
+	// trackedTasks records tasks that have had their first log entry,
+	// so we can detect the ASSIGNED → RUNNING transition.
+	trackedTasks map[string]bool
+	trackMu      sync.Mutex
 }
 
 // Reload updates the server's runtime configuration from a new ServerConfig.
@@ -296,6 +301,7 @@ func New(cfg config.ServerConfig) *Server {
 		upgrader:       rpc.NewUpgrader(),
 		webDir:         "web/static",
 		templateDir:    "web/templates",
+		trackedTasks:   make(map[string]bool),
 	}
 
 	// Initialize disk-backed log store if configured
@@ -597,6 +603,16 @@ func parseToolLine(line string) (toolType, toolName, toolID, toolArgs, toolOutpu
 	return toolType, toolName, toolID, toolArgs, toolOutput, toolError, true
 }
 
+// broadcastTaskUpdated sends a task.updated notification to all browser
+// connections so the UI can update the task status badge and detail view.
+func (s *Server) broadcastTaskUpdated(taskID, status string) {
+	s.hub.Broadcast(rpc.ConnectionRoleBrowser, &rpc.JSONRPCMessage{
+		JSONRPC: "2.0",
+		Method:  "task.updated",
+		Params:  json.RawMessage(fmt.Sprintf(`{"task_id":"%s","status":"%s"}`, taskID, status)),
+	})
+}
+
 // handleGuestLog handles incoming log entries from guests.
 // For tool call events, the guest sends structured fields (tool_type,
 // tool_name, tool_id, etc.) alongside the formatted line string.
@@ -619,6 +635,21 @@ func (s *Server) handleGuestLog(ctx context.Context, params json.RawMessage) (in
 
 	if req.TaskID == "" || req.Line == "" {
 		return nil, rpc.InvalidParamsError("task_id and line are required")
+	}
+
+	// Detect the ASSIGNED → RUNNING transition on the first log entry.
+	// The guest sends "Task started" as the first log, which signals that
+	// execution has begun. Transition the task status and notify the UI.
+	s.trackMu.Lock()
+	if !s.trackedTasks[req.TaskID] {
+		s.trackedTasks[req.TaskID] = true
+		if err := s.taskQueue.Start(req.TaskID); err == nil {
+			s.log.Printf("task %s started (first log received)", req.TaskID)
+		}
+		s.trackMu.Unlock()
+		s.broadcastTaskUpdated(req.TaskID, "RUNNING")
+	} else {
+		s.trackMu.Unlock()
 	}
 
 	// Use the log accumulator to batch text deltas into complete messages.
@@ -849,6 +880,9 @@ func (s *Server) tryAssignTaskToEligible(taskID string) {
 		}
 
 		s.log.Printf("task %s reassigned to guest %s", task.ID, guest.ID)
+
+		// Notify UI of task re-assignment
+		s.broadcastTaskUpdated(task.ID, "ASSIGNED")
 		return
 	}
 
@@ -915,6 +949,9 @@ func (s *Server) tryAssignTask(guestID string) {
 	}
 
 	s.log.Printf("task %s assigned to guest %s", matchedTask.ID, guestID)
+
+	// Notify UI of task assignment
+	s.broadcastTaskUpdated(matchedTask.ID, "ASSIGNED")
 }
 
 // staleGuestCleanup periodically removes stale guests and kills their running tasks.

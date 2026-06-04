@@ -1713,7 +1713,33 @@ func TestIntegration_TaskLogBroadcast(t *testing.T) {
 		t.Errorf("expected 'Hello **world**', got %q", logs[0].Line)
 	}
 
+	// First message: task.updated (RUNNING) — broadcast on first log entry
 	data, ok := conn.Recv()
+	if !ok {
+		t.Fatal("expected task.updated notification to be sent to the browser connection")
+	}
+
+	var updatedNotif rpc.JSONRPCMessage
+	if err := json.Unmarshal(data, &updatedNotif); err != nil {
+		t.Fatalf("failed to unmarshal task.updated notification: %v", err)
+	}
+	if updatedNotif.Method != "task.updated" {
+		t.Errorf("expected method 'task.updated', got %s", updatedNotif.Method)
+	}
+
+	var updatedParams map[string]interface{}
+	if err := json.Unmarshal(updatedNotif.Params, &updatedParams); err != nil {
+		t.Fatalf("failed to unmarshal task.updated params: %v", err)
+	}
+	if updatedParams["task_id"] != createdTask.ID {
+		t.Errorf("expected task_id %s, got %v", createdTask.ID, updatedParams["task_id"])
+	}
+	if updatedParams["status"] != "RUNNING" {
+		t.Errorf("expected status 'RUNNING', got %v", updatedParams["status"])
+	}
+
+	// Second message: task.log
+	data, ok = conn.Recv()
 	if !ok {
 		t.Fatal("expected task.log notification to be sent to the browser connection")
 	}
