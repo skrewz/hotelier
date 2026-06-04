@@ -709,7 +709,7 @@
                     let msgHtml;
                     if (level === 'thinking') {
                         msgHtml = buildThinkingBlockHTML(log.line);
-                    } else if (log.line === 'Task started' || log.line === 'Task completed successfully') {
+                    } else if (level === 'system') {
                         msgHtml = `<div class="log-msg system${cursorClass}">${escapeHtml(log.line)}</div>`;
                     } else if (level === 'error') {
                         msgHtml = `<div class="log-msg error${cursorClass}">${escapeHtml(log.line)}</div>`;
@@ -996,7 +996,7 @@
                         <div class="thinking-content">${escapeHtml(line)}</div>
                     </div>
                 `;
-            } else if (line === 'Task started' || line === 'Task completed successfully') {
+            } else if (level === 'system') {
                 msgEl = document.createElement('div');
                 msgEl.className = 'log-msg system';
                 msgEl.textContent = line;
@@ -1202,7 +1202,7 @@
                     let msgHtml;
                     if (level === 'thinking') {
                         msgHtml = buildThinkingBlockHTML(log.line);
-                    } else if (log.line === 'Task started' || log.line === 'Task completed successfully') {
+                    } else if (level === 'system') {
                         msgHtml = `<div class="log-msg system">${escapeHtml(log.line)}</div>`;
                     } else if (level === 'error') {
                         msgHtml = `<div class="log-msg error">${escapeHtml(log.line)}</div>`;
