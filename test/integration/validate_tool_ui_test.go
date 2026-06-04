@@ -1083,9 +1083,57 @@ const { chromium } = require('playwright');
   await takeScreenshot('10-rerun-task');
 
   // =====================================================================
-  // Phase 10: Failed task — error reason displayed in task list and detail
+  // Phase 10: Polling must NOT close open tool blocks
   // =====================================================================
-  console.log('=== Phase 10: Failed task error display ===');
+  console.log('=== Phase 10: Polling preserves open tool-block state ===');
+
+  // Navigate to task detail (where tool blocks are rendered)
+  await page.goto(baseURL + '/task/' + taskId);
+  await page.waitForLoadState('networkidle');
+  await page.waitForSelector('.task-detail-body .tool-block', { timeout: 5000 });
+
+  // Completed tool blocks are rendered open by default. Close one via click.
+  await clickEl('.tool-block-header');
+
+  // Verify the block is now closed (body should NOT have .open class)
+  const blockClosed = await page.evaluate(() => {
+    const body = document.querySelector('.tool-block-body');
+    return body && !body.classList.contains('open');
+  });
+  if (!blockClosed) fail('Tool block should be closed after clicking header');
+  console.log('PASS: Tool block closed');
+
+  // Trigger a refresh cycle (simulates the periodic /api/tasks poll).
+  // Before the fix, this would call refreshTaskDetail() which rebuilds
+  // the entire view and loses the open/closed state.
+  await page.evaluate(() => refresh());
+
+  // Allow the refresh to settle
+  await page.waitForTimeout(1000);
+
+  // Verify the tool block is STILL closed — state must be preserved
+  const blockStillClosed = await page.evaluate(() => {
+    const body = document.querySelector('.tool-block-body');
+    return body && !body.classList.contains('open');
+  });
+  if (!blockStillClosed) fail('Tool block should remain closed after polling refresh');
+  console.log('PASS: Tool block state preserved after polling refresh');
+
+  // Also verify the detail view is still intact (header, prompt, body)
+  const detailIntact = await page.evaluate(() => {
+    return document.querySelector('.task-detail-header') !== null &&
+           document.querySelector('.task-detail-prompt') !== null &&
+           document.querySelector('.task-detail-body .tool-block') !== null;
+  });
+  if (!detailIntact) fail('Task detail view should remain intact after refresh');
+  console.log('PASS: Task detail view intact after refresh');
+
+  await takeScreenshot('11-polling-state-preserved');
+
+  // =====================================================================
+  // Phase 11: Failed task — error reason displayed in task list and detail
+  // =====================================================================
+  console.log('=== Phase 11: Failed task error display ===');
 
   // Navigate to Tasks tab to see the failed task in the list
   await page.locator('.tab').filter({ hasText: 'Tasks' }).click();
@@ -1121,7 +1169,7 @@ const { chromium } = require('playwright');
   }
   console.log('PASS: Failed task shows error indicator in task list:', failedTaskInList.errorText || 'yes');
 
-  await takeScreenshot('11-failed-task-list');
+  await takeScreenshot('12-failed-task-list');
 
   // Click the failed task to see the detail view
   await page.evaluate((fid) => {
@@ -1149,7 +1197,7 @@ const { chromium } = require('playwright');
 
   if (!failedTaskDetail.hasBanner) {
     fail('Failed task detail should show error banner (.task-error)');
-    await takeScreenshot('12-failed-detail-no-banner');
+    await takeScreenshot('13-failed-detail-no-banner');
     process.exit(1);
   }
   if (failedTaskDetail.label !== 'Failure Reason') {
@@ -1160,7 +1208,7 @@ const { chromium } = require('playwright');
   }
   console.log('PASS: Failed task detail shows error banner with reason:', failedTaskDetail.text);
 
-  await takeScreenshot('12-failed-task-detail');
+  await takeScreenshot('13-failed-task-detail');
 
   console.log('All UI validation checks passed!');
   await browser.close();

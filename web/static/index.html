@@ -349,7 +349,7 @@
             }
         }
 
-        async function refresh() {
+        async function refresh(skipDetailPatch) {
             try {
                 const [guestsRes, tasksRes] = await Promise.all([
                     fetch('/api/guests'),
@@ -361,12 +361,17 @@
                 renderTasks(tasks);
                 updateStats(guests, tasks);
 
-                // Fallback: refresh active task detail to pick up status
-                // changes that may have been missed by WebSocket events.
-                // This ensures the status badge and log count stay current
-                // even if the WebSocket connection was briefly interrupted.
-                if (activeTaskId) {
-                    refreshTaskDetail(activeTaskId);
+                // Patch the active task's header metadata (status badge,
+                // log count) without rebuilding the body. The WebSocket
+                // streams log entries incrementally via appendLogToDetail(),
+                // so we must NOT call refreshTaskDetail() here — it would
+                // nuke the .task-detail-body and lose open/closed state of
+                // tool blocks and thinking blocks.
+                //
+                // When skipDetailPatch is true, the caller is about to do a
+                // full refreshTaskDetail() anyway, so skip the redundant fetch.
+                if (activeTaskId && !skipDetailPatch) {
+                    patchTaskDetailMeta(activeTaskId);
                 }
             } catch (e) {
                 console.error('refresh failed:', e);
@@ -622,7 +627,9 @@
             activeTaskId = taskId;
             router.push('/task/' + taskId);
             routerReplaceMode = false;
-            refresh();
+            // Skip the detail-meta patch in refresh() because we immediately
+            // do a full refreshTaskDetail() below — avoids a redundant fetch.
+            refresh(true);
             // Show Logs tab but skip loadLogDates (we're showing task detail, not log browser)
             activateTabByName('Logs');
             document.getElementById('tab-tasks').style.display = 'none';
@@ -639,6 +646,40 @@
                 renderTaskDetail(data.task, data.logs || [], data.log_count || 0);
             } catch (e) {
                 console.error('failed to load task detail:', e);
+            }
+        }
+
+        // patchTaskDetailMeta updates only the header metadata (status badge,
+        // log count) of the active task detail view. It does NOT touch the
+        // .task-detail-body, so open/closed state of tool blocks and thinking
+        // blocks is preserved across polling refreshes.
+        async function patchTaskDetailMeta(taskId) {
+            try {
+                const res = await fetch(`/api/tasks/${taskId}`);
+                if (!res.ok) return;
+                const data = await res.json();
+                const task = data.task;
+                if (!task) return;
+
+                // Update status badge in header
+                const badgeEl = document.querySelector('.task-detail-header .badge');
+                if (badgeEl) {
+                    const badgeClass = `badge-${task.status.toLowerCase()}`;
+                    badgeEl.className = `badge ${badgeClass}`;
+                    badgeEl.textContent = task.status;
+                }
+
+                // Update log count in header meta
+                const metaEl = document.querySelector('.task-detail-meta');
+                if (metaEl) {
+                    const guestPart = task.assigned_to
+                        ? 'Guest: ' + escapeHtml(task.assigned_to)
+                        : 'Unassigned';
+                    const logCount = data.log_count || 0;
+                    metaEl.textContent = `${guestPart} · ${logCount} log entries`;
+                }
+            } catch (e) {
+                console.error('failed to patch task detail meta:', e);
             }
         }
 
@@ -841,6 +882,11 @@
             ws = new WebSocket(url);
             ws.onopen = () => {
                 console.log('WebSocket connected');
+                // Reconnect: recover any messages missed during disconnect
+                // by fetching the full detail for the active task.
+                if (activeTaskId) {
+                    refreshTaskDetail(activeTaskId);
+                }
             };
             ws.onerror = (err) => {
                 console.error('WebSocket error:', err);
@@ -862,9 +908,8 @@
                         }
                         let taskId = params.task_id || null;
                         refresh();
-                        if (taskId === activeTaskId) {
-                            refreshTaskDetail(taskId);
-                        }
+                        // refresh() already calls patchTaskDetailMeta() for
+                        // the active task, so no extra work needed here.
                     } else if (msg.method === 'task.log') {
                         // Parse params — params may be a string (JSON-encoded) or already an object
                         let params = {};
