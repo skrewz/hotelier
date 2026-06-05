@@ -364,9 +364,31 @@ func TestValidateToolUI(t *testing.T) {
 	}
 	t.Logf("Failed task created: %s (reason: %s)", failedTaskID, failureReason)
 
+	// Step 4c: Create a completed task to verify the filter hides it by default.
+	completedTaskID := fmt.Sprintf("ui-test-completed-task-%d", time.Now().UnixNano())
+	completedTask := &queue.Task{
+		ID:     completedTaskID,
+		Repos:  []string{"/tmp/test-repo"},
+		Prompt: "A task that should complete successfully",
+		Tags:   []string{"business-default"},
+	}
+	if err := srv.TaskQueue().Add(completedTask); err != nil {
+		t.Fatalf("add completed task: %v", err)
+	}
+	if err := srv.TaskQueue().Assign(completedTaskID, "ui-test-guest"); err != nil {
+		t.Fatalf("assign completed task: %v", err)
+	}
+	if err := srv.TaskQueue().Start(completedTaskID); err != nil {
+		t.Fatalf("start completed task: %v", err)
+	}
+	if err := srv.TaskQueue().Complete(completedTaskID, "Task completed successfully"); err != nil {
+		t.Fatalf("complete task: %v", err)
+	}
+	t.Logf("Completed task created: %s", completedTaskID)
+
 	// Step 5: Validate UI rendering via Playwright by exercising the real
 	// user flow: navigate → task list → click task → detail view.
-	validateUI(t, baseURL, taskID, failedTaskID, failureReason, projectRoot)
+	validateUI(t, baseURL, taskID, failedTaskID, completedTaskID, failureReason, projectRoot)
 }
 
 func validateServerLogs(t *testing.T, srv *server.Server, taskID string, expectedEntries []testLogEntry) {
@@ -416,7 +438,7 @@ func validateServerLogs(t *testing.T, srv *server.Server, taskID string, expecte
 	}
 }
 
-func validateUI(t *testing.T, baseURL, taskID, failedTaskID, failureReason, projectRoot string) {
+func validateUI(t *testing.T, baseURL, taskID, failedTaskID, completedTaskID, failureReason, projectRoot string) {
 	// Allow overriding the screenshot directory via env var for manual inspection.
 	// When set, screenshots survive t.TempDir() cleanup.
 	overrideDir := os.Getenv("SCREENSHOT_DIR")
@@ -450,6 +472,7 @@ const { chromium } = require('playwright');
   const baseURL = '%s';
   const taskId = '%s';
   const failedTaskId = '%s';
+  const completedTaskId = '%s';
   const failureReason = '%s';
   const expectedLogDate = '%s';
   const path = require('path');
@@ -526,7 +549,135 @@ const { chromium } = require('playwright');
   if (tabCount !== 2) fail('Should have exactly 2 tabs (Tasks + Logs), got ' + tabCount);
   console.log('PASS: Only 2 tabs present (Task Detail removed)');
 
+  // =====================================================================
+  // Phase 1b: Task summary and filter row
+  // =====================================================================
+  console.log('=== Phase 1b: Task summary and filter ===');
+
+  // Verify task summary is rendered with coloured counts
+  const summaryResult = await page.evaluate(() => {
+    const summary = document.getElementById('task-summary');
+    if (!summary) return { error: 'task-summary element not found' };
+    const counts = summary.querySelectorAll('.task-summary-count');
+    const countValues = Array.from(counts).map(c => c.textContent.trim());
+    const countClasses = Array.from(counts).map(c => {
+      const classes = c.className.split(' ');
+      return classes.find(cls => cls !== 'task-summary-count');
+    });
+    return { countValues, countClasses };
+  });
+  if (summaryResult.error) fail(summaryResult.error);
+  if (summaryResult.countValues.length < 4) fail('Task summary should have at least 4 count values, got ' + summaryResult.countValues.length);
+  // First count is total, should be non-zero
+  if (summaryResult.countValues[0] === '0') fail('Total task count should be non-zero');
+  if (summaryResult.countClasses[0] !== 'total') fail('First summary count should have class "total"');
+  console.log('PASS: Task summary rendered with', summaryResult.countValues.length, 'counts:', summaryResult.countValues.join(', '));
+
+  // Verify filter row is rendered with toggle buttons
+  const filterResult = await page.evaluate(() => {
+    const row = document.getElementById('task-filter-row');
+    if (!row) return { error: 'task-filter-row element not found' };
+    const buttons = row.querySelectorAll('.task-filter-btn');
+    const buttonStates = Array.from(buttons).map(b => ({
+      status: b.dataset.status,
+      active: b.classList.contains('active'),
+      inactive: b.classList.contains('inactive'),
+    }));
+    return { buttonStates };
+  });
+  if (filterResult.error) fail(filterResult.error);
+  if (filterResult.buttonStates.length < 6) fail('Filter row should have at least 6 buttons, got ' + filterResult.buttonStates.length);
+  // Verify COMPLETED is inactive by default
+  const completedBtn = filterResult.buttonStates.find(b => b.status === 'COMPLETED');
+  if (!completedBtn) fail('COMPLETED filter button not found');
+  if (completedBtn.active) fail('COMPLETED filter should be inactive by default');
+  if (!completedBtn.inactive) fail('COMPLETED filter should have inactive class by default');
+  // Verify other statuses are active by default
+  for (const btn of filterResult.buttonStates) {
+    if (btn.status !== 'COMPLETED' && !btn.active) {
+      fail(btn.status + ' filter should be active by default');
+    }
+  }
+  console.log('PASS: Filter row rendered with', filterResult.buttonStates.length, 'buttons, COMPLETED inactive by default');
+
+  // Verify completed tasks are hidden by default (the test creates a RUNNING task via the guest,
+  // plus the PENDING task and FAILED task — no COMPLETED tasks in the test data, so all shown tasks should be visible)
+  const visibleTaskCount = await page.evaluate(() => {
+    return document.querySelectorAll('.task-item').length;
+  });
+  // With 2 tasks (1 PENDING + 1 FAILED) and COMPLETED hidden, all should be visible
+  console.log('PASS:', visibleTaskCount, 'task(s) visible with default filter (COMPLETED hidden)');
+
   await takeScreenshot('01-front-page');
+
+  // =====================================================================
+  // Phase 1c: Toggle COMPLETED filter — completed task hidden/shown
+  // =====================================================================
+  console.log('=== Phase 1c: Toggle COMPLETED filter ===');
+
+  // With 3 tasks (PENDING + FAILED + COMPLETED) and COMPLETED hidden,
+  // only 2 should be visible
+  const visibleBefore = await page.evaluate(() => {
+    return document.querySelectorAll('.task-item').length;
+  });
+  if (visibleBefore !== 2) fail('Should show 2 tasks (COMPLETED hidden by default), got ' + visibleBefore);
+  console.log('PASS:', visibleBefore, 'tasks visible (COMPLETED hidden)');
+
+  // Verify the completed task is NOT in the list
+  const completedHidden = await page.evaluate((cid) => {
+    const items = document.querySelectorAll('.task-item');
+    for (const item of items) {
+      if (item.textContent.includes(cid)) return false;
+    }
+    return true;
+  }, completedTaskId);
+  if (!completedHidden) fail('Completed task should be hidden by default');
+  console.log('PASS: Completed task hidden by default');
+
+  // Click COMPLETED filter button to show completed tasks
+  await clickEl('button[data-status="COMPLETED"]');
+
+  // Wait for re-render
+  await page.waitForTimeout(500);
+
+  // Now 3 tasks should be visible
+  const visibleAfter = await page.evaluate(() => {
+    return document.querySelectorAll('.task-item').length;
+  });
+  if (visibleAfter !== 3) fail('Should show 3 tasks (COMPLETED now shown), got ' + visibleAfter);
+  console.log('PASS:', visibleAfter, 'tasks visible (COMPLETED shown)');
+
+  // Verify the completed task IS now in the list
+  const completedShown = await page.evaluate((cid) => {
+    const items = document.querySelectorAll('.task-item');
+    for (const item of items) {
+      if (item.textContent.includes(cid)) return true;
+    }
+    return false;
+  }, completedTaskId);
+  if (!completedShown) fail('Completed task should be visible after toggling filter');
+  console.log('PASS: Completed task visible after toggling filter');
+
+  // Verify COMPLETED button is now active
+  const completedBtnActive = await page.evaluate(() => {
+    const btn = document.querySelector('button[data-status="COMPLETED"]');
+    return btn && btn.classList.contains('active') && !btn.classList.contains('inactive');
+  });
+  if (!completedBtnActive) fail('COMPLETED filter button should be active after toggle');
+  console.log('PASS: COMPLETED filter button active after toggle');
+
+  // Toggle COMPLETED back to hide completed tasks
+  await clickEl('button[data-status="COMPLETED"]');
+  await page.waitForTimeout(500);
+
+  // Back to 2 visible tasks
+  const visibleFinal = await page.evaluate(() => {
+    return document.querySelectorAll('.task-item').length;
+  });
+  if (visibleFinal !== 2) fail('Should show 2 tasks (COMPLETED hidden again), got ' + visibleFinal);
+  console.log('PASS:', visibleFinal, 'tasks visible (COMPLETED hidden again)');
+
+  await takeScreenshot('01b-filter-toggle');
 
   // =====================================================================
   // Phase 2: Click task → Logs view with rich tool-block rendering
@@ -1213,7 +1364,7 @@ const { chromium } = require('playwright');
   console.log('All UI validation checks passed!');
   await browser.close();
 })().catch(e => { console.error('Test failed:', e); process.exit(1); });
-`, screenshotDir, baseURL, taskID, failedTaskID, failureReason, logDate)
+`, screenshotDir, baseURL, taskID, failedTaskID, completedTaskID, failureReason, logDate)
 
 	tmpScript := t.TempDir() + "/validate_ui.js"
 	if err := os.WriteFile(tmpScript, []byte(script), 0o644); err != nil {

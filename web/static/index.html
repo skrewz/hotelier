@@ -181,6 +181,32 @@
         .task-error { background: #1c0a0a; border: 1px solid #7f1d1d; border-radius: 0.375rem; padding: 0.75rem 1rem; margin-bottom: 1rem; font-size: 0.85rem; color: #fca5a5; line-height: 1.5; }
         .task-error-label { font-weight: 600; color: #ef4444; margin-bottom: 0.25rem; font-size: 0.75rem; text-transform: uppercase; letter-spacing: 0.05em; }
         .task-error-text { white-space: pre-wrap; word-break: break-word; }
+
+        /* Task summary — coloured status counts */
+        .task-summary { display: flex; flex-wrap: wrap; gap: 0.5rem 1rem; padding: 0.5rem 1rem; background: #1e293b; border-bottom: 1px solid #334155; font-size: 0.8rem; align-items: center; }
+        .task-summary-count { font-weight: 600; }
+        .task-summary-count.total { color: #38bdf8; }
+        .task-summary-count.completed { color: #22c55e; }
+        .task-summary-count.running { color: #f59e0b; }
+        .task-summary-count.failed { color: #ef4444; }
+        .task-summary-count.pending { color: #94a3b8; }
+        .task-summary-count.assigned { color: #38bdf8; }
+        .task-summary-count.cancelled { color: #78716c; }
+        .task-summary-sep { color: #334155; }
+
+        /* Task status filter row */
+        .task-filter-row { display: flex; flex-wrap: wrap; gap: 0.375rem; padding: 0.5rem 1rem; background: #0f172a; border-bottom: 1px solid #334155; align-items: center; }
+        .task-filter-label { color: #64748b; font-size: 0.65rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.05em; margin-right: 0.25rem; }
+        .task-filter-btn { padding: 0.2rem 0.6rem; border-radius: 0.25rem; font-size: 0.7rem; font-weight: 600; text-transform: uppercase; cursor: pointer; border: 1px solid transparent; background: transparent; color: #64748b; transition: all 0.15s; }
+        .task-filter-btn:hover { color: #e2e8f0; }
+        .task-filter-btn.active { border-color: currentColor; }
+        .task-filter-btn.active[data-status="PENDING"] { background: #334155; color: #94a3b8; }
+        .task-filter-btn.active[data-status="ASSIGNED"] { background: #1e3a5f; color: #38bdf8; }
+        .task-filter-btn.active[data-status="RUNNING"] { background: #422006; color: #f59e0b; }
+        .task-filter-btn.active[data-status="COMPLETED"] { background: #052e16; color: #22c55e; }
+        .task-filter-btn.active[data-status="FAILED"] { background: #450a0a; color: #ef4444; }
+        .task-filter-btn.active[data-status="CANCELLED"] { background: #1c1917; color: #78716c; }
+        .task-filter-btn.inactive { opacity: 0.4; }
     </style>
 </head>
 <body>
@@ -238,6 +264,8 @@
                 <div class="tab" onclick="showTab('logs')">Logs</div>
             </div>
             <div id="tab-tasks">
+                <div id="task-summary" class="task-summary"></div>
+                <div id="task-filter-row" class="task-filter-row"></div>
                 <div id="task-list"></div>
             </div>
             <div id="tab-logs" style="display:none;">
@@ -259,6 +287,17 @@
         let ws;
         let activeTaskId = null;
         let taskLogs = {};  // Accumulates logs per task: { taskId: [entries] }
+
+        // Task status filter state.  Keys are status strings (e.g. "COMPLETED").
+        // true = shown, false = hidden.  Defaults: COMPLETED hidden, all others shown.
+        let taskFilter = {
+            PENDING:   true,
+            ASSIGNED:  true,
+            RUNNING:   true,
+            COMPLETED: false,
+            FAILED:    true,
+            CANCELLED: true,
+        };
 
         const router = {
             // Push a new URL without reloading the page.
@@ -401,14 +440,74 @@
             }).join('');
         }
 
+        // renderTaskSummary computes per-status counts and renders a compact
+        // summary bar: "total · completed · running · failed · pending · assigned · cancelled"
+        function renderTaskSummary(tasks) {
+            const summary = document.getElementById('task-summary');
+            if (!summary) return;
+
+            const counts = { PENDING: 0, ASSIGNED: 0, RUNNING: 0, COMPLETED: 0, FAILED: 0, CANCELLED: 0 };
+            tasks.forEach(t => { if (counts[t.status] !== undefined) counts[t.status]++; });
+            const total = tasks.length;
+
+            const parts = [
+                { count: total, cls: 'total', label: 'total' },
+                { count: counts.COMPLETED, cls: 'completed', label: 'completed' },
+                { count: counts.RUNNING, cls: 'running', label: 'running' },
+                { count: counts.FAILED, cls: 'failed', label: 'failed' },
+                { count: counts.PENDING, cls: 'pending', label: 'pending' },
+                { count: counts.ASSIGNED, cls: 'assigned', label: 'assigned' },
+                { count: counts.CANCELLED, cls: 'cancelled', label: 'cancelled' },
+            ];
+
+            summary.innerHTML = parts.map((p, i) =>
+                (i > 0 ? '<span class="task-summary-sep">·</span>' : '') +
+                `<span class="task-summary-count ${p.cls}">${p.count}</span> <span style="color:#64748b;font-size:0.7rem;">${p.label}</span>`
+            ).join('');
+        }
+
+        // renderTaskFilter renders toggle buttons for each status.
+        // Clicking a button toggles its visibility (active/inactive).
+        function renderTaskFilter() {
+            const row = document.getElementById('task-filter-row');
+            if (!row) return;
+
+            const statuses = ['PENDING', 'ASSIGNED', 'RUNNING', 'COMPLETED', 'FAILED', 'CANCELLED'];
+            row.innerHTML = '<span class="task-filter-label">Filter:</span>' +
+                statuses.map(s => {
+                    const active = taskFilter[s];
+                    const cls = active ? 'active' : 'inactive';
+                    return `<button class="task-filter-btn ${cls}" data-status="${s}" onclick="toggleTaskFilter('${s}')">${s}</button>`;
+                }).join('');
+        }
+
+        // toggleTaskFilter toggles the visibility of a given status and re-renders.
+        function toggleTaskFilter(status) {
+            taskFilter[status] = !taskFilter[status];
+            // Re-render tasks with the current data (cached from last refresh)
+            fetch('/api/tasks').then(r => r.json()).then(data => renderTasks(data));
+        }
+
         function renderTasks(data) {
             const list = document.getElementById('task-list');
             const tasks = data.tasks || [];
-            if (tasks.length === 0) {
-                list.innerHTML = '<div style="padding:0.5rem;color:#64748b;font-size:0.875rem;">No tasks yet</div>';
+
+            // Render summary and filter row (always with full data)
+            renderTaskSummary(tasks);
+            renderTaskFilter();
+
+            // Apply filter
+            const filtered = tasks.filter(t => taskFilter[t.status] !== false);
+
+            if (filtered.length === 0) {
+                if (tasks.length === 0) {
+                    list.innerHTML = '<div style="padding:0.5rem;color:#64748b;font-size:0.875rem;">No tasks yet</div>';
+                } else {
+                    list.innerHTML = '<div style="padding:0.5rem;color:#64748b;font-size:0.875rem;">No tasks match the active filter</div>';
+                }
                 return;
             }
-            list.innerHTML = tasks.map(t => {
+            list.innerHTML = filtered.map(t => {
                 const badgeClass = `badge-${t.status.toLowerCase()}`;
                 const itemClass = t.status.toLowerCase();
                 const isActive = t.id === activeTaskId ? ' active' : '';
