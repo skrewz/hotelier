@@ -736,3 +736,59 @@ func TestQueueConcurrency(t *testing.T) {
 		t.Errorf("expected 50 tasks, got %d", q.Count())
 	}
 }
+
+// TestTaskStatusTransition_AssignedToPending verifies that a task can be
+// re-queued from ASSIGNED back to PENDING (for stuck task recovery).
+func TestTaskStatusTransition_AssignedToPending(t *testing.T) {
+	q := NewTaskQueue(func(format string, args ...interface{}) {})
+	q.Add(&Task{ID: "task-1", Prompt: "test"})
+
+	// PENDING → ASSIGNED
+	err := q.Assign("task-1", "guest-1")
+	if err != nil {
+		t.Fatalf("assign failed: %v", err)
+	}
+
+	task, _ := q.Get("task-1")
+	if task.Status != TaskStatusAssigned {
+		t.Fatalf("expected ASSIGNED, got %s", task.Status)
+	}
+
+	// ASSIGNED → PENDING (re-queue)
+	err = q.UpdateStatus("task-1", TaskStatusPending)
+	if err != nil {
+		t.Fatalf("re-queue failed: %v", err)
+	}
+
+	task, _ = q.Get("task-1")
+	if task.Status != TaskStatusPending {
+		t.Errorf("expected PENDING after re-queue, got %s", task.Status)
+	}
+}
+
+// TestTaskStatusTransition_RunningToPending verifies that a running task
+// can be re-queued (for guest unregister recovery).
+func TestTaskStatusTransition_RunningToPending(t *testing.T) {
+	q := NewTaskQueue(func(format string, args ...interface{}) {})
+	q.Add(&Task{ID: "task-1", Prompt: "test"})
+
+	// PENDING → ASSIGNED → RUNNING
+	q.Assign("task-1", "guest-1")
+	q.Start("task-1")
+
+	task, _ := q.Get("task-1")
+	if task.Status != TaskStatusRunning {
+		t.Fatalf("expected RUNNING, got %s", task.Status)
+	}
+
+	// RUNNING → PENDING (re-queue)
+	err := q.UpdateStatus("task-1", TaskStatusPending)
+	if err != nil {
+		t.Fatalf("re-queue failed: %v", err)
+	}
+
+	task, _ = q.Get("task-1")
+	if task.Status != TaskStatusPending {
+		t.Errorf("expected PENDING after re-queue, got %s", task.Status)
+	}
+}

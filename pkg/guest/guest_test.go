@@ -862,3 +862,21 @@ func TestGuestReload(t *testing.T) {
 		t.Errorf("expected log_level debug, got %s", g.config.LogLevel)
 	}
 }
+
+// TestGuestNew_CurrentTaskIDEmpty verifies that a new guest starts with
+// an empty currentTaskID.
+func TestGuestNew_CurrentTaskIDEmpty(t *testing.T) {
+	cfg := config.GuestConfig{ID: "test", Name: "Test", Tags: []string{"test"}}
+	handler := func(ctx context.Context, task TaskAssignment, _ LogCallback) (*TaskResult, error) {
+		return &TaskResult{TaskID: task.TaskID, Success: true}, nil
+	}
+	g := New(cfg, handler)
+
+	g.mu.Lock()
+	taskID := g.currentTaskID
+	g.mu.Unlock()
+
+	if taskID != "" {
+		t.Errorf("expected empty currentTaskID on new guest, got %q", taskID)
+	}
+}

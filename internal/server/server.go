@@ -512,17 +512,26 @@ func (s *Server) handleGuestUnregister(ctx context.Context, params json.RawMessa
 }
 
 // handleGuestHeartbeat handles guest heartbeat.
+// If task_id is present, it uses TaskHeartbeat to track the guest's
+// current task for liveness probing.
 func (s *Server) handleGuestHeartbeat(ctx context.Context, params json.RawMessage) (interface{}, *rpc.RPCError) {
 	var req struct {
-		ID string `json:"id"`
+		ID     string `json:"id"`
+		TaskID string `json:"task_id"`
 	}
 
 	if err := json.Unmarshal(params, &req); err != nil {
 		return nil, rpc.InvalidParamsError("invalid request parameters")
 	}
 
-	if err := s.registry.Heartbeat(req.ID); err != nil {
-		return nil, rpc.InternalError(err.Error())
+	if req.TaskID != "" {
+		if err := s.registry.TaskHeartbeat(req.ID, req.TaskID); err != nil {
+			return nil, rpc.InternalError(err.Error())
+		}
+	} else {
+		if err := s.registry.Heartbeat(req.ID); err != nil {
+			return nil, rpc.InternalError(err.Error())
+		}
 	}
 
 	return map[string]interface{}{
@@ -970,7 +979,11 @@ func (s *Server) staleGuestCleanup() {
 	for {
 		select {
 		case <-ticker.C:
-			// First: kill running tasks for guests that have been silent too long.
+			// First: detect tasks stuck in ASSIGNED state (guest never confirmed).
+			// This catches the race condition where task.assign was dropped.
+			s.checkStuckTasks()
+
+			// Second: kill running tasks for guests that have been silent too long.
 			// This runs before stale guest removal so we can send task.cancel.
 			s.checkSilentGuests()
 
@@ -1029,6 +1042,46 @@ func (s *Server) checkSilentGuests() {
 				s.log.Printf("failed to send task.cancel to guest %s: %v (guest may be disconnected)", guest.ID, err)
 			}
 		}
+	}
+}
+
+// checkStuckTasks detects tasks that have been ASSIGNED to a guest but the
+// guest has not heartbeated with that task_id. This catches the case where
+// the server assigned a task but the guest never received the assignment
+// (e.g. race condition in notification delivery).
+// Stuck tasks are failed and re-queued for another guest.
+func (s *Server) checkStuckTasks() {
+	timeout := time.Duration(s.cfg.TaskAssignmentTimeout) * time.Second
+	if timeout == 0 {
+		return // Stuck task detection disabled
+	}
+
+	stuck := s.registry.GetStuckGuests(timeout)
+	for _, guest := range stuck {
+		s.log.Printf("task %s stuck on guest %s for > %v (guest never confirmed assignment), re-queuing",
+			guest.TaskID, guest.ID, timeout)
+
+		// Re-queue the task (transitions ASSIGNED → PENDING)
+		if err := s.taskQueue.UpdateStatus(guest.TaskID, queue.TaskStatusPending); err != nil {
+			s.log.Printf("failed to re-queue stuck task %s: %v", guest.TaskID, err)
+			continue
+		}
+
+		// Clear the guest's task assignment
+		if err := s.registry.ClearGuestTask(guest.ID); err != nil {
+			s.log.Printf("failed to clear guest %s task: %v", guest.ID, err)
+		}
+
+		// Notify the UI
+		s.hub.Broadcast(rpc.ConnectionRoleBrowser, &rpc.JSONRPCMessage{
+			JSONRPC: "2.0",
+			Method:  "task.updated",
+			Params: json.RawMessage(fmt.Sprintf(`{"task_id":"%s","status":"pending"}`,
+				guest.TaskID)),
+		})
+
+		// Try to assign the re-queued task to another eligible guest
+		s.tryAssignTaskToEligible(guest.TaskID)
 	}
 }
 

@@ -62,13 +62,14 @@ func (s *GuestState) UnmarshalJSON(data []byte) error {
 
 // Guest represents a connected guest in the system.
 type Guest struct {
-	ID            string     `json:"id"`
-	Name          string     `json:"name"`
-	Tags          []string   `json:"tags"`
-	State         GuestState `json:"state"`
-	ConnectedAt   time.Time  `json:"connected_at"`
-	LastHeartbeat time.Time  `json:"last_heartbeat"`
-	TaskID        string     `json:"task_id,omitempty"`
+	ID                string     `json:"id"`
+	Name              string     `json:"name"`
+	Tags              []string   `json:"tags"`
+	State             GuestState `json:"state"`
+	ConnectedAt       time.Time  `json:"connected_at"`
+	LastHeartbeat     time.Time  `json:"last_heartbeat"`
+	LastTaskHeartbeat time.Time  `json:"last_task_heartbeat,omitempty"` // last heartbeat that included a task_id
+	TaskID            string     `json:"task_id,omitempty"`
 }
 
 // GuestRegistry manages the lifecycle of connected guests.
@@ -159,6 +160,33 @@ func (r *GuestRegistry) Heartbeat(guestID string) error {
 	return nil
 }
 
+// TaskHeartbeat updates the last heartbeat time and records the task_id
+// that the guest is reporting. This is used by the server's task liveness
+// probe to detect when a guest has been assigned a task but is not
+// heartbeating with it (indicating the assignment was not received).
+func (r *GuestRegistry) TaskHeartbeat(guestID, taskID string) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	guest, exists := r.guests[guestID]
+	if !exists {
+		return fmt.Errorf("guest %s not found", guestID)
+	}
+
+	guest.LastHeartbeat = time.Now()
+	guest.LastTaskHeartbeat = time.Now()
+	// Update the task ID if the guest is reporting a different one.
+	// This allows the server to detect mismatches between the server-side
+	// assignment and the guest's actual state.
+	if guest.TaskID != taskID {
+		guest.TaskID = taskID
+		if r.logf != nil {
+			r.logf("guest %s task updated via heartbeat: %s", guestID, taskID)
+		}
+	}
+	return nil
+}
+
 // SetLastHeartbeat sets the last heartbeat time for a guest (for testing).
 func (r *GuestRegistry) SetLastHeartbeat(guestID string, t time.Time) error {
 	r.mu.Lock()
@@ -171,6 +199,46 @@ func (r *GuestRegistry) SetLastHeartbeat(guestID string, t time.Time) error {
 
 	guest.LastHeartbeat = t
 	return nil
+}
+
+// SetLastTaskHeartbeat sets the last task heartbeat time for a guest (for testing).
+func (r *GuestRegistry) SetLastTaskHeartbeat(guestID string, t time.Time) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	guest, exists := r.guests[guestID]
+	if !exists {
+		return fmt.Errorf("guest %s not found", guestID)
+	}
+
+	guest.LastTaskHeartbeat = t
+	return nil
+}
+
+// GetStuckGuests returns guests that have a task assigned (TaskID set)
+// but have not heartbeated with that task for the given duration.
+// This detects the case where the server assigned a task but the guest
+// never received the assignment (e.g. race condition in notification delivery).
+func (r *GuestRegistry) GetStuckGuests(timeout time.Duration) []*Guest {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	var stuck []*Guest
+	now := time.Now()
+
+	for _, guest := range r.guests {
+		if guest.TaskID == "" {
+			continue // No task assigned
+		}
+
+		// If the guest has never heartbeated with a task, check against
+		// the assignment time. LastTaskHeartbeat is zero time if never set.
+		if guest.LastTaskHeartbeat.IsZero() || now.Sub(guest.LastTaskHeartbeat) > timeout {
+			stuck = append(stuck, guest)
+		}
+	}
+
+	return stuck
 }
 
 // GetGuest returns a guest by ID.
@@ -227,6 +295,8 @@ func (r *GuestRegistry) SetGuestState(guestID string, state GuestState) error {
 }
 
 // SetGuestTask assigns a task to a guest.
+// It resets LastTaskHeartbeat to zero so the liveness probe can detect
+// if the guest never confirms the task via heartbeat.
 func (r *GuestRegistry) SetGuestTask(guestID, taskID string) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -238,6 +308,7 @@ func (r *GuestRegistry) SetGuestTask(guestID, taskID string) error {
 
 	guest.TaskID = taskID
 	guest.State = GuestStateRunning
+	guest.LastTaskHeartbeat = time.Time{} // reset — guest must confirm via heartbeat
 	return nil
 }
 
@@ -253,6 +324,7 @@ func (r *GuestRegistry) ClearGuestTask(guestID string) error {
 
 	guest.TaskID = ""
 	guest.State = GuestStateIdle
+	guest.LastTaskHeartbeat = time.Time{}
 	return nil
 }
 

@@ -64,21 +64,22 @@ type Handler func(ctx context.Context, task TaskAssignment, sendLog LogCallback)
 
 // Guest is the client-side guest that connects to the Check-In Host.
 type Guest struct {
-	id       string
-	name     string
-	tags     []string
-	config   config.GuestConfig
-	client   *rpc.Client
-	hub      *rpc.ClientHub
-	log      *log.Logger
-	handler  Handler
-	mu       sync.Mutex
-	running  bool
-	cancel   context.CancelFunc // cancels the current task's context
-	stopCh   chan struct{}
-	connLost chan struct{} // closed when the connection drops
-	callResp chan *rpc.JSONRPCMessage
-	taskCh   chan TaskAssignment // incoming task assignments
+	id            string
+	name          string
+	tags          []string
+	config        config.GuestConfig
+	client        *rpc.Client
+	hub           *rpc.ClientHub
+	log           *log.Logger
+	handler       Handler
+	mu            sync.Mutex
+	running       bool
+	cancel        context.CancelFunc // cancels the current task's context
+	stopCh        chan struct{}
+	connLost      chan struct{} // closed when the connection drops
+	callResp      chan *rpc.JSONRPCMessage
+	taskCh        chan TaskAssignment // incoming task assignments
+	currentTaskID string              // task currently being worked on (for task-aware heartbeat)
 }
 
 // New creates a new Guest instance.
@@ -257,9 +258,16 @@ func (g *Guest) Unregister() error {
 }
 
 // Heartbeat sends a heartbeat to the Check-In Host.
+// If the guest is currently executing a task, the task_id is included
+// so the server can verify the guest is heartbeating with its assigned task.
 func (g *Guest) Heartbeat() error {
+	g.mu.Lock()
+	taskID := g.currentTaskID
+	g.mu.Unlock()
+
 	params := map[string]string{
-		"id": g.id,
+		"id":      g.id,
+		"task_id": taskID,
 	}
 
 	_, err := g.client.Call("guest.heartbeat", params)
@@ -411,11 +419,13 @@ func (g *Guest) ExecuteTask(task TaskAssignment) (*TaskResult, error) {
 		return nil, fmt.Errorf("guest is already running a task")
 	}
 	g.running = true
+	g.currentTaskID = task.TaskID
 	g.mu.Unlock()
 
 	defer func() {
 		g.mu.Lock()
 		g.running = false
+		g.currentTaskID = ""
 		g.cancel = nil
 		g.mu.Unlock()
 	}()

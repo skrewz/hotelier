@@ -574,6 +574,205 @@ func TestGetAllGuests(t *testing.T) {
 	}
 }
 
+func TestTaskHeartbeat(t *testing.T) {
+	reg := newTestRegistry(t)
+
+	_, err := reg.Register("guest-1", "Test Guest", []string{"tag1"})
+	if err != nil {
+		t.Fatalf("register failed: %v", err)
+	}
+
+	// Assign a task to the guest
+	err = reg.SetGuestTask("guest-1", "task-1")
+	if err != nil {
+		t.Fatalf("set task failed: %v", err)
+	}
+
+	// LastTaskHeartbeat should be zero after assignment
+	guest, _ := reg.GetGuest("guest-1")
+	if !guest.LastTaskHeartbeat.IsZero() {
+		t.Errorf("expected zero LastTaskHeartbeat after assignment, got %v", guest.LastTaskHeartbeat)
+	}
+
+	// Heartbeat with the task
+	err = reg.TaskHeartbeat("guest-1", "task-1")
+	if err != nil {
+		t.Fatalf("TaskHeartbeat failed: %v", err)
+	}
+
+	// LastTaskHeartbeat should now be set
+	guest, _ = reg.GetGuest("guest-1")
+	if guest.LastTaskHeartbeat.IsZero() {
+		t.Error("expected LastTaskHeartbeat to be set after TaskHeartbeat")
+	}
+	if guest.LastHeartbeat.IsZero() {
+		t.Error("expected LastHeartbeat to be updated after TaskHeartbeat")
+	}
+}
+
+func TestTaskHeartbeat_NonExistentGuest(t *testing.T) {
+	reg := newTestRegistry(t)
+
+	err := reg.TaskHeartbeat("nonexistent", "task-1")
+	if err == nil {
+		t.Error("expected error for nonexistent guest, got nil")
+	}
+}
+
+func TestTaskHeartbeat_UpdatesTaskID(t *testing.T) {
+	reg := newTestRegistry(t)
+
+	reg.Register("guest-1", "Test Guest", []string{"tag1"})
+
+	// Heartbeat with a task ID (simulating guest reporting its task)
+	err := reg.TaskHeartbeat("guest-1", "task-1")
+	if err != nil {
+		t.Fatalf("TaskHeartbeat failed: %v", err)
+	}
+
+	guest, _ := reg.GetGuest("guest-1")
+	if guest.TaskID != "task-1" {
+		t.Errorf("expected task_id 'task-1', got %s", guest.TaskID)
+	}
+}
+
+func TestGetStuckGuests_NoStuckGuests(t *testing.T) {
+	reg := newTestRegistry(t)
+
+	reg.Register("guest-1", "Guest 1", []string{"tag1"})
+	reg.SetGuestTask("guest-1", "task-1")
+
+	// Immediately heartbeat with the task — should not be stuck
+	reg.TaskHeartbeat("guest-1", "task-1")
+
+	stuck := reg.GetStuckGuests(1 * time.Second)
+	if len(stuck) != 0 {
+		t.Errorf("expected 0 stuck guests, got %d", len(stuck))
+	}
+}
+
+func TestGetStuckGuests_DetectsStuckAssignment(t *testing.T) {
+	reg := newTestRegistry(t)
+
+	reg.Register("guest-1", "Guest 1", []string{"tag1"})
+	reg.SetGuestTask("guest-1", "task-1")
+
+	// Guest never heartbeated with the task — should be stuck
+	time.Sleep(10 * time.Millisecond)
+
+	stuck := reg.GetStuckGuests(5 * time.Millisecond)
+	if len(stuck) != 1 {
+		t.Errorf("expected 1 stuck guest, got %d", len(stuck))
+	}
+	if len(stuck) > 0 && stuck[0].ID != "guest-1" {
+		t.Errorf("expected stuck guest-1, got %s", stuck[0].ID)
+	}
+	if len(stuck) > 0 && stuck[0].TaskID != "task-1" {
+		t.Errorf("expected stuck task-1, got %s", stuck[0].TaskID)
+	}
+}
+
+func TestGetStuckGuests_IgnoresGuestsWithoutTasks(t *testing.T) {
+	reg := newTestRegistry(t)
+
+	reg.Register("guest-1", "Guest 1", []string{"tag1"})
+	// No task assigned
+
+	stuck := reg.GetStuckGuests(1 * time.Millisecond)
+	if len(stuck) != 0 {
+		t.Errorf("expected 0 stuck guests, got %d", len(stuck))
+	}
+}
+
+func TestGetStuckGuests_MultipleGuests(t *testing.T) {
+	reg := newTestRegistry(t)
+
+	reg.Register("guest-1", "Guest 1", []string{"tag1"})
+	reg.Register("guest-2", "Guest 2", []string{"tag1"})
+	reg.Register("guest-3", "Guest 3", []string{"tag1"})
+
+	// guest-1: assigned task, never heartbeated (stuck)
+	reg.SetGuestTask("guest-1", "task-1")
+
+	// guest-2: assigned task, heartbeated recently (not stuck)
+	reg.SetGuestTask("guest-2", "task-2")
+	reg.TaskHeartbeat("guest-2", "task-2")
+
+	// guest-3: no task (not stuck)
+
+	// Sleep briefly so guest-1 (no heartbeat) is clearly stuck.
+	// guest-2 heartbeated just before this, so use a timeout larger
+	// than the sleep to ensure guest-2 is not detected as stuck.
+	time.Sleep(10 * time.Millisecond)
+
+	stuck := reg.GetStuckGuests(20 * time.Millisecond)
+	if len(stuck) != 1 {
+		t.Errorf("expected 1 stuck guest, got %d", len(stuck))
+	}
+	if len(stuck) > 0 && stuck[0].ID != "guest-1" {
+		t.Errorf("expected stuck guest-1, got %s", stuck[0].ID)
+	}
+}
+
+func TestSetGuestTask_ResetsLastTaskHeartbeat(t *testing.T) {
+	reg := newTestRegistry(t)
+
+	reg.Register("guest-1", "Guest 1", []string{"tag1"})
+
+	// Heartbeat with a task
+	reg.TaskHeartbeat("guest-1", "task-1")
+	guest, _ := reg.GetGuest("guest-1")
+	if guest.LastTaskHeartbeat.IsZero() {
+		t.Fatal("expected LastTaskHeartbeat to be set")
+	}
+
+	// Assign a new task — should reset LastTaskHeartbeat
+	reg.SetGuestTask("guest-1", "task-2")
+	guest, _ = reg.GetGuest("guest-1")
+	if !guest.LastTaskHeartbeat.IsZero() {
+		t.Errorf("expected zero LastTaskHeartbeat after new assignment, got %v", guest.LastTaskHeartbeat)
+	}
+}
+
+func TestClearGuestTask_ResetsLastTaskHeartbeat(t *testing.T) {
+	reg := newTestRegistry(t)
+
+	reg.Register("guest-1", "Guest 1", []string{"tag1"})
+	reg.TaskHeartbeat("guest-1", "task-1")
+
+	reg.ClearGuestTask("guest-1")
+	guest, _ := reg.GetGuest("guest-1")
+	if !guest.LastTaskHeartbeat.IsZero() {
+		t.Errorf("expected zero LastTaskHeartbeat after clear, got %v", guest.LastTaskHeartbeat)
+	}
+}
+
+func TestSetLastTaskHeartbeat(t *testing.T) {
+	reg := newTestRegistry(t)
+
+	reg.Register("guest-1", "Guest 1", []string{"tag1"})
+
+	past := time.Now().Add(-1 * time.Minute)
+	err := reg.SetLastTaskHeartbeat("guest-1", past)
+	if err != nil {
+		t.Fatalf("SetLastTaskHeartbeat failed: %v", err)
+	}
+
+	guest, _ := reg.GetGuest("guest-1")
+	if guest.LastTaskHeartbeat.IsZero() {
+		t.Error("expected LastTaskHeartbeat to be set")
+	}
+}
+
+func TestSetLastTaskHeartbeat_NonExistent(t *testing.T) {
+	reg := newTestRegistry(t)
+
+	err := reg.SetLastTaskHeartbeat("nonexistent", time.Time{})
+	if err == nil {
+		t.Error("expected error for nonexistent guest, got nil")
+	}
+}
+
 func TestRegistryConcurrency(t *testing.T) {
 	reg := NewGuestRegistry(100, nil)
 	var wg sync.WaitGroup

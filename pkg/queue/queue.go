@@ -372,8 +372,8 @@ func (q *TaskQueue) Remove(taskID string) error {
 func (q *TaskQueue) validTransition(from, to TaskStatus) bool {
 	validTransitions := map[TaskStatus][]TaskStatus{
 		TaskStatusPending:   {TaskStatusAssigned, TaskStatusCancelled},
-		TaskStatusAssigned:  {TaskStatusRunning, TaskStatusCancelled},
-		TaskStatusRunning:   {TaskStatusCompleted, TaskStatusFailed},
+		TaskStatusAssigned:  {TaskStatusRunning, TaskStatusCancelled, TaskStatusPending},
+		TaskStatusRunning:   {TaskStatusCompleted, TaskStatusFailed, TaskStatusPending},
 		TaskStatusCompleted: {},
 		TaskStatusFailed:    {},
 		TaskStatusCancelled: {},

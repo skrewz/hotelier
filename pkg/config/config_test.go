@@ -44,6 +44,9 @@ func TestDefaultServerConfig(t *testing.T) {
 	if cfg.SilenceTimeout != 1800 {
 		t.Errorf("expected silence_timeout 1800, got %d", cfg.SilenceTimeout)
 	}
+	if cfg.TaskAssignmentTimeout != 90 {
+		t.Errorf("expected task_assignment_timeout 90, got %d", cfg.TaskAssignmentTimeout)
+	}
 	if cfg.MaxGuests != 0 {
 		t.Errorf("expected max_guests 0, got %d", cfg.MaxGuests)
 	}

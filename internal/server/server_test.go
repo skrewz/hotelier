@@ -2342,3 +2342,248 @@ func TestHandleGuestLog_ToolErrorFields(t *testing.T) {
 		t.Errorf("expected tool_output 'exit code 1', got %v", endEntry["tool_output"])
 	}
 }
+
+// TestHandleGuestHeartbeat_NoTaskID verifies that a heartbeat without
+// task_id uses the plain Heartbeat path.
+func TestHandleGuestHeartbeat_NoTaskID(t *testing.T) {
+	srv := newTestServer(t)
+
+	// Register a guest directly via registry
+	srv.Registry().Register("guest-1", "Test Guest", []string{"tag1"})
+
+	// Heartbeat without task_id
+	hbParams, _ := json.Marshal(map[string]string{
+		"id": "guest-1",
+	})
+	result, rpcErr := srv.handleGuestHeartbeat(nil, hbParams)
+	if rpcErr != nil {
+		t.Fatalf("expected no error, got %v", rpcErr)
+	}
+
+	resp := result.(map[string]interface{})
+	if resp["status"] != "ok" {
+		t.Errorf("expected status 'ok', got %v", resp["status"])
+	}
+
+	// Verify LastTaskHeartbeat was NOT updated
+	guest, _ := srv.registry.GetGuest("guest-1")
+	if !guest.LastTaskHeartbeat.IsZero() {
+		t.Errorf("expected zero LastTaskHeartbeat (no task_id sent), got %v", guest.LastTaskHeartbeat)
+	}
+}
+
+// TestHandleGuestHeartbeat_WithTaskID verifies that a heartbeat with
+// task_id uses TaskHeartbeat, updating LastTaskHeartbeat.
+func TestHandleGuestHeartbeat_WithTaskID(t *testing.T) {
+	srv := newTestServer(t)
+
+	// Register a guest directly via registry
+	srv.Registry().Register("guest-1", "Test Guest", []string{"tag1"})
+
+	// Assign a task
+	srv.registry.SetGuestTask("guest-1", "task-1")
+
+	// Heartbeat with task_id
+	hbParams, _ := json.Marshal(map[string]string{
+		"id":      "guest-1",
+		"task_id": "task-1",
+	})
+	result, rpcErr := srv.handleGuestHeartbeat(nil, hbParams)
+	if rpcErr != nil {
+		t.Fatalf("expected no error, got %v", rpcErr)
+	}
+
+	resp := result.(map[string]interface{})
+	if resp["status"] != "ok" {
+		t.Errorf("expected status 'ok', got %v", resp["status"])
+	}
+
+	// Verify LastTaskHeartbeat was updated
+	guest, _ := srv.registry.GetGuest("guest-1")
+	if guest.LastTaskHeartbeat.IsZero() {
+		t.Error("expected LastTaskHeartbeat to be set after task-aware heartbeat")
+	}
+}
+
+// TestHandleGuestHeartbeat_NonExistentGuest verifies that a heartbeat
+// for an unknown guest returns an error.
+func TestHandleGuestHeartbeat_NonExistentGuest(t *testing.T) {
+	srv := newTestServer(t)
+
+	hbParams, _ := json.Marshal(map[string]string{
+		"id": "unknown-guest",
+	})
+	_, rpcErr := srv.handleGuestHeartbeat(nil, hbParams)
+	if rpcErr == nil {
+		t.Error("expected error for unknown guest, got nil")
+	}
+}
+
+// TestCheckStuckTasks_DetectsAndRequeues verifies that checkStuckTasks
+// detects tasks stuck in ASSIGNED state and re-queues them.
+func TestCheckStuckTasks_DetectsAndRequeues(t *testing.T) {
+	srv := newTestServer(t)
+	srv.cfg.TaskAssignmentTimeout = 1 // 1 second timeout
+
+	// Register a guest directly via registry
+	srv.Registry().Register("guest-1", "Test Guest", []string{"tag1"})
+
+	// Add a task via HTTP
+	taskBody, _ := json.Marshal(map[string]interface{}{
+		"prompt": "test task",
+		"tags":   []string{"tag1"},
+	})
+	req := httptest.NewRequest(http.MethodPost, "/api/tasks", bytes.NewReader(taskBody))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	srv.HandleTasks(w, req)
+
+	var createdTask queue.Task
+	json.Unmarshal(w.Body.Bytes(), &createdTask)
+	taskID := createdTask.ID
+
+	// Manually assign the task (tryAssignTask fails to send notification
+	// because there's no real WebSocket connection, which reverts the task).
+	srv.taskQueue.Assign(taskID, "guest-1")
+	srv.registry.SetGuestTask("guest-1", taskID)
+
+	// Verify task is ASSIGNED
+	task, _ := srv.taskQueue.Get(taskID)
+	if task.Status != queue.TaskStatusAssigned {
+		t.Fatalf("expected task ASSIGNED, got %s", task.Status)
+	}
+
+	// Wait for the timeout to expire
+	time.Sleep(1100 * time.Millisecond)
+
+	// Run checkStuckTasks
+	srv.checkStuckTasks()
+
+	// Verify task was failed and re-queued
+	task, ok := srv.taskQueue.Get(taskID)
+	if !ok {
+		t.Fatalf("task %s not found after checkStuckTasks", taskID)
+	}
+	if task.Status != queue.TaskStatusPending {
+		t.Errorf("expected task status PENDING after re-queue, got %s", task.Status)
+	}
+
+	// Verify guest task was cleared
+	guest, _ := srv.registry.GetGuest("guest-1")
+	if guest.TaskID != "" {
+		t.Errorf("expected guest task cleared, got %s", guest.TaskID)
+	}
+}
+
+// TestCheckStuckTasks_IgnoresHealthyGuests verifies that checkStuckTasks
+// does not touch guests that are heartbeating with their task.
+func TestCheckStuckTasks_IgnoresHealthyGuests(t *testing.T) {
+	srv := newTestServer(t)
+	srv.cfg.TaskAssignmentTimeout = 1
+
+	// Register a guest directly via registry
+	srv.Registry().Register("guest-1", "Test Guest", []string{"tag1"})
+
+	// Add a task via HTTP
+	taskBody, _ := json.Marshal(map[string]interface{}{
+		"prompt": "test task",
+		"tags":   []string{"tag1"},
+	})
+	req := httptest.NewRequest(http.MethodPost, "/api/tasks", bytes.NewReader(taskBody))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	srv.HandleTasks(w, req)
+
+	var createdTask queue.Task
+	json.Unmarshal(w.Body.Bytes(), &createdTask)
+	taskID := createdTask.ID
+
+	// Manually assign the task (tryAssignTask fails to send notification
+	// because there's no real WebSocket connection, which reverts the task).
+	srv.taskQueue.Assign(taskID, "guest-1")
+	srv.registry.SetGuestTask("guest-1", taskID)
+
+	// Verify task is ASSIGNED
+	task, _ := srv.taskQueue.Get(taskID)
+	if task.Status != queue.TaskStatusAssigned {
+		t.Fatalf("expected task ASSIGNED after manual assign, got %s", task.Status)
+	}
+
+	// Guest heartbeats with the task (confirming assignment)
+	hbParams, _ := json.Marshal(map[string]string{
+		"id":      "guest-1",
+		"task_id": taskID,
+	})
+	srv.handleGuestHeartbeat(nil, hbParams)
+
+	// Verify heartbeat updated LastTaskHeartbeat
+	guest, _ := srv.registry.GetGuest("guest-1")
+	if guest.LastTaskHeartbeat.IsZero() {
+		t.Fatal("expected LastTaskHeartbeat to be set after heartbeat")
+	}
+
+	// Wait briefly — less than the timeout so the guest is not detected as stuck.
+	// The heartbeat was recent, so the guest should pass the liveness check.
+	time.Sleep(500 * time.Millisecond)
+
+	// Run checkStuckTasks
+	srv.checkStuckTasks()
+
+	// Verify task is still ASSIGNED (not re-queued)
+	task, ok := srv.taskQueue.Get(taskID)
+	if !ok {
+		t.Fatalf("task %s not found", taskID)
+	}
+	if task.Status != queue.TaskStatusAssigned {
+		t.Errorf("expected task status ASSIGNED (healthy guest), got %s", task.Status)
+	}
+
+	// Verify guest still has the task
+	guest, _ = srv.registry.GetGuest("guest-1")
+	if guest.TaskID != taskID {
+		t.Errorf("expected guest to still have task %s, got %s", taskID, guest.TaskID)
+	}
+}
+
+// TestCheckStuckTasks_Disabled verifies that checkStuckTasks is a no-op
+// when TaskAssignmentTimeout is 0.
+func TestCheckStuckTasks_Disabled(t *testing.T) {
+	srv := newTestServer(t)
+	srv.cfg.TaskAssignmentTimeout = 0 // disabled
+
+	// Register a guest directly via registry
+	srv.Registry().Register("guest-1", "Test Guest", []string{"tag1"})
+
+	// Add a task via HTTP
+	taskBody, _ := json.Marshal(map[string]interface{}{
+		"prompt": "test task",
+		"tags":   []string{"tag1"},
+	})
+	req := httptest.NewRequest(http.MethodPost, "/api/tasks", bytes.NewReader(taskBody))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	srv.HandleTasks(w, req)
+
+	var createdTask queue.Task
+	json.Unmarshal(w.Body.Bytes(), &createdTask)
+	taskID := createdTask.ID
+
+	// Manually assign the task
+	srv.taskQueue.Assign(taskID, "guest-1")
+	srv.registry.SetGuestTask("guest-1", taskID)
+
+	// Wait way past any reasonable timeout
+	time.Sleep(100 * time.Millisecond)
+
+	// Run checkStuckTasks — should be no-op
+	srv.checkStuckTasks()
+
+	// Verify task is still ASSIGNED
+	task, ok := srv.taskQueue.Get(taskID)
+	if !ok {
+		t.Fatalf("task %s not found", taskID)
+	}
+	if task.Status != queue.TaskStatusAssigned {
+		t.Errorf("expected task status ASSIGNED (detection disabled), got %s", task.Status)
+	}
+}

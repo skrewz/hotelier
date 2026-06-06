@@ -31,6 +31,11 @@ type ServerConfig struct {
 	// When a guest stops sending heartbeats for this long, the server kills its
 	// pi subprocess and marks the task as failed. Set to 0 to disable.
 	SilenceTimeout int `yaml:"silence_timeout"`
+	// TaskAssignmentTimeout is the duration before an ASSIGNED task is considered
+	// stuck. If a task has been ASSIGNED for longer than this and the guest has
+	// not heartbeated with that task_id, the server fails the task and re-queues
+	// it. Default: HeartbeatInterval * 3 (90 seconds).
+	TaskAssignmentTimeout int `yaml:"task_assignment_timeout"`
 	// MaxGuests is the maximum number of guests allowed (0 = unlimited).
 	MaxGuests int `yaml:"max_guests"`
 	// LogDir is the base directory where task logs are persisted to disk.
@@ -72,15 +77,16 @@ type GuestConfig struct {
 // DefaultServerConfig returns a ServerConfig with sensible defaults.
 func DefaultServerConfig() ServerConfig {
 	return ServerConfig{
-		Host:              "0.0.0.0",
-		Port:              8080,
-		ReadTimeout:       30,
-		WriteTimeout:      30,
-		MaxLogSize:        1024 * 1024, // 1MB
-		TaskTimeout:       3600,        // 1 hour
-		HeartbeatInterval: 30,
-		SilenceTimeout:    1800, // 30 minutes
-		MaxGuests:         0,    // unlimited
+		Host:                  "0.0.0.0",
+		Port:                  8080,
+		ReadTimeout:           30,
+		WriteTimeout:          30,
+		MaxLogSize:            1024 * 1024, // 1MB
+		TaskTimeout:           3600,        // 1 hour
+		HeartbeatInterval:     30,
+		SilenceTimeout:        1800, // 30 minutes
+		TaskAssignmentTimeout: 90,   // 3 heartbeats missed (3 * 30s)
+		MaxGuests:             0,    // unlimited
 	}
 }
 
