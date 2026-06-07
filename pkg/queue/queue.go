@@ -142,6 +142,9 @@ func (q *TaskQueue) UpdateStatus(taskID string, status TaskStatus) error {
 	}
 
 	task.Status = status
+	if status == TaskStatusPending {
+		task.AssignedTo = ""
+	}
 	q.logf("task %s status changed: %s -> %s", taskID, task.Status, status)
 	return nil
 }

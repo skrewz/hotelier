@@ -954,6 +954,13 @@ func (s *Server) tryAssignTask(guestID string) {
 
 	if err := s.hub.SendToGuest(guestID, "task.assign", taskData); err != nil {
 		s.log.Printf("failed to push task to guest %s: %v", guestID, err)
+		// Rollback: revert both the task assignment and the guest state
+		if err := s.taskQueue.UpdateStatus(matchedTask.ID, queue.TaskStatusPending); err != nil {
+			s.log.Printf("failed to revert task %s to PENDING: %v", matchedTask.ID, err)
+		}
+		if err := s.registry.ClearGuestTask(guestID); err != nil {
+			s.log.Printf("failed to clear guest %s task: %v", guestID, err)
+		}
 		return
 	}
 
@@ -1061,10 +1068,31 @@ func (s *Server) checkStuckTasks() {
 		s.log.Printf("task %s stuck on guest %s for > %v (guest never confirmed assignment), re-queuing",
 			guest.TaskID, guest.ID, timeout)
 
-		// Re-queue the task (transitions ASSIGNED → PENDING)
-		if err := s.taskQueue.UpdateStatus(guest.TaskID, queue.TaskStatusPending); err != nil {
-			s.log.Printf("failed to re-queue stuck task %s: %v", guest.TaskID, err)
+		// Re-queue the task — but only if it's still in ASSIGNED state.
+		// The task may have already been re-queued by another code path
+		// (e.g. handleGuestTaskDeclined) or reached a terminal state.
+		task, exists := s.taskQueue.Get(guest.TaskID)
+		if !exists {
+			s.log.Printf("task %s not found, clearing guest %s stale reference", guest.TaskID, guest.ID)
+			if err := s.registry.ClearGuestTask(guest.ID); err != nil {
+				s.log.Printf("failed to clear guest %s task: %v", guest.ID, err)
+			}
 			continue
+		}
+
+		switch task.Status {
+		case queue.TaskStatusAssigned:
+			// Task is still ASSIGNED — safe to re-queue
+			if err := s.taskQueue.UpdateStatus(guest.TaskID, queue.TaskStatusPending); err != nil {
+				s.log.Printf("failed to re-queue stuck task %s: %v", guest.TaskID, err)
+				continue
+			}
+		case queue.TaskStatusPending:
+			// Task already re-queued by another path — just clear guest reference
+			s.log.Printf("task %s already PENDING, clearing guest %s stale reference", guest.TaskID, guest.ID)
+		default:
+			// Task in terminal or other state — just clear guest reference
+			s.log.Printf("task %s in %s state, clearing guest %s stale reference", guest.TaskID, task.Status, guest.ID)
 		}
 
 		// Clear the guest's task assignment
@@ -1072,13 +1100,15 @@ func (s *Server) checkStuckTasks() {
 			s.log.Printf("failed to clear guest %s task: %v", guest.ID, err)
 		}
 
-		// Notify the UI
-		s.hub.Broadcast(rpc.ConnectionRoleBrowser, &rpc.JSONRPCMessage{
-			JSONRPC: "2.0",
-			Method:  "task.updated",
-			Params: json.RawMessage(fmt.Sprintf(`{"task_id":"%s","status":"pending"}`,
-				guest.TaskID)),
-		})
+		// Notify the UI (only if we actually re-queued)
+		if task.Status == queue.TaskStatusAssigned {
+			s.hub.Broadcast(rpc.ConnectionRoleBrowser, &rpc.JSONRPCMessage{
+				JSONRPC: "2.0",
+				Method:  "task.updated",
+				Params: json.RawMessage(fmt.Sprintf(`{"task_id":"%s","status":"pending"}`,
+					guest.TaskID)),
+			})
+		}
 
 		// Try to assign the re-queued task to another eligible guest
 		s.tryAssignTaskToEligible(guest.TaskID)

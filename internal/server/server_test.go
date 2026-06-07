@@ -1003,7 +1003,7 @@ func TestHandleGuestRegister_ConnectionMapping(t *testing.T) {
 	hub.Register(conn)
 	time.Sleep(10 * time.Millisecond)
 
-	// Now dispatch guest.register — this should record the mapping
+	// Now dispatch guest.register - this should record the mapping
 	params, _ := json.Marshal(map[string]interface{}{
 		"id":   "map-test-guest",
 		"name": "Map Test Guest",
@@ -1300,7 +1300,7 @@ func TestLogAccumulator_BatchesTextDeltas(t *testing.T) {
 	acc.Feed("task-2", "Hello ", "info", emit)
 	acc.Feed("task-2", "World", "info", emit)
 
-	// Nothing emitted yet — still buffering
+	// Nothing emitted yet - still buffering
 	if len(emitted) != 0 {
 		t.Fatalf("expected 0 emitted entries during buffer, got %d", len(emitted))
 	}
@@ -1356,7 +1356,7 @@ func TestLogAccumulator_MultiLineDeltasBatchesIntoOne(t *testing.T) {
 	// Simulate a PI handler sending a multi-line delta as one entry
 	acc.Feed("task-1", "| Word | Count\n|------|-------\n| agent | 29", "info", emit)
 
-	// Nothing emitted yet — still buffering
+	// Nothing emitted yet - still buffering
 	if len(emitted) != 0 {
 		t.Fatalf("expected 0 emitted entries during buffer, got %d", len(emitted))
 	}
@@ -1423,7 +1423,7 @@ func TestLogAccumulator_ToolMessagesWithoutLevel(t *testing.T) {
 	}
 
 	// Simulate the guest sending tool messages with empty level.
-	// These should NOT be batched — they must go through immediately.
+	// These should NOT be batched - they must go through immediately.
 	acc.Feed("task-1", "", "", emit) // empty line, should be ignored
 	acc.Feed("task-1", "[TOOL_START] read: /etc/passwd (id: t1)", "", emit)
 	acc.Feed("task-1", "[TOOL_OUTPUT] read (id: t1): file contents here", "", emit)
@@ -1508,7 +1508,7 @@ func TestLogAccumulator_ThinkingDeltasBatched(t *testing.T) {
 	acc.Feed("task-1", "Let me think ", "thinking", emit)
 	acc.Feed("task-1", "about this", "thinking", emit)
 
-	// Nothing emitted yet — still buffering
+	// Nothing emitted yet - still buffering
 	if len(emitted) != 0 {
 		t.Fatalf("expected 0 emitted entries during buffer, got %d", len(emitted))
 	}
@@ -1543,7 +1543,7 @@ func TestLogAccumulator_ThinkingTextLevelTransition(t *testing.T) {
 	acc.Feed("task-1", "Let me think ", "thinking", emit)
 	acc.Feed("task-1", "about this", "thinking", emit)
 
-	// Text delta arrives — should flush thinking buffer first
+	// Text delta arrives - should flush thinking buffer first
 	acc.Feed("task-1", "Here is my answer", "text", emit)
 
 	// Should have 1 entry: the flushed thinking block
@@ -1586,11 +1586,11 @@ func TestLogAccumulator_TextThinkingTextTransition(t *testing.T) {
 	acc.Feed("task-1", "First ", "text", emit)
 	acc.Feed("task-1", "sentence.", "text", emit)
 
-	// Thinking arrives — flushes text buffer
+	// Thinking arrives - flushes text buffer
 	acc.Feed("task-1", "Hmm, ", "thinking", emit)
 	acc.Feed("task-1", "let me reconsider.", "thinking", emit)
 
-	// Text arrives again — flushes thinking buffer
+	// Text arrives again - flushes thinking buffer
 	acc.Feed("task-1", "Actually, ", "text", emit)
 	acc.Feed("task-1", "here's my answer.", "text", emit)
 
@@ -1713,7 +1713,7 @@ func TestIntegration_TaskLogBroadcast(t *testing.T) {
 		t.Errorf("expected 'Hello **world**', got %q", logs[0].Line)
 	}
 
-	// First message: task.updated (RUNNING) — broadcast on first log entry
+	// First message: task.updated (RUNNING) - broadcast on first log entry
 	data, ok := conn.Recv()
 	if !ok {
 		t.Fatal("expected task.updated notification to be sent to the browser connection")
@@ -1803,14 +1803,14 @@ func TestCheckSilentGuests(t *testing.T) {
 		t.Fatalf("set guest task failed: %v", err)
 	}
 
-	// Don't send heartbeats — the guest will be stale
+	// Don't send heartbeats - the guest will be stale
 	// Wait for the task to be running
 	time.Sleep(100 * time.Millisecond)
 
 	// Manually advance the guest's LastHeartbeat to simulate silence
 	srv.Registry().SetLastHeartbeat("silent-guest", time.Now().Add(-3*time.Second))
 
-	// Run checkSilentGuests — it should kill the task
+	// Run checkSilentGuests - it should kill the task
 	srv.checkSilentGuests()
 
 	// Verify the task was marked as failed
@@ -2008,12 +2008,17 @@ func TestTryAssignTask_RejectsNonIdleGuest(t *testing.T) {
 
 func TestTryAssignTask_AssignsToIdleGuest(t *testing.T) {
 	srv := newTestServer(t)
+	hub := srv.Hub()
+	go hub.Run()
 
 	// Register a guest
-	_, err := srv.Registry().Register("test-guest", "test-guest", []string{"default"})
-	if err != nil {
-		t.Fatalf("register guest: %v", err)
-	}
+	srv.Registry().Register("test-guest", "test-guest", []string{"default"})
+
+	// Set up a connection and mapping (so SendToGuest succeeds)
+	conn := rpc.NewTestConnection("conn-test-guest", hub)
+	hub.Register(conn)
+	hub.RegisterGuestConnection("test-guest", "conn-test-guest")
+	time.Sleep(10 * time.Millisecond)
 
 	// Add a pending task
 	task := &queue.Task{
@@ -2021,9 +2026,7 @@ func TestTryAssignTask_AssignsToIdleGuest(t *testing.T) {
 		Prompt: "test task",
 		Tags:   []string{"default"},
 	}
-	if err := srv.TaskQueue().Add(task); err != nil {
-		t.Fatalf("add task: %v", err)
-	}
+	srv.TaskQueue().Add(task)
 
 	// Guest is idle — tryAssignTask should assign the task
 	srv.tryAssignTask("test-guest")
@@ -2037,7 +2040,7 @@ func TestTryAssignTask_AssignsToIdleGuest(t *testing.T) {
 		t.Errorf("expected task status ASSIGNED, got %s", qTask.Status)
 	}
 	if qTask.AssignedTo != "test-guest" {
-		t.Errorf("expected task assigned to 'test-guest', got %s", qTask.AssignedTo)
+		t.Errorf("expected assigned_to 'test-guest', got %s", qTask.AssignedTo)
 	}
 
 	// The guest should now be running
@@ -2050,6 +2053,19 @@ func TestTryAssignTask_AssignsToIdleGuest(t *testing.T) {
 	}
 	if regGuest.State != registry.GuestStateRunning {
 		t.Errorf("expected guest state RUNNING, got %s", regGuest.State)
+	}
+
+	// Verify the notification was sent
+	data, ok := conn.Recv()
+	if !ok {
+		t.Fatal("expected task.assign notification to be sent")
+	}
+	var msg rpc.JSONRPCMessage
+	if err := json.Unmarshal(data, &msg); err != nil {
+		t.Fatalf("failed to unmarshal sent message: %v", err)
+	}
+	if msg.Method != "task.assign" {
+		t.Errorf("expected method 'task.assign', got %s", msg.Method)
 	}
 }
 
@@ -2079,14 +2095,14 @@ func TestHandleGuestLog_ToolFieldsFromAccumulator(t *testing.T) {
 	var createdTask queue.Task
 	json.Unmarshal(w.Body.Bytes(), &createdTask)
 
-	// Send tool messages with EMPTY level — simulating the path where the
+	// Send tool messages with EMPTY level - simulating the path where the
 	// accumulator detects the [TOOL_*] prefix and sets level to "tool".
 	// The structured fields should still be populated from the line content.
 	toolLines := []map[string]interface{}{
 		{
 			"task_id": createdTask.ID,
 			"line":    "[TOOL_START] read_file: /etc/passwd (id: t1)",
-			"level":   "", // empty — accumulator will detect tool prefix
+			"level":   "", // empty - accumulator will detect tool prefix
 		},
 		{
 			"task_id": createdTask.ID,
@@ -2522,7 +2538,7 @@ func TestCheckStuckTasks_IgnoresHealthyGuests(t *testing.T) {
 		t.Fatal("expected LastTaskHeartbeat to be set after heartbeat")
 	}
 
-	// Wait briefly — less than the timeout so the guest is not detected as stuck.
+	// Wait briefly - less than the timeout so the guest is not detected as stuck.
 	// The heartbeat was recent, so the guest should pass the liveness check.
 	time.Sleep(500 * time.Millisecond)
 
@@ -2575,7 +2591,7 @@ func TestCheckStuckTasks_Disabled(t *testing.T) {
 	// Wait way past any reasonable timeout
 	time.Sleep(100 * time.Millisecond)
 
-	// Run checkStuckTasks — should be no-op
+	// Run checkStuckTasks - should be no-op
 	srv.checkStuckTasks()
 
 	// Verify task is still ASSIGNED
@@ -2585,5 +2601,265 @@ func TestCheckStuckTasks_Disabled(t *testing.T) {
 	}
 	if task.Status != queue.TaskStatusAssigned {
 		t.Errorf("expected task status ASSIGNED (detection disabled), got %s", task.Status)
+	}
+}
+
+// TestCheckStuckTasks_TaskAlreadyPending verifies that checkStuckTasks
+// handles the case where the task has already been re-queued to PENDING
+// by another code path (e.g. handleGuestTaskDeclined), but the guest
+// still has a stale TaskID. This should not produce an error - it should
+// just clear the guest's TaskID and move on.
+func TestCheckStuckTasks_TaskAlreadyPending(t *testing.T) {
+	srv := newTestServer(t)
+	srv.cfg.TaskAssignmentTimeout = 1 // 1 second timeout
+
+	// Add a task FIRST (with tags that won't match the guest)
+	taskBody, _ := json.Marshal(map[string]interface{}{
+		"prompt": "test task",
+		"tags":   []string{"android"}, // guest has tag1, so no match
+	})
+	req := httptest.NewRequest(http.MethodPost, "/api/tasks", bytes.NewReader(taskBody))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	srv.HandleTasks(w, req)
+
+	var createdTask queue.Task
+	json.Unmarshal(w.Body.Bytes(), &createdTask)
+	taskID := createdTask.ID
+
+	// Register a guest with different tags (tryAssignTask won't match the task)
+	srv.Registry().Register("guest-1", "Test Guest", []string{"tag1"})
+
+	// Task is already PENDING (another path re-queued it)
+	// but the guest still has a stale TaskID.
+	// We set it directly on the guest struct to avoid SetGuestTask
+	// triggering tryAssignTask (which would pick up the pending task).
+	guest, _ := srv.registry.GetGuest("guest-1")
+	guest.TaskID = taskID
+	guest.State = registry.GuestStateRunning
+
+	task, _ := srv.taskQueue.Get(taskID)
+	if task.Status != queue.TaskStatusPending {
+		t.Fatalf("expected task PENDING, got %s", task.Status)
+	}
+
+	// Wait for the timeout to expire
+	time.Sleep(1100 * time.Millisecond)
+
+	// Run checkStuckTasks - should NOT error on PENDING -> PENDING
+	srv.checkStuckTasks()
+
+	// Task should still be PENDING (no error)
+	task, ok := srv.taskQueue.Get(taskID)
+	if !ok {
+		t.Fatalf("task %s not found after checkStuckTasks", taskID)
+	}
+	if task.Status != queue.TaskStatusPending {
+		t.Errorf("expected task status PENDING, got %s", task.Status)
+	}
+
+	// Guest task should be cleared
+	guest, _ = srv.registry.GetGuest("guest-1")
+	if guest.TaskID != "" {
+		t.Errorf("expected guest task cleared, got %s", guest.TaskID)
+	}
+}
+
+// TestCheckStuckTasks_TaskInTerminalState verifies that checkStuckTasks
+// handles the case where the task has already reached a terminal state
+// (COMPLETED, FAILED, CANCELLED), but the guest still has a stale TaskID.
+func TestCheckStuckTasks_TaskInTerminalState(t *testing.T) {
+	for _, tc := range []struct {
+		name          string
+		terminalState func(t *testing.T, srv *Server, taskID string)
+	}{
+		{
+			name: "COMPLETED",
+			terminalState: func(t *testing.T, srv *Server, taskID string) {
+				t.Helper()
+				srv.TaskQueue().Assign(taskID, "guest-1")
+				srv.TaskQueue().Start(taskID)
+				srv.TaskQueue().Complete(taskID, "done")
+			},
+		},
+		{
+			name: "FAILED",
+			terminalState: func(t *testing.T, srv *Server, taskID string) {
+				t.Helper()
+				srv.TaskQueue().Assign(taskID, "guest-1")
+				srv.TaskQueue().Start(taskID)
+				srv.TaskQueue().Fail(taskID, "error")
+			},
+		},
+		{
+			name: "CANCELLED",
+			terminalState: func(t *testing.T, srv *Server, taskID string) {
+				t.Helper()
+				srv.TaskQueue().Cancel(taskID)
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := newTestServer(t)
+			srv.cfg.TaskAssignmentTimeout = 1
+
+			// Add task FIRST with tags that won't match the guest
+			taskBody, _ := json.Marshal(map[string]interface{}{
+				"prompt": "test task",
+				"tags":   []string{"android"}, // guest has tag1, so no match
+			})
+			req := httptest.NewRequest(http.MethodPost, "/api/tasks", bytes.NewReader(taskBody))
+			req.Header.Set("Content-Type", "application/json")
+			w := httptest.NewRecorder()
+			srv.HandleTasks(w, req)
+
+			var createdTask queue.Task
+			json.Unmarshal(w.Body.Bytes(), &createdTask)
+			taskID := createdTask.ID
+
+			// Register a guest with different tags (tryAssignTask won't match the task)
+			srv.Registry().Register("guest-1", "Test Guest", []string{"tag1"})
+
+			// Transition the task to a terminal state
+			tc.terminalState(t, srv, taskID)
+
+			// But the guest still has a stale TaskID.
+			// Set it directly to avoid SetGuestTask triggering tryAssignTask.
+			guest, _ := srv.registry.GetGuest("guest-1")
+			guest.TaskID = taskID
+			guest.State = registry.GuestStateRunning
+
+			time.Sleep(1100 * time.Millisecond)
+
+			srv.checkStuckTasks()
+
+			// Task should remain in terminal state
+			task, ok := srv.taskQueue.Get(taskID)
+			if !ok {
+				t.Fatalf("task %s not found", taskID)
+			}
+			if task.Status.String() != tc.name {
+				t.Errorf("expected task status %s, got %s", tc.name, task.Status)
+			}
+
+			// Guest task should be cleared
+			guest, _ = srv.registry.GetGuest("guest-1")
+			if guest.TaskID != "" {
+				t.Errorf("expected guest task cleared, got %s", guest.TaskID)
+			}
+		})
+	}
+}
+
+// TestTryAssignTask_SendToGuestFails_CleansUp verifies that when
+// tryAssignTask succeeds in assigning the task to the queue and registry
+// but fails to send the notification to the guest, it properly cleans up
+// both the task assignment and the guest's task reference.
+func TestTryAssignTask_SendToGuestFails_CleansUp(t *testing.T) {
+	srv := newTestServer(t)
+
+	// Register a guest WITHOUT setting up a connection mapping.
+	// This means SendToGuest will fail (no connection found).
+	srv.Registry().Register("guest-no-conn", "No Conn Guest", []string{"default"})
+
+	// Add a pending task
+	task := &queue.Task{
+		ID:     "task-send-fail",
+		Prompt: "test task",
+		Tags:   []string{"default"},
+	}
+	srv.TaskQueue().Add(task)
+
+	// Guest is idle - tryAssignTask will try to assign
+	srv.tryAssignTask("guest-no-conn")
+
+	// The task should be PENDING (re-queued after SendToGuest failure)
+	qTask, ok := srv.TaskQueue().Get("task-send-fail")
+	if !ok {
+		t.Fatal("task should still exist")
+	}
+	if qTask.Status != queue.TaskStatusPending {
+		t.Errorf("expected task status PENDING (SendToGuest failed, should revert), got %s", qTask.Status)
+	}
+	if qTask.AssignedTo != "" {
+		t.Errorf("expected assigned_to cleared, got %s", qTask.AssignedTo)
+	}
+
+	// The guest should be idle with no task
+	regGuest, ok := srv.Registry().GetGuest("guest-no-conn")
+	if !ok {
+		t.Fatal("guest should still exist")
+	}
+	if regGuest.State != registry.GuestStateIdle {
+		t.Errorf("expected guest state IDLE, got %s", regGuest.State)
+	}
+	if regGuest.TaskID != "" {
+		t.Errorf("expected guest task cleared, got %s", regGuest.TaskID)
+	}
+}
+
+// TestTryAssignTask_AssignsToIdleGuestWithConnection verifies that when
+// a guest has a valid connection mapping, tryAssignTask successfully
+// assigns the task and sends the notification.
+func TestTryAssignTask_AssignsToIdleGuestWithConnection(t *testing.T) {
+	srv := newTestServer(t)
+	hub := srv.Hub()
+	go hub.Run()
+
+	// Register a guest
+	srv.Registry().Register("guest-with-conn", "With Conn Guest", []string{"default"})
+
+	// Set up a connection and mapping (so SendToGuest succeeds)
+	conn := rpc.NewTestConnection("conn-with-guest", hub)
+	hub.Register(conn)
+	hub.RegisterGuestConnection("guest-with-conn", "conn-with-guest")
+	time.Sleep(10 * time.Millisecond)
+
+	// Add a pending task
+	task := &queue.Task{
+		ID:     "task-send-ok",
+		Prompt: "test task",
+		Tags:   []string{"default"},
+	}
+	srv.TaskQueue().Add(task)
+
+	// Guest is idle - tryAssignTask should assign and send
+	srv.tryAssignTask("guest-with-conn")
+
+	// The task should be ASSIGNED
+	qTask, ok := srv.TaskQueue().Get("task-send-ok")
+	if !ok {
+		t.Fatal("task should still exist")
+	}
+	if qTask.Status != queue.TaskStatusAssigned {
+		t.Errorf("expected task status ASSIGNED, got %s", qTask.Status)
+	}
+	if qTask.AssignedTo != "guest-with-conn" {
+		t.Errorf("expected assigned_to 'guest-with-conn', got %s", qTask.AssignedTo)
+	}
+
+	// The guest should be running with the task
+	regGuest, ok := srv.Registry().GetGuest("guest-with-conn")
+	if !ok {
+		t.Fatal("guest should still exist")
+	}
+	if regGuest.State != registry.GuestStateRunning {
+		t.Errorf("expected guest state RUNNING, got %s", regGuest.State)
+	}
+	if regGuest.TaskID != "task-send-ok" {
+		t.Errorf("expected guest task 'task-send-ok', got %s", regGuest.TaskID)
+	}
+
+	// Verify the notification was sent
+	data, ok := conn.Recv()
+	if !ok {
+		t.Fatal("expected task.assign notification to be sent")
+	}
+	var msg rpc.JSONRPCMessage
+	if err := json.Unmarshal(data, &msg); err != nil {
+		t.Fatalf("failed to unmarshal sent message: %v", err)
+	}
+	if msg.Method != "task.assign" {
+		t.Errorf("expected method 'task.assign', got %s", msg.Method)
 	}
 }
