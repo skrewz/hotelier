@@ -574,6 +574,21 @@ func (h *ClientHub) RegisterNotificationHandler(method string, handler func(meth
 	h.notificationHandlers[method] = handler
 }
 
+// InvokeNotificationHandler calls the registered handler for the given method
+// directly. Useful for testing notification handling without a live connection.
+// Returns false if no handler is registered for the method.
+func (h *ClientHub) InvokeNotificationHandler(method string, params json.RawMessage) bool {
+	h.mu.RLock()
+	handler, ok := h.notificationHandlers[method]
+	h.mu.RUnlock()
+
+	if !ok {
+		return false
+	}
+	handler(method, params)
+	return true
+}
+
 // NewClient creates a new JSON-RPC client.
 func NewClient(id string, hub *ClientHub, logf func(format string, args ...interface{})) *Client {
 	return &Client{

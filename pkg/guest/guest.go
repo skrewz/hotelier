@@ -186,6 +186,18 @@ func (g *Guest) Register() error {
 			g.log.Printf("[RPC] failed to parse task.assign params: %v", err)
 			return
 		}
+
+		// Deduplicate: if the guest is already running this exact task,
+		// ignore the duplicate assignment. This can happen when the guest
+		// reconnects and the server re-sends an assignment it already has.
+		g.mu.Lock()
+		if g.currentTaskID == task.TaskID {
+			g.mu.Unlock()
+			g.log.Printf("[RPC] ignoring duplicate task.assign for %s (already running)", task.TaskID)
+			return
+		}
+		g.mu.Unlock()
+
 		g.log.Printf("[RPC] dispatching task %s to execution", task.TaskID)
 		select {
 		case g.taskCh <- task:

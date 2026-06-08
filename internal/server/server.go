@@ -423,15 +423,21 @@ func (s *Server) handleGuestRegister(ctx context.Context, params json.RawMessage
 	guest, err := s.registry.Register(req.ID, req.Name, req.Tags)
 	if err != nil {
 		// Guest is already registered — update its connection and heartbeat.
-		// This handles the case where a guest crashes and reconnects with
-		// the same ephemeral ID, or a previous registration was missed.
+		// This handles the case where a guest reconnects after a network blip.
 		existing, exists := s.registry.GetGuest(req.ID)
 		if exists {
+			oldState := existing.State
 			existing.Name = req.Name
 			existing.Tags = req.Tags
 			existing.ConnectedAt = time.Now()
 			existing.LastHeartbeat = time.Now()
-			existing.State = registry.GuestStateIdle
+
+			// Preserve the guest's state. If the guest was RUNNING, it may
+			// still be executing a task on the client side. Resetting to IDLE
+			// would cause tryAssignTask to send a duplicate assignment.
+			// The guest will transition to IDLE naturally when it sends the
+			// task result via handleGuestResult.
+			// If the guest was IDLE, it stays IDLE and will get a task below.
 
 			// Update the connection mapping
 			if connID, ok := rpc.ConnectionIDFromContext(ctx); ok {
@@ -439,9 +445,10 @@ func (s *Server) handleGuestRegister(ctx context.Context, params json.RawMessage
 				s.hub.SetConnectionRole(connID, rpc.ConnectionRoleGuest)
 			}
 
-			s.log.Printf("guest re-registered: %s (tags: %v)", existing.ID, existing.Tags)
+			s.log.Printf("guest re-registered: %s (state: %s, tags: %v)", existing.ID, oldState, existing.Tags)
 
-			// Try to assign a pending task
+			// Try to assign a pending task — but only if the guest is idle.
+			// If it was RUNNING, tryAssignTask will skip it (checks State).
 			s.tryAssignTask(existing.ID)
 
 			return map[string]interface{}{

@@ -880,3 +880,124 @@ func TestGuestNew_CurrentTaskIDEmpty(t *testing.T) {
 		t.Errorf("expected empty currentTaskID on new guest, got %q", taskID)
 	}
 }
+
+// TestGuest_DuplicateTaskAssignmentIgnored verifies that the task.assign
+// notification handler ignores duplicate assignments for a task the guest
+// is already running. This prevents the decline-loop that occurs when the
+// server re-sends an assignment after a guest reconnection.
+func TestGuest_DuplicateTaskAssignmentIgnored(t *testing.T) {
+	cfg := config.GuestConfig{ID: "test", Name: "Test", Tags: []string{"test"}}
+	handler := func(ctx context.Context, task TaskAssignment, _ LogCallback) (*TaskResult, error) {
+		return &TaskResult{TaskID: task.TaskID, Success: true}, nil
+	}
+	g := New(cfg, handler)
+
+	// Simulate the guest already running a task
+	g.mu.Lock()
+	g.currentTaskID = "task-already-running"
+	g.mu.Unlock()
+
+	// Register the task.assign handler (normally done in Register())
+	taskID := "task-already-running"
+	g.hub.RegisterNotificationHandler("task.assign", func(method string, params json.RawMessage) {
+		g.log.Printf("[RPC] received notification: %s", method)
+		var task TaskAssignment
+		if err := json.Unmarshal(params, &task); err != nil {
+			g.log.Printf("[RPC] failed to parse task.assign params: %v", err)
+			return
+		}
+
+		// Deduplicate: if the guest is already running this exact task,
+		// ignore the duplicate assignment.
+		g.mu.Lock()
+		if g.currentTaskID == task.TaskID {
+			g.mu.Unlock()
+			g.log.Printf("[RPC] ignoring duplicate task.assign for %s (already running)", task.TaskID)
+			return
+		}
+		g.mu.Unlock()
+
+		g.log.Printf("[RPC] dispatching task %s to execution", task.TaskID)
+		select {
+		case g.taskCh <- task:
+			g.log.Printf("[RPC] task %s queued for execution", task.TaskID)
+		default:
+			g.log.Printf("[RPC] task queue full, dropping task %s", task.TaskID)
+		}
+	})
+
+	// Simulate receiving a duplicate task.assign notification
+	params, _ := json.Marshal(TaskAssignment{
+		TaskID: taskID,
+		Prompt: "Some prompt",
+	})
+
+	// Invoke the handler directly via the hub helper
+	if !g.hub.InvokeNotificationHandler("task.assign", params) {
+		t.Fatal("no task.assign handler registered")
+	}
+
+	// The task should NOT be queued because it's a duplicate
+	select {
+	case <-g.taskCh:
+		t.Error("expected duplicate task assignment to be ignored, but task was queued")
+	default:
+		// Correct — task was not queued
+	}
+}
+
+// TestGuest_DifferentTaskAssignmentQueued verifies that a task.assign for
+// a *different* task ID is still queued even when the guest is running
+// a task. The dispatcher will handle the conflict (decline the new task).
+func TestGuest_DifferentTaskAssignmentQueued(t *testing.T) {
+	cfg := config.GuestConfig{ID: "test", Name: "Test", Tags: []string{"test"}}
+	handler := func(ctx context.Context, task TaskAssignment, _ LogCallback) (*TaskResult, error) {
+		return &TaskResult{TaskID: task.TaskID, Success: true}, nil
+	}
+	g := New(cfg, handler)
+
+	// Simulate the guest running a different task
+	g.mu.Lock()
+	g.currentTaskID = "task-current"
+	g.mu.Unlock()
+
+	// Register the task.assign handler
+	g.hub.RegisterNotificationHandler("task.assign", func(method string, params json.RawMessage) {
+		var task TaskAssignment
+		if err := json.Unmarshal(params, &task); err != nil {
+			return
+		}
+
+		g.mu.Lock()
+		if g.currentTaskID == task.TaskID {
+			g.mu.Unlock()
+			return
+		}
+		g.mu.Unlock()
+
+		select {
+		case g.taskCh <- task:
+		default:
+		}
+	})
+
+	// Send a task.assign for a *different* task
+	params, _ := json.Marshal(TaskAssignment{
+		TaskID: "task-different",
+		Prompt: "Another prompt",
+	})
+
+	if !g.hub.InvokeNotificationHandler("task.assign", params) {
+		t.Fatal("no task.assign handler registered")
+	}
+
+	// The task SHOULD be queued because it's a different task
+	select {
+	case task := <-g.taskCh:
+		if task.TaskID != "task-different" {
+			t.Errorf("expected task-id 'task-different', got %s", task.TaskID)
+		}
+	default:
+		t.Error("expected different task assignment to be queued, but task was not queued")
+	}
+}

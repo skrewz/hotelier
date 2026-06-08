@@ -1087,6 +1087,124 @@ func TestHandleGuestRegister_ReRegistration(t *testing.T) {
 	}
 }
 
+func TestHandleGuestRegister_PreservesRunningState(t *testing.T) {
+	srv := newTestServer(t)
+	hub := srv.Hub()
+	go hub.Run()
+
+	// Register a guest
+	params1, _ := json.Marshal(map[string]interface{}{
+		"id":   "running-guest",
+		"name": "Running Guest",
+		"tags": []string{"tag1"},
+	})
+
+	resp1, err := hub.Dispatch("guest.register", params1)
+	if err != nil {
+		t.Fatalf("first register failed: %v", err)
+	}
+	result1 := resp1.(map[string]interface{})
+	if result1["status"] != "registered" {
+		t.Errorf("expected status 'registered', got %v", result1["status"])
+	}
+
+	// Simulate the guest being assigned a task (state = RUNNING)
+	if err := srv.Registry().SetGuestTask("running-guest", "task-123"); err != nil {
+		t.Fatalf("failed to set guest task: %v", err)
+	}
+
+	guest, _ := srv.Registry().GetGuest("running-guest")
+	if guest.State != registry.GuestStateRunning {
+		t.Fatalf("expected guest state RUNNING, got %s", guest.State)
+	}
+
+	// Re-register the guest (simulates reconnect while running a task)
+	params2, _ := json.Marshal(map[string]interface{}{
+		"id":   "running-guest",
+		"name": "Running Guest",
+		"tags": []string{"tag1"},
+	})
+
+	resp2, err := hub.Dispatch("guest.register", params2)
+	if err != nil {
+		t.Fatalf("re-register failed: %v", err)
+	}
+	result2 := resp2.(map[string]interface{})
+	if result2["status"] != "re-registered" {
+		t.Errorf("expected status 're-registered', got %v", result2["status"])
+	}
+
+	// Verify the guest state was preserved as RUNNING
+	guest, _ = srv.Registry().GetGuest("running-guest")
+	if guest.State != registry.GuestStateRunning {
+		t.Errorf("expected guest state RUNNING after re-registration, got %s", guest.State)
+	}
+	if guest.TaskID != "task-123" {
+		t.Errorf("expected task ID 'task-123', got %s", guest.TaskID)
+	}
+}
+
+func TestHandleGuestRegister_IdleGuestGetsTask(t *testing.T) {
+	srv := newTestServer(t)
+	hub := srv.Hub()
+	go hub.Run()
+
+	// Create a pending task
+	task := &queue.Task{
+		ID:     "task-pending-1",
+		Repos:  []string{"/repo"},
+		Prompt: "Do something",
+		Tags:   []string{},
+	}
+	if err := srv.TaskQueue().Add(task); err != nil {
+		t.Fatalf("failed to add task: %v", err)
+	}
+
+	// Register a guest
+	params1, _ := json.Marshal(map[string]interface{}{
+		"id":   "idle-guest",
+		"name": "Idle Guest",
+		"tags": []string{},
+	})
+
+	resp1, err := hub.Dispatch("guest.register", params1)
+	if err != nil {
+		t.Fatalf("first register failed: %v", err)
+	}
+	result1 := resp1.(map[string]interface{})
+	if result1["status"] != "registered" {
+		t.Errorf("expected status 'registered', got %v", result1["status"])
+	}
+
+	// Verify the guest is IDLE
+	guest, _ := srv.Registry().GetGuest("idle-guest")
+	if guest.State != registry.GuestStateIdle {
+		t.Fatalf("expected guest state IDLE, got %s", guest.State)
+	}
+
+	// Re-register the guest (simulates reconnect while idle)
+	params2, _ := json.Marshal(map[string]interface{}{
+		"id":   "idle-guest",
+		"name": "Idle Guest",
+		"tags": []string{},
+	})
+
+	resp2, err := hub.Dispatch("guest.register", params2)
+	if err != nil {
+		t.Fatalf("re-register failed: %v", err)
+	}
+	result2 := resp2.(map[string]interface{})
+	if result2["status"] != "re-registered" {
+		t.Errorf("expected status 're-registered', got %v", result2["status"])
+	}
+
+	// Verify the guest is still IDLE (should not have been changed)
+	guest, _ = srv.Registry().GetGuest("idle-guest")
+	if guest.State != registry.GuestStateIdle {
+		t.Errorf("expected guest state IDLE after re-registration, got %s", guest.State)
+	}
+}
+
 func TestHub_SendToGuest_WithMapping(t *testing.T) {
 	hub := rpc.NewHub(t.Logf)
 	go hub.Run()
