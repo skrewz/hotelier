@@ -202,6 +202,18 @@ func (c *Connection) Recv() ([]byte, bool) {
 	}
 }
 
+// Drain removes all pending messages from the send channel. Useful in tests
+// to clear stale notifications before asserting on specific messages.
+func (c *Connection) Drain() {
+	for {
+		select {
+		case <-c.send:
+		default:
+			return
+		}
+	}
+}
+
 // ID returns the connection's ID.
 func (c *Connection) ID() string {
 	return c.id

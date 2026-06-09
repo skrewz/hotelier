@@ -225,6 +225,14 @@ func (g *Guest) Register() error {
 			g.cancel = nil
 		}
 		g.mu.Unlock()
+
+		// Confirm cancellation to the server. The guest is the authority on
+		// whether the task was actually stopped.
+		_, _ = g.client.Call("guest.cancelled", map[string]interface{}{
+			"task_id":  cancel.TaskID,
+			"guest_id": g.id,
+			"reason":   cancel.Reason,
+		})
 	})
 
 	g.log.Printf("registered with tags: %v", g.tags)

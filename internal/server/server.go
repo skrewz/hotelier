@@ -398,6 +398,7 @@ func (s *Server) registerRPCMethods() {
 	s.hub.RegisterMethod("guest.log", s.handleGuestLog)
 	s.hub.RegisterMethod("guest.result", s.handleGuestResult)
 	s.hub.RegisterMethod("guest.task_declined", s.handleGuestTaskDeclined)
+	s.hub.RegisterMethod("guest.cancelled", s.handleGuestCancelled)
 
 	// Host → Guest methods (pushed by scheduler)
 	s.hub.RegisterMethod("task.assign", s.handleTaskAssign)
@@ -834,6 +835,53 @@ func (s *Server) handleGuestTaskDeclined(ctx context.Context, params json.RawMes
 	}, nil
 }
 
+// handleGuestCancelled is called by a guest after it has stopped a task
+// in response to a task.cancel signal. The guest is the authority on
+// whether the task was actually aborted.
+func (s *Server) handleGuestCancelled(ctx context.Context, params json.RawMessage) (interface{}, *rpc.RPCError) {
+	var req struct {
+		TaskID  string `json:"task_id"`
+		GuestID string `json:"guest_id"`
+		Reason  string `json:"reason,omitempty"`
+	}
+
+	if err := json.Unmarshal(params, &req); err != nil {
+		return nil, rpc.InvalidParamsError("invalid request parameters")
+	}
+
+	if req.TaskID == "" {
+		return nil, rpc.InvalidParamsError("task_id is required")
+	}
+
+	s.log.Printf("task %s cancelled by guest %s: %s", req.TaskID, req.GuestID, req.Reason)
+
+	// Update task status to CANCELLED (guest confirms the task was stopped)
+	if err := s.taskQueue.UpdateStatus(req.TaskID, queue.TaskStatusCancelled); err != nil {
+		s.log.Printf("failed to cancel task %s: %v", req.TaskID, err)
+		return nil, rpc.InternalError(err.Error())
+	}
+
+	// Clear the guest's task assignment in the registry
+	if err := s.registry.ClearGuestTask(req.GuestID); err != nil {
+		s.log.Printf("failed to clear guest task for %s: %v", req.GuestID, err)
+	}
+
+	// Flush any remaining accumulated logs for this task
+	s.logAccumulator.FlushAll(func(e TaskLogEntry) {
+		s.logStore.Add(e)
+	})
+
+	// Notify UI of task cancellation
+	s.hub.SendNotification("", rpc.ConnectionRoleBrowser, "task.updated", map[string]interface{}{
+		"task_id": req.TaskID,
+		"status":  "CANCELLED",
+	})
+
+	return map[string]interface{}{
+		"status": "accepted",
+	}, nil
+}
+
 // handleTaskAssign is registered for host→guest task.assign (for completeness).
 func (s *Server) handleTaskAssign(ctx context.Context, params json.RawMessage) (interface{}, *rpc.RPCError) {
 	return map[string]interface{}{
@@ -1254,6 +1302,13 @@ func (s *Server) HandleTaskDetail(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Check for cancel sub-path: /api/tasks/:id/cancel
+	if strings.HasSuffix(path, "/cancel") {
+		taskID := strings.TrimSuffix(path, "/cancel")
+		s.handleTaskCancelHTTP(w, r, taskID)
+		return
+	}
+
 	taskID := path
 	if taskID == "" {
 		http.Error(w, "task id required", http.StatusBadRequest)
@@ -1318,6 +1373,77 @@ func (s *Server) handleTaskRerun(w http.ResponseWriter, r *http.Request, taskID 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusCreated)
 	json.NewEncoder(w).Encode(newTask)
+}
+
+// handleTaskCancelHTTP handles the /api/tasks/:id/cancel endpoint.
+// POST /api/tasks/:id/cancel — cancels a task that is PENDING or ASSIGNED.
+// For RUNNING tasks, sends a cancel signal to the guest (guest confirms cancellation).
+func (s *Server) handleTaskCancelHTTP(w http.ResponseWriter, r *http.Request, taskID string) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	if taskID == "" {
+		http.Error(w, "task id required", http.StatusBadRequest)
+		return
+	}
+
+	task, exists := s.taskQueue.Get(taskID)
+	if !exists {
+		http.Error(w, "task not found", http.StatusNotFound)
+		return
+	}
+
+	// Terminal states cannot be cancelled
+	switch task.Status {
+	case queue.TaskStatusCompleted, queue.TaskStatusFailed, queue.TaskStatusCancelled:
+		http.Error(w, fmt.Sprintf("task already %s", task.Status), http.StatusConflict)
+		return
+	}
+
+	switch task.Status {
+	case queue.TaskStatusPending, queue.TaskStatusAssigned:
+		// Cancel directly — no guest needs to be notified
+		if err := s.taskQueue.Cancel(taskID); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+
+		// Clear guest task reference if assigned
+		if task.AssignedTo != "" {
+			_ = s.registry.ClearGuestTask(task.AssignedTo)
+		}
+
+	case queue.TaskStatusRunning:
+		// Send cancel signal to the guest — guest will confirm cancellation
+		if task.AssignedTo == "" {
+			http.Error(w, "task has no assigned guest", http.StatusBadRequest)
+			return
+		}
+
+		if err := s.hub.SendToGuest(task.AssignedTo, "task.cancel", map[string]interface{}{
+			"task_id": taskID,
+			"reason":  "user requested cancellation",
+		}); err != nil {
+			s.log.Printf("failed to send task.cancel to guest %s: %v", task.AssignedTo, err)
+			http.Error(w, fmt.Sprintf("failed to notify guest: %v", err), http.StatusServiceUnavailable)
+			return
+		}
+	}
+
+	// Broadcast task.updated to browsers
+	task, _ = s.taskQueue.Get(taskID)
+	s.hub.SendNotification("", rpc.ConnectionRoleBrowser, "task.updated", map[string]interface{}{
+		"task_id": task.ID,
+		"status":  task.Status.String(),
+	})
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"task_id": task.ID,
+		"status":  task.Status.String(),
+	})
 }
 
 // handleGuests handles the /api/guests endpoint.

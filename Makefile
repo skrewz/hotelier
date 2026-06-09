@@ -70,41 +70,11 @@ image: ## Build the hotelier container image
 
 docs/screenshot-candidate.png: bin/hotelier
 	@echo "Starting hotelier server..."
-	@./bin/hotelier &
-	@sleep 2
-	@node -e "
-	const WebSocket = require('ws');
-	const guests = [
-	  { id: 'guest-alpha', name: 'Dev Guest Alpha', tags: ['business-default', 'frontend'] },
-	  { id: 'guest-beta', name: 'Dev Guest Beta', tags: ['business-default', 'backend'] },
-	];
-	const connections = [];
-	for (const g of guests) {
-	  const ws = new WebSocket('ws://localhost:8080/ws');
-	  ws.on('open', () => {
-	    ws.send(JSON.stringify({
-	      jsonrpc: '2.0', method: 'guest.register',
-	      params: { id: g.id, name: g.name, tags: g.tags }, id: 1
-	    }));
-	  });
-	  ws.on('message', () => {});
-	  ws.on('error', () => {});
-	  connections.push(ws);
-	}
-	setTimeout(async () => {
-	  const { chromium } = require('playwright');
-	  const browser = await chromium.launch({ headless: true });
-	  const page = await browser.newPage({ viewport: { width: 1280, height: 900 } });
-	  await page.goto('http://localhost:8080/');
-	  await page.waitForLoadState('networkidle');
-	  await page.waitForTimeout(1500);
-	  await page.screenshot({ path: 'docs/screenshot-candidate.png' });
-	  await browser.close();
-	  connections.forEach(c => c.close());
-	  console.log('Screenshot saved to docs/screenshot-candidate.png');
-	  process.exit(0);
-	}, 2000);
-	"
-	@pkill -f 'bin/hotelier' 2>/dev/null || true
+	@./bin/hotelier > /tmp/hotelier-screenshot.log 2>&1 & \
+		SERVER_PID=$$; \
+		sleep 2; \
+		node scripts/screenshot.cjs docs/screenshot-candidate.png; \
+		kill $$SERVER_PID 2>/dev/null || true; \
+		wait $$SERVER_PID 2>/dev/null || true
 
 

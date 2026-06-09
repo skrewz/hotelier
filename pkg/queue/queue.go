@@ -376,7 +376,7 @@ func (q *TaskQueue) validTransition(from, to TaskStatus) bool {
 	validTransitions := map[TaskStatus][]TaskStatus{
 		TaskStatusPending:   {TaskStatusAssigned, TaskStatusCancelled},
 		TaskStatusAssigned:  {TaskStatusRunning, TaskStatusCancelled, TaskStatusPending},
-		TaskStatusRunning:   {TaskStatusCompleted, TaskStatusFailed, TaskStatusPending},
+		TaskStatusRunning:   {TaskStatusCompleted, TaskStatusFailed, TaskStatusCancelled, TaskStatusPending},
 		TaskStatusCompleted: {},
 		TaskStatusFailed:    {},
 		TaskStatusCancelled: {},

@@ -2916,6 +2916,310 @@ func TestTryAssignTask_SendToGuestFails_CleansUp(t *testing.T) {
 	}
 }
 
+// TestHandleCancelTask_Pending verifies that cancelling a PENDING task
+// transitions it to CANCELLED and broadcasts task.updated.
+func TestHandleCancelTask_Pending(t *testing.T) {
+	srv := newTestServer(t)
+
+	// Create a task
+	taskBody, _ := json.Marshal(map[string]interface{}{
+		"id":     "cancel-test-pending",
+		"prompt": "test task",
+	})
+	req := httptest.NewRequest(http.MethodPost, "/api/tasks", bytes.NewReader(taskBody))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	srv.HandleTasks(w, req)
+
+	var createdTask queue.Task
+	json.Unmarshal(w.Body.Bytes(), &createdTask)
+	taskID := createdTask.ID
+
+	// Cancel the task
+	cancelReq := httptest.NewRequest(http.MethodPost, "/api/tasks/"+taskID+"/cancel", nil)
+	cancelW := httptest.NewRecorder()
+	srv.HandleTaskDetail(cancelW, cancelReq)
+
+	if cancelW.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", cancelW.Code)
+	}
+
+	// Verify task is now CANCELLED
+	task, ok := srv.TaskQueue().Get(taskID)
+	if !ok {
+		t.Fatal("task should still exist")
+	}
+	if task.Status != queue.TaskStatusCancelled {
+		t.Errorf("expected CANCELLED, got %s", task.Status)
+	}
+}
+
+// TestHandleCancelTask_Assigned verifies that cancelling an ASSIGNED task
+// transitions it to CANCELLED and broadcasts task.updated.
+func TestHandleCancelTask_Assigned(t *testing.T) {
+	srv := newTestServer(t)
+
+	// Create and assign a task
+	taskBody, _ := json.Marshal(map[string]interface{}{
+		"id":     "cancel-test-assigned",
+		"prompt": "test task",
+	})
+	req := httptest.NewRequest(http.MethodPost, "/api/tasks", bytes.NewReader(taskBody))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	srv.HandleTasks(w, req)
+
+	var createdTask queue.Task
+	json.Unmarshal(w.Body.Bytes(), &createdTask)
+	taskID := createdTask.ID
+
+	// Assign the task
+	srv.TaskQueue().Assign(taskID, "guest-1")
+
+	// Cancel the task
+	cancelReq := httptest.NewRequest(http.MethodPost, "/api/tasks/"+taskID+"/cancel", nil)
+	cancelW := httptest.NewRecorder()
+	srv.HandleTaskDetail(cancelW, cancelReq)
+
+	if cancelW.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", cancelW.Code)
+	}
+
+	// Verify task is now CANCELLED
+	task, ok := srv.TaskQueue().Get(taskID)
+	if !ok {
+		t.Fatal("task should still exist")
+	}
+	if task.Status != queue.TaskStatusCancelled {
+		t.Errorf("expected CANCELLED, got %s", task.Status)
+	}
+}
+
+// TestHandleCancelTask_Running verifies that cancelling a RUNNING task
+// sends a cancel signal to the guest (which will confirm cancellation).
+func TestHandleCancelTask_Running(t *testing.T) {
+	srv := newTestServer(t)
+	hub := srv.Hub()
+	go hub.Run()
+
+	// Register a guest and set up connection
+	srv.Registry().Register("guest-1", "Test Guest", []string{"default"})
+	conn := rpc.NewTestConnection("conn-guest-1", hub)
+	hub.Register(conn)
+	hub.RegisterGuestConnection("guest-1", "conn-guest-1")
+	time.Sleep(10 * time.Millisecond)
+
+	// Create, assign, and start a task
+	taskBody, _ := json.Marshal(map[string]interface{}{
+		"id":     "cancel-test-running",
+		"prompt": "test task",
+	})
+	req := httptest.NewRequest(http.MethodPost, "/api/tasks", bytes.NewReader(taskBody))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	srv.HandleTasks(w, req)
+
+	var createdTask queue.Task
+	json.Unmarshal(w.Body.Bytes(), &createdTask)
+	taskID := createdTask.ID
+
+	srv.TaskQueue().Assign(taskID, "guest-1")
+	srv.TaskQueue().Start(taskID)
+
+	// Drain stale notifications before cancel
+	conn.Drain()
+
+	// Cancel the task
+	cancelReq := httptest.NewRequest(http.MethodPost, "/api/tasks/"+taskID+"/cancel", nil)
+	cancelW := httptest.NewRecorder()
+	srv.HandleTaskDetail(cancelW, cancelReq)
+
+	if cancelW.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d body: %s", cancelW.Code, cancelW.Body.String())
+	}
+
+	// Give a moment for the message to arrive
+	time.Sleep(50 * time.Millisecond)
+
+	// Verify a cancel signal was sent to the guest
+	data, ok := conn.Recv()
+	if !ok {
+		t.Fatal("expected cancel signal to be sent to guest")
+	}
+	var msg rpc.JSONRPCMessage
+	if err := json.Unmarshal(data, &msg); err != nil {
+		t.Fatalf("failed to unmarshal cancel signal: %v", err)
+	}
+	if msg.Method != "task.cancel" {
+		t.Errorf("expected method 'task.cancel', got %s", msg.Method)
+	}
+
+	// Verify cancel params contain task_id
+	var cancelParams map[string]interface{}
+	if err := json.Unmarshal(msg.Params, &cancelParams); err != nil {
+		t.Fatalf("failed to unmarshal cancel params: %v", err)
+	}
+	if cancelParams["task_id"] != taskID {
+		t.Errorf("expected task_id %s, got %v", taskID, cancelParams["task_id"])
+	}
+
+	// Task should still be RUNNING (guest hasn't confirmed yet)
+	task, ok := srv.TaskQueue().Get(taskID)
+	if !ok {
+		t.Fatal("task should still exist")
+	}
+	if task.Status != queue.TaskStatusRunning {
+		t.Errorf("expected RUNNING (pending guest confirmation), got %s", task.Status)
+	}
+}
+
+// TestHandleCancelTask_Completed returns 409 when trying to cancel a terminal task.
+func TestHandleCancelTask_Completed(t *testing.T) {
+	srv := newTestServer(t)
+
+	// Create, assign, start, and complete a task
+	taskBody, _ := json.Marshal(map[string]interface{}{
+		"id":     "cancel-test-completed",
+		"prompt": "test task",
+	})
+	req := httptest.NewRequest(http.MethodPost, "/api/tasks", bytes.NewReader(taskBody))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	srv.HandleTasks(w, req)
+
+	var createdTask queue.Task
+	json.Unmarshal(w.Body.Bytes(), &createdTask)
+	taskID := createdTask.ID
+
+	srv.TaskQueue().Assign(taskID, "guest-1")
+	srv.TaskQueue().Start(taskID)
+	srv.TaskQueue().Complete(taskID, "done")
+
+	// Try to cancel
+	cancelReq := httptest.NewRequest(http.MethodPost, "/api/tasks/"+taskID+"/cancel", nil)
+	cancelW := httptest.NewRecorder()
+	srv.HandleTaskDetail(cancelW, cancelReq)
+
+	if cancelW.Code != http.StatusConflict {
+		t.Errorf("expected 409, got %d", cancelW.Code)
+	}
+}
+
+// TestHandleCancelTask_NotFound returns 404 when the task does not exist.
+func TestHandleCancelTask_NotFound(t *testing.T) {
+	srv := newTestServer(t)
+
+	cancelReq := httptest.NewRequest(http.MethodPost, "/api/tasks/nonexistent/cancel", nil)
+	cancelW := httptest.NewRecorder()
+	srv.HandleTaskDetail(cancelW, cancelReq)
+
+	if cancelW.Code != http.StatusNotFound {
+		t.Errorf("expected 404, got %d", cancelW.Code)
+	}
+}
+
+// TestHandleCancelTask_EmptyID returns 400 when the task ID is empty.
+func TestHandleCancelTask_EmptyID(t *testing.T) {
+	srv := newTestServer(t)
+
+	cancelReq := httptest.NewRequest(http.MethodPost, "/api/tasks//cancel", nil)
+	cancelW := httptest.NewRecorder()
+	srv.HandleTaskDetail(cancelW, cancelReq)
+
+	if cancelW.Code != http.StatusBadRequest {
+		t.Errorf("expected 400, got %d", cancelW.Code)
+	}
+}
+
+// TestHandleCancelTask_MethodNotAllowed returns 405 for non-POST methods.
+func TestHandleCancelTask_MethodNotAllowed(t *testing.T) {
+	srv := newTestServer(t)
+
+	// Create a task
+	taskBody, _ := json.Marshal(map[string]interface{}{
+		"id":     "cancel-test-method",
+		"prompt": "test task",
+	})
+	req := httptest.NewRequest(http.MethodPost, "/api/tasks", bytes.NewReader(taskBody))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	srv.HandleTasks(w, req)
+
+	var createdTask queue.Task
+	json.Unmarshal(w.Body.Bytes(), &createdTask)
+	taskID := createdTask.ID
+
+	// GET should not trigger cancel
+	getReq := httptest.NewRequest(http.MethodGet, "/api/tasks/"+taskID+"/cancel", nil)
+	getW := httptest.NewRecorder()
+	srv.HandleTaskDetail(getW, getReq)
+
+	if getW.Code != http.StatusMethodNotAllowed {
+		t.Errorf("expected 405 for GET on cancel path, got %d", getW.Code)
+	}
+}
+
+// TestHandleGuestCancelled verifies that when a guest confirms cancellation
+// after receiving a task.cancel signal, the server updates the task status
+// to CANCELLED and broadcasts task.updated.
+func TestHandleGuestCancelled(t *testing.T) {
+	srv := newTestServer(t)
+	hub := srv.Hub()
+	go hub.Run()
+
+	// Register a guest
+	srv.Registry().Register("guest-1", "Test Guest", []string{"default"})
+
+	// Create, assign, and start a task
+	taskBody, _ := json.Marshal(map[string]interface{}{
+		"id":     "cancel-guest-confirm",
+		"prompt": "test task",
+	})
+	req := httptest.NewRequest(http.MethodPost, "/api/tasks", bytes.NewReader(taskBody))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	srv.HandleTasks(w, req)
+
+	var createdTask queue.Task
+	json.Unmarshal(w.Body.Bytes(), &createdTask)
+	taskID := createdTask.ID
+
+	srv.TaskQueue().Assign(taskID, "guest-1")
+	srv.TaskQueue().Start(taskID)
+	srv.Registry().SetGuestTask("guest-1", taskID)
+
+	// Guest confirms cancellation
+	params, _ := json.Marshal(map[string]interface{}{
+		"task_id":  taskID,
+		"guest_id": "guest-1",
+		"reason":   "user requested cancellation",
+	})
+	result, rpcErr := srv.handleGuestCancelled(nil, params)
+	if rpcErr != nil {
+		t.Fatalf("expected no error, got %v", rpcErr)
+	}
+
+	resp := result.(map[string]interface{})
+	if resp["status"] != "accepted" {
+		t.Errorf("expected status 'accepted', got %v", resp["status"])
+	}
+
+	// Verify task is now CANCELLED
+	task, ok := srv.TaskQueue().Get(taskID)
+	if !ok {
+		t.Fatal("task should still exist")
+	}
+	if task.Status != queue.TaskStatusCancelled {
+		t.Errorf("expected CANCELLED, got %s", task.Status)
+	}
+
+	// Verify guest task was cleared
+	guest, _ := srv.Registry().GetGuest("guest-1")
+	if guest.TaskID != "" {
+		t.Errorf("expected guest task cleared, got %s", guest.TaskID)
+	}
+}
+
 // TestTryAssignTask_AssignsToIdleGuestWithConnection verifies that when
 // a guest has a valid connection mapping, tryAssignTask successfully
 // assigns the task and sends the notification.

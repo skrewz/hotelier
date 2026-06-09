@@ -297,9 +297,20 @@ func TestCancelRunningTask(t *testing.T) {
 	q.Assign("task-1", "guest-1")
 	q.Start("task-1")
 
+	// Cancel() only allows PENDING/ASSIGNED → CANCELLED.
+	// RUNNING tasks must use UpdateStatus (guest confirms cancellation).
 	err := q.Cancel("task-1")
 	if err == nil {
-		t.Error("expected error for cancelling running task, got nil")
+		t.Error("expected error for cancelling running task via Cancel(), got nil")
+	}
+
+	// But UpdateStatus allows RUNNING → CANCELLED (guest confirmation path)
+	err = q.UpdateStatus("task-1", TaskStatusCancelled)
+	if err != nil {
+		t.Fatalf("UpdateStatus RUNNING→CANCELLED should succeed: %v", err)
+	}
+	if task.Status != TaskStatusCancelled {
+		t.Errorf("expected CANCELLED, got %s", task.Status)
 	}
 }
 
