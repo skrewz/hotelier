@@ -1873,13 +1873,14 @@ func TestIntegration_TaskLogBroadcast(t *testing.T) {
 }
 
 // TestCheckSilentGuests verifies that checkSilentGuests kills tasks for
-// guests that have been silent for longer than the configured SilenceTimeout.
+// guests that have been silent for longer than the configured TaskSilenceTimeout.
 func TestCheckSilentGuests(t *testing.T) {
 	cfg := config.ServerConfig{
-		Host:              "127.0.0.1",
-		Port:              0,
-		HeartbeatInterval: 1, // 1 second for fast test
-		SilenceTimeout:    2, // 2 seconds
+		Host:               "127.0.0.1",
+		Port:               0,
+		HeartbeatInterval:  1, // 1 second for fast test
+		SilenceTimeout:     2, // 2 seconds
+		TaskSilenceTimeout: 2, // 2 seconds for running tasks
 	}
 	srv := New(cfg)
 
@@ -3270,5 +3271,142 @@ func TestTryAssignTask_AssignsToIdleGuestWithConnection(t *testing.T) {
 	}
 	if msg.Method != "task.assign" {
 		t.Errorf("expected method 'task.assign', got %s", msg.Method)
+	}
+}
+
+// TestHandleGuestDisconnect verifies that when a guest's WebSocket
+// connection is lost, the server immediately fails the guest's running task.
+func TestHandleGuestDisconnect(t *testing.T) {
+	srv := newTestServer(t)
+	hub := srv.Hub()
+	go hub.Run()
+
+	// Register a guest with a connection
+	guestConn := rpc.NewTestConnection("guest-conn-1", hub)
+	hub.Register(guestConn)
+	hub.SetConnectionRole("guest-conn-1", rpc.ConnectionRoleGuest)
+
+	params, _ := json.Marshal(map[string]interface{}{
+		"id":   "disconnect-guest",
+		"name": "Disconnect Guest",
+		"tags": []string{"tag1"},
+	})
+	resp, err := hub.Dispatch("guest.register", params)
+	if err != nil {
+		t.Fatalf("register failed: %v", err)
+	}
+	result := resp.(map[string]interface{})
+	if result["status"] != "registered" {
+		t.Fatalf("expected status 'registered', got %v", result["status"])
+	}
+
+	// Dispatch doesn't set connection context, so register mapping manually
+	hub.RegisterGuestConnection("disconnect-guest", "guest-conn-1")
+
+	// Create and assign a task
+	task := &queue.Task{
+		ID:     "task-disconnect",
+		Prompt: "test disconnect",
+		Tags:   []string{"tag1"},
+	}
+	if err := srv.TaskQueue().Add(task); err != nil {
+		t.Fatalf("failed to add task: %v", err)
+	}
+	if err := srv.TaskQueue().Assign("task-disconnect", "disconnect-guest"); err != nil {
+		t.Fatalf("failed to assign task: %v", err)
+	}
+	if err := srv.Registry().SetGuestTask("disconnect-guest", "task-disconnect"); err != nil {
+		t.Fatalf("failed to set guest task: %v", err)
+	}
+
+	// Verify task is ASSIGNED and guest is RUNNING
+	task, _ = srv.TaskQueue().Get("task-disconnect")
+	if task.Status != queue.TaskStatusAssigned {
+		t.Fatalf("expected task ASSIGNED, got %s", task.Status)
+	}
+	guest, _ := srv.Registry().GetGuest("disconnect-guest")
+	if guest.State != registry.GuestStateRunning {
+		t.Fatalf("expected guest RUNNING, got %s", guest.State)
+	}
+
+	// Simulate connection disconnect
+	srv.handleGuestDisconnect("guest-conn-1")
+
+	// Task should be FAILED
+	task, _ = srv.TaskQueue().Get("task-disconnect")
+	if task.Status != queue.TaskStatusFailed {
+		t.Errorf("expected task FAILED after disconnect, got %s", task.Status)
+	}
+
+	// Guest should be cleared
+	guest, _ = srv.Registry().GetGuest("disconnect-guest")
+	if guest.State != registry.GuestStateIdle {
+		t.Errorf("expected guest IDLE after disconnect, got %s", guest.State)
+	}
+	if guest.TaskID != "" {
+		t.Errorf("expected guest TaskID cleared, got %s", guest.TaskID)
+	}
+}
+
+// TestHandleGuestDisconnect_BrowserConnection verifies that disconnecting
+// a browser connection does not affect guest tasks.
+func TestHandleGuestDisconnect_BrowserConnection(t *testing.T) {
+	srv := newTestServer(t)
+	hub := srv.Hub()
+	go hub.Run()
+
+	// Register a browser connection (not a guest)
+	browserConn := rpc.NewTestConnection("browser-conn-1", hub)
+	hub.Register(browserConn)
+	hub.SetConnectionRole("browser-conn-1", rpc.ConnectionRoleBrowser)
+
+	// Disconnect the browser — should be a no-op
+	srv.handleGuestDisconnect("browser-conn-1")
+
+	// No guests or tasks should be affected
+	if srv.Registry().Count() != 0 {
+		t.Errorf("expected 0 guests, got %d", srv.Registry().Count())
+	}
+}
+
+// TestHandleGuestDisconnect_NoTask verifies that disconnecting a guest
+// with no running task is a no-op.
+func TestHandleGuestDisconnect_NoTask(t *testing.T) {
+	srv := newTestServer(t)
+	hub := srv.Hub()
+	go hub.Run()
+
+	// Register a guest with a connection
+	guestConn := rpc.NewTestConnection("guest-conn-1", hub)
+	hub.Register(guestConn)
+	hub.SetConnectionRole("guest-conn-1", rpc.ConnectionRoleGuest)
+
+	params, _ := json.Marshal(map[string]interface{}{
+		"id":   "idle-guest",
+		"name": "Idle Guest",
+		"tags": []string{"tag1"},
+	})
+	resp, err := hub.Dispatch("guest.register", params)
+	if err != nil {
+		t.Fatalf("register failed: %v", err)
+	}
+	result := resp.(map[string]interface{})
+	if result["status"] != "registered" {
+		t.Fatalf("expected status 'registered', got %v", result["status"])
+	}
+
+	// Dispatch doesn't set connection context, so register mapping manually
+	hub.RegisterGuestConnection("idle-guest", "guest-conn-1")
+
+	// Disconnect the idle guest — should be a no-op
+	srv.handleGuestDisconnect("guest-conn-1")
+
+	// Guest should still exist and be IDLE
+	guest, ok := srv.Registry().GetGuest("idle-guest")
+	if !ok {
+		t.Fatal("expected guest to still exist")
+	}
+	if guest.State != registry.GuestStateIdle {
+		t.Errorf("expected guest IDLE, got %s", guest.State)
 	}
 }

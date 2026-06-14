@@ -275,6 +275,9 @@ func (s *Server) Reload(cfg config.ServerConfig) {
 	if cfg.SilenceTimeout != old.SilenceTimeout {
 		s.log.Printf("silence_timeout updated: %ds", cfg.SilenceTimeout)
 	}
+	if cfg.TaskSilenceTimeout != old.TaskSilenceTimeout {
+		s.log.Printf("task_silence_timeout updated: %ds", cfg.TaskSilenceTimeout)
+	}
 	if cfg.MaxLogSize != old.MaxLogSize {
 		s.log.Printf("max_log_size updated: %d bytes", cfg.MaxLogSize)
 	}
@@ -322,6 +325,9 @@ func (s *Server) Start() error {
 
 	// Start the hub in the background
 	go s.hub.Run()
+
+	// Handle guest disconnection: immediately fail the guest's task.
+	s.hub.SetOnDisconnect(s.handleGuestDisconnect)
 
 	// Start stale guest cleanup
 	go s.staleGuestCleanup()
@@ -903,6 +909,49 @@ func (s *Server) handleTaskCancel(ctx context.Context, params json.RawMessage) (
 	}, nil
 }
 
+// handleGuestDisconnect is called when a WebSocket connection is lost.
+// It immediately fails any running task for the guest associated with
+// the connection, preventing orphaned tasks.
+func (s *Server) handleGuestDisconnect(connectionID string) {
+	guestID, err := s.hub.GuestIDFromConnection(connectionID)
+	if err != nil || guestID == "" {
+		return // Browser connection, not a guest
+	}
+
+	// Check if the guest has a running task
+	guest, ok := s.orchestrator.GetGuest(guestID)
+	if !ok || guest.TaskID == "" {
+		return // No task to clean up
+	}
+
+	task, ok := s.orchestrator.GetTask(guest.TaskID)
+	if !ok || task.Status == queue.TaskStatusPending || task.Status == queue.TaskStatusCompleted ||
+		task.Status == queue.TaskStatusFailed || task.Status == queue.TaskStatusCancelled {
+		return // Task not active or already handled
+	}
+
+	s.log.Printf("connection lost for guest %s: failing task %s (%s)",
+		guestID, guest.TaskID, task.Status)
+
+	// Fail the task atomically
+	if err := s.orchestrator.FailTask(guest.TaskID, guestID, "connection lost"); err != nil {
+		s.log.Printf("failed to fail task %s on disconnect: %v", guest.TaskID, err)
+	}
+
+	// Notify UI
+	s.broadcastTaskUpdated(guest.TaskID, "FAILED")
+}
+
+// tryAssignPendingTasks iterates idle guests and tries to assign pending
+// tasks to them. Used after stale guest removal to fill the gap.
+func (s *Server) tryAssignPendingTasks() {
+	for _, guest := range s.orchestrator.GetAllGuests() {
+		if guest.State == registry.GuestStateIdle {
+			s.tryAssignTask(guest.ID)
+		}
+	}
+}
+
 // tryAssignTaskToEligible finds an idle guest that matches the given task's
 // tags and assigns the task to that guest. It is used when a previously-
 // assigned guest declines the task.
@@ -1035,21 +1084,27 @@ func (s *Server) staleGuestCleanup() {
 			s.checkSilentGuests()
 
 			// Then: Remove guests that have been completely silent (no heartbeat).
-			stale := s.orchestrator.Registry().RemoveStaleGuests(time.Duration(s.cfg.HeartbeatInterval) * time.Second)
-			for _, guest := range stale {
-				s.log.Printf("stale guest removed: %s", guest.ID)
+			// The orchestrator fails any running tasks before removing the guest.
+			stale := s.orchestrator.RemoveStaleGuests(time.Duration(s.cfg.HeartbeatInterval) * time.Second)
+			for _, sg := range stale {
+				s.log.Printf("stale guest removed: %s", sg.GuestID)
+				if sg.TaskWasRunning {
+					s.broadcastTaskUpdated(sg.TaskID, "FAILED")
+				}
 			}
+			// After removing stale guests, try to assign pending tasks to remaining idle guests.
+			s.tryAssignPendingTasks()
 		}
 	}
 }
 
 // checkSilentGuests finds guests that have been silent (no heartbeat) for longer
-// than the configured SilenceTimeout and kills their running tasks.
+// than the configured TaskSilenceTimeout and kills their running tasks.
 //
 // Uses the orchestrator's atomic check which inspects task status before acting,
 // preventing races with checkStuckTasks.
 func (s *Server) checkSilentGuests() {
-	timeout := time.Duration(s.cfg.SilenceTimeout) * time.Second
+	timeout := time.Duration(s.cfg.TaskSilenceTimeout) * time.Second
 	if timeout == 0 {
 		return // Silence detection disabled
 	}

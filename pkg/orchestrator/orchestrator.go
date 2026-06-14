@@ -610,6 +610,13 @@ type SilentGuest struct {
 	TaskID  string
 }
 
+// StaleGuest represents a guest that was removed for being stale.
+type StaleGuest struct {
+	GuestID        string
+	TaskID         string // task that was failed, if any
+	TaskWasRunning bool
+}
+
 // CheckSilentGuests finds guests that are RUNNING but haven't heartbeated
 // within the timeout. Fails their tasks atomically.
 //
@@ -662,6 +669,61 @@ func (o *Orchestrator) CheckSilentGuests(timeout time.Duration) []SilentGuest {
 	}
 
 	return failed
+}
+
+// RemoveStaleGuests removes guests that haven't heartbeated within the timeout.
+// If a stale guest had a running task, the task is failed atomically before
+// the guest is removed.
+//
+// Returns the list of removed guests and their failed tasks.
+func (o *Orchestrator) RemoveStaleGuests(timeout time.Duration) []StaleGuest {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+
+	var removed []StaleGuest
+	now := time.Now()
+
+	// Collect stale guests first (can't delete during iteration)
+	var staleIDs []string
+	for _, guest := range o.registry.GetAllGuests() {
+		if now.Sub(guest.LastHeartbeat) > timeout {
+			staleIDs = append(staleIDs, guest.ID)
+		}
+	}
+
+	for _, guestID := range staleIDs {
+		guest, ok := o.registry.GetGuest(guestID)
+		if !ok {
+			continue
+		}
+
+		taskWasRunning := false
+		taskID := ""
+
+		// If the guest had a running task, fail it before removing the guest.
+		if guest.TaskID != "" && guest.State == registry.GuestStateRunning {
+			task, ok := o.queue.Get(guest.TaskID)
+			if ok && !o.isTerminalStatus(task.Status) && task.Status != queue.TaskStatusPending {
+				task.Status = queue.TaskStatusFailed
+				task.Error = fmt.Sprintf("guest %s stale (no heartbeat for %v)", guest.ID, now.Sub(guest.LastHeartbeat))
+				taskID = task.ID
+				taskWasRunning = true
+				o.logf("stale guest %s: task %s failed (no heartbeat for %v)",
+					guest.ID, task.ID, now.Sub(guest.LastHeartbeat))
+			}
+		}
+
+		// Remove the guest
+		o.registry.RemoveGuest(guestID)
+		removed = append(removed, StaleGuest{
+			GuestID:        guest.ID,
+			TaskID:         taskID,
+			TaskWasRunning: taskWasRunning,
+		})
+		o.logf("stale guest removed: %s", guest.ID)
+	}
+
+	return removed
 }
 
 // --- Internal helpers (caller must hold o.mu) ---

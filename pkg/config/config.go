@@ -36,6 +36,10 @@ type ServerConfig struct {
 	// not heartbeated with that task_id, the server fails the task and re-queues
 	// it. Default: HeartbeatInterval * 3 (90 seconds).
 	TaskAssignmentTimeout int `yaml:"task_assignment_timeout"`
+	// TaskSilenceTimeout is the duration a RUNNING guest can be silent before
+	// its task is failed. This is separate from SilenceTimeout (which governs
+	// when a guest connection is considered stale). Default: 180 seconds (3 minutes).
+	TaskSilenceTimeout int `yaml:"task_silence_timeout"`
 	// MaxGuests is the maximum number of guests allowed (0 = unlimited).
 	MaxGuests int `yaml:"max_guests"`
 	// LogDir is the base directory where task logs are persisted to disk.
@@ -86,6 +90,7 @@ func DefaultServerConfig() ServerConfig {
 		HeartbeatInterval:     30,
 		SilenceTimeout:        1800, // 30 minutes
 		TaskAssignmentTimeout: 90,   // 3 heartbeats missed (3 * 30s)
+		TaskSilenceTimeout:    180,  // 3 minutes of silence while running
 		MaxGuests:             0,    // unlimited
 	}
 }

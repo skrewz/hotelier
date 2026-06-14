@@ -228,6 +228,7 @@ type Hub struct {
 	guestConnections map[string]string // guestID -> connectionID
 	mu               sync.RWMutex
 	logf             func(format string, args ...interface{})
+	onDisconnect     func(connectionID string)
 	nextID           atomic.Int64
 }
 
@@ -241,6 +242,14 @@ func NewHub(logf func(format string, args ...interface{})) *Hub {
 		guestConnections: make(map[string]string),
 		logf:             logf,
 	}
+}
+
+// SetOnDisconnect sets a callback invoked when a connection is lost.
+// The callback receives the connection ID that was disconnected.
+func (h *Hub) SetOnDisconnect(fn func(connectionID string)) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.onDisconnect = fn
 }
 
 // RegisterMethod registers a JSON-RPC method handler.
@@ -359,8 +368,13 @@ func (h *Hub) Run() {
 				delete(h.connections, c.id)
 				close(c.send)
 			}
+			onDisconnect := h.onDisconnect
 			h.mu.Unlock()
 			h.logf("connection unregistered: %s (total: %d)", c.id, len(h.connections))
+			// Call disconnect callback outside the lock to avoid deadlocks.
+			if onDisconnect != nil {
+				onDisconnect(c.id)
+			}
 		}
 	}
 }

@@ -280,6 +280,7 @@ func (g *Guest) Unregister() error {
 // Heartbeat sends a heartbeat to the Check-In Host.
 // If the guest is currently executing a task, the task_id is included
 // so the server can verify the guest is heartbeating with its assigned task.
+// Retries with exponential backoff (3 attempts) on failure.
 func (g *Guest) Heartbeat() error {
 	g.mu.Lock()
 	taskID := g.currentTaskID
@@ -290,11 +291,19 @@ func (g *Guest) Heartbeat() error {
 		"task_id": taskID,
 	}
 
-	_, err := g.client.Call("guest.heartbeat", params)
-	if err != nil {
-		return fmt.Errorf("heartbeat: %w", err)
+	var lastErr error
+	for attempt := 0; attempt < 3; attempt++ {
+		_, err := g.client.Call("guest.heartbeat", params)
+		if err == nil {
+			return nil
+		}
+		lastErr = err
+		backoff := time.Duration(1<<attempt) * time.Second // 1s, 2s, 4s
+		g.log.Printf("heartbeat attempt %d/3 failed: %v, retrying in %v",
+			attempt+1, err, backoff)
+		time.Sleep(backoff)
 	}
-	return nil
+	return fmt.Errorf("heartbeat: all 3 attempts failed: %w", lastErr)
 }
 
 // SendLog sends a log entry to the Check-In Host.
@@ -314,17 +323,26 @@ func (g *Guest) SendLog(entry LogEntry) error {
 }
 
 // SendResult submits the final result of a task to the Check-In Host.
+// Retries with exponential backoff (3 attempts) on failure.
 func (g *Guest) SendResult(result TaskResult) error {
-	err := g.client.SendNotification("guest.result", result)
-	if err != nil {
-		return fmt.Errorf("send result: %w", err)
+	var lastErr error
+	for attempt := 0; attempt < 3; attempt++ {
+		err := g.client.SendNotification("guest.result", result)
+		if err == nil {
+			return nil
+		}
+		lastErr = err
+		backoff := time.Duration(1<<attempt) * time.Second // 1s, 2s, 4s
+		g.log.Printf("send result attempt %d/3 failed: %v, retrying in %v",
+			attempt+1, err, backoff)
+		time.Sleep(backoff)
 	}
-	return nil
+	return fmt.Errorf("send result: all 3 attempts failed: %w", lastErr)
 }
 
 // DeclineTask notifies the host that this guest cannot accept a task assignment.
 // This is called when the guest is already running a task and receives a new
-// assignment it cannot handle.
+// assignment it cannot handle. Retries with exponential backoff (3 attempts).
 func (g *Guest) DeclineTask(taskID, reason string) {
 	params := map[string]string{
 		"task_id":  taskID,
@@ -332,11 +350,20 @@ func (g *Guest) DeclineTask(taskID, reason string) {
 		"reason":   reason,
 	}
 
-	if _, err := g.client.Call("guest.task_declined", params); err != nil {
-		g.log.Printf("[DISPATCH] failed to decline task %s: %v", taskID, err)
-	} else {
-		g.log.Printf("[DISPATCH] declined task %s: %s", taskID, reason)
+	var lastErr error
+	for attempt := 0; attempt < 3; attempt++ {
+		_, err := g.client.Call("guest.task_declined", params)
+		if err == nil {
+			g.log.Printf("[DISPATCH] declined task %s: %s", taskID, reason)
+			return
+		}
+		lastErr = err
+		backoff := time.Duration(1<<attempt) * time.Second // 1s, 2s, 4s
+		g.log.Printf("[DISPATCH] decline task %s attempt %d/3 failed: %v, retrying in %v",
+			taskID, attempt+1, err, backoff)
+		time.Sleep(backoff)
 	}
+	g.log.Printf("[DISPATCH] failed to decline task %s after 3 attempts: %v", taskID, lastErr)
 }
 
 // Start starts the guest's main loop with automatic reconnection.

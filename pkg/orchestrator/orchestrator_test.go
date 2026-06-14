@@ -884,3 +884,170 @@ func TestDeclineTask(t *testing.T) {
 		t.Errorf("expected guest IDLE, got %s", guest.State)
 	}
 }
+
+// --- RemoveStaleGuests ---
+
+func TestRemoveStaleGuests_RemovesStaleGuest(t *testing.T) {
+	orch := newTestOrchestrator(t)
+
+	err := orch.RegisterGuest("guest-1", "Test Guest", []string{"tag1"})
+	if err != nil {
+		t.Fatalf("RegisterGuest failed: %v", err)
+	}
+
+	// Make the guest stale by setting LastHeartbeat to the past
+	guest, _ := orch.GetGuest("guest-1")
+	guest.LastHeartbeat = time.Now().Add(-2 * time.Minute)
+
+	stale := orch.RemoveStaleGuests(1 * time.Minute)
+	if len(stale) != 1 {
+		t.Fatalf("expected 1 stale guest, got %d", len(stale))
+	}
+	if stale[0].GuestID != "guest-1" {
+		t.Errorf("expected guest-1, got %s", stale[0].GuestID)
+	}
+
+	// Guest should be removed
+	_, ok := orch.GetGuest("guest-1")
+	if ok {
+		t.Error("expected guest to be removed")
+	}
+}
+
+func TestRemoveStaleGuests_FailsRunningTask(t *testing.T) {
+	orch := newTestOrchestrator(t)
+
+	err := orch.RegisterGuest("guest-1", "Test Guest", []string{"tag1"})
+	if err != nil {
+		t.Fatalf("RegisterGuest failed: %v", err)
+	}
+
+	err = orch.AddTask(&queue.Task{ID: "task-1", Prompt: "test", Tags: []string{"tag1"}})
+	if err != nil {
+		t.Fatalf("AddTask failed: %v", err)
+	}
+
+	err = orch.AssignTask("task-1", "guest-1")
+	if err != nil {
+		t.Fatalf("AssignTask failed: %v", err)
+	}
+
+	// Guest is RUNNING (ASSIGNED → RUNNING via AssignTask)
+	guest, _ := orch.GetGuest("guest-1")
+	guest.LastHeartbeat = time.Now().Add(-2 * time.Minute)
+
+	stale := orch.RemoveStaleGuests(1 * time.Minute)
+	if len(stale) != 1 {
+		t.Fatalf("expected 1 stale guest, got %d", len(stale))
+	}
+	if !stale[0].TaskWasRunning {
+		t.Error("expected TaskWasRunning to be true")
+	}
+	if stale[0].TaskID != "task-1" {
+		t.Errorf("expected task-1, got %s", stale[0].TaskID)
+	}
+
+	// Task should be FAILED
+	task, ok := orch.GetTask("task-1")
+	if !ok {
+		t.Fatal("expected task to exist")
+	}
+	if task.Status != queue.TaskStatusFailed {
+		t.Errorf("expected task FAILED, got %s", task.Status)
+	}
+
+	// Guest should be removed
+	_, ok = orch.GetGuest("guest-1")
+	if ok {
+		t.Error("expected guest to be removed")
+	}
+}
+
+func TestRemoveStaleGuests_SkipsNonStaleGuest(t *testing.T) {
+	orch := newTestOrchestrator(t)
+
+	err := orch.RegisterGuest("guest-1", "Test Guest", []string{"tag1"})
+	if err != nil {
+		t.Fatalf("RegisterGuest failed: %v", err)
+	}
+
+	// Guest is not stale (fresh heartbeat)
+	stale := orch.RemoveStaleGuests(1 * time.Minute)
+	if len(stale) != 0 {
+		t.Errorf("expected 0 stale guests, got %d", len(stale))
+	}
+
+	// Guest should still exist
+	_, ok := orch.GetGuest("guest-1")
+	if !ok {
+		t.Error("expected guest to still exist")
+	}
+}
+
+func TestRemoveStaleGuests_IdleGuestNoTaskFailure(t *testing.T) {
+	orch := newTestOrchestrator(t)
+
+	err := orch.RegisterGuest("guest-1", "Test Guest", []string{"tag1"})
+	if err != nil {
+		t.Fatalf("RegisterGuest failed: %v", err)
+	}
+
+	// Guest is IDLE (no task)
+	guest, _ := orch.GetGuest("guest-1")
+	guest.LastHeartbeat = time.Now().Add(-2 * time.Minute)
+
+	stale := orch.RemoveStaleGuests(1 * time.Minute)
+	if len(stale) != 1 {
+		t.Fatalf("expected 1 stale guest, got %d", len(stale))
+	}
+	if stale[0].TaskWasRunning {
+		t.Error("expected TaskWasRunning to be false for idle guest")
+	}
+	if stale[0].TaskID != "" {
+		t.Errorf("expected empty task ID, got %s", stale[0].TaskID)
+	}
+}
+
+func TestCheckSilentGuests_UsesTaskSilenceTimeout(t *testing.T) {
+	orch := newTestOrchestrator(t)
+
+	err := orch.RegisterGuest("guest-1", "Test Guest", []string{"tag1"})
+	if err != nil {
+		t.Fatalf("RegisterGuest failed: %v", err)
+	}
+
+	err = orch.AddTask(&queue.Task{ID: "task-1", Prompt: "test", Tags: []string{"tag1"}})
+	if err != nil {
+		t.Fatalf("AddTask failed: %v", err)
+	}
+
+	err = orch.AssignTask("task-1", "guest-1")
+	if err != nil {
+		t.Fatalf("AssignTask failed: %v", err)
+	}
+
+	// Acknowledge to make it RUNNING
+	err = orch.AcknowledgeTask("task-1", "guest-1")
+	if err != nil {
+		t.Fatalf("AcknowledgeTask failed: %v", err)
+	}
+
+	// Set heartbeat to 2 minutes ago
+	guest, _ := orch.GetGuest("guest-1")
+	guest.LastHeartbeat = time.Now().Add(-2 * time.Minute)
+
+	// With a 3-minute timeout, the guest should NOT be considered silent
+	silent := orch.CheckSilentGuests(3 * time.Minute)
+	if len(silent) != 0 {
+		t.Errorf("expected 0 silent guests (within timeout), got %d", len(silent))
+	}
+
+	// With a 1-minute timeout, the guest SHOULD be considered silent
+	silent = orch.CheckSilentGuests(1 * time.Minute)
+	if len(silent) != 1 {
+		t.Fatalf("expected 1 silent guest, got %d", len(silent))
+	}
+	if silent[0].TaskID != "task-1" {
+		t.Errorf("expected task-1, got %s", silent[0].TaskID)
+	}
+}
