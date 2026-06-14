@@ -326,7 +326,13 @@ func TestValidateToolUI(t *testing.T) {
 	}
 	t.Logf("Task created: %s", taskID)
 
-	// Step 3: Assign task to guest and simulate tool call log entries.
+	// Step 3: Assign task to guest, start it, and simulate tool call log entries.
+	if err := srv.TaskQueue().Assign(taskID, "ui-test-guest"); err != nil {
+		t.Fatalf("assign task: %v", err)
+	}
+	if err := srv.TaskQueue().Start(taskID); err != nil {
+		t.Fatalf("start task: %v", err)
+	}
 	assignParams, _ := json.Marshal(map[string]interface{}{
 		"id":          taskID,
 		"repos":       []string{"/tmp/test-repo"},
@@ -396,9 +402,23 @@ func TestValidateToolUI(t *testing.T) {
 	}
 	t.Logf("Completed task created: %s", completedTaskID)
 
+	// Step 4d: Create a pending task (not assigned) to test the
+	// "N pending" expand button in the UI.
+	pendingTaskID := fmt.Sprintf("ui-test-pending-task-%d", time.Now().UnixNano())
+	pendingTask := &queue.Task{
+		ID:     pendingTaskID,
+		Repos:  []string{"/tmp/test-repo"},
+		Prompt: "A task that remains pending waiting for a matching guest",
+		Tags:   []string{"business-special"},
+	}
+	if err := srv.TaskQueue().Add(pendingTask); err != nil {
+		t.Fatalf("add pending task: %v", err)
+	}
+	t.Logf("Pending task created: %s", pendingTaskID)
+
 	// Step 5: Validate UI rendering via Playwright by exercising the real
 	// user flow: navigate → task list → click task → detail view.
-	validateUI(t, baseURL, taskID, failedTaskID, completedTaskID, failureReason, projectRoot)
+	validateUI(t, baseURL, taskID, failedTaskID, completedTaskID, pendingTaskID, failureReason, projectRoot)
 }
 
 func validateServerLogs(t *testing.T, srv *server.Server, taskID string, expectedEntries []testLogEntry) {
@@ -448,7 +468,7 @@ func validateServerLogs(t *testing.T, srv *server.Server, taskID string, expecte
 	}
 }
 
-func validateUI(t *testing.T, baseURL, taskID, failedTaskID, completedTaskID, failureReason, projectRoot string) {
+func validateUI(t *testing.T, baseURL, taskID, failedTaskID, completedTaskID, pendingTaskID, failureReason, projectRoot string) {
 	// Allow overriding the screenshot directory via env var for manual inspection.
 	// When set, screenshots survive t.TempDir() cleanup.
 	overrideDir := os.Getenv("SCREENSHOT_DIR")
@@ -483,6 +503,7 @@ const { chromium } = require('playwright');
   const taskId = '%s';
   const failedTaskId = '%s';
   const completedTaskId = '%s';
+  const pendingTaskId = '%s';
   const failureReason = '%s';
   const expectedLogDate = '%s';
   const path = require('path');
@@ -597,97 +618,124 @@ const { chromium } = require('playwright');
   });
   if (filterResult.error) fail(filterResult.error);
   if (filterResult.buttonStates.length < 6) fail('Filter row should have at least 6 buttons, got ' + filterResult.buttonStates.length);
-  // Verify COMPLETED is inactive by default
-  const completedBtn = filterResult.buttonStates.find(b => b.status === 'COMPLETED');
-  if (!completedBtn) fail('COMPLETED filter button not found');
-  if (completedBtn.active) fail('COMPLETED filter should be inactive by default');
-  if (!completedBtn.inactive) fail('COMPLETED filter should have inactive class by default');
+  // Verify COMPLETED and PENDING are inactive by default
+  for (const hiddenStatus of ['COMPLETED', 'PENDING']) {
+    const btn = filterResult.buttonStates.find(b => b.status === hiddenStatus);
+    if (!btn) fail(hiddenStatus + ' filter button not found');
+    if (btn.active) fail(hiddenStatus + ' filter should be inactive by default');
+    if (!btn.inactive) fail(hiddenStatus + ' filter should have inactive class by default');
+  }
   // Verify other statuses are active by default
   for (const btn of filterResult.buttonStates) {
-    if (btn.status !== 'COMPLETED' && !btn.active) {
+    if (btn.status !== 'COMPLETED' && btn.status !== 'PENDING' && !btn.active) {
       fail(btn.status + ' filter should be active by default');
     }
   }
-  console.log('PASS: Filter row rendered with', filterResult.buttonStates.length, 'buttons, COMPLETED inactive by default');
+  console.log('PASS: Filter row rendered with', filterResult.buttonStates.length, 'buttons, COMPLETED and PENDING inactive by default');
 
-  // Verify completed tasks are hidden by default (the test creates a RUNNING task via the guest,
-  // plus the PENDING task and FAILED task — no COMPLETED tasks in the test data, so all shown tasks should be visible)
+  // Verify pending and completed tasks are hidden by default
   const visibleTaskCount = await page.evaluate(() => {
     return document.querySelectorAll('.task-item').length;
   });
-  // With 2 tasks (1 PENDING + 1 FAILED) and COMPLETED hidden, all should be visible
-  console.log('PASS:', visibleTaskCount, 'task(s) visible with default filter (COMPLETED hidden)');
+  // With 4 tasks (1 RUNNING + 1 FAILED + 1 PENDING + 1 COMPLETED) and PENDING/COMPLETED hidden,
+  // only 2 should be visible
+  if (visibleTaskCount !== 2) fail('Should show 2 tasks (PENDING and COMPLETED hidden by default), got ' + visibleTaskCount);
+  console.log('PASS:', visibleTaskCount, 'task(s) visible with default filter (PENDING and COMPLETED hidden)');
+
+  // Verify the "N pending" expand button is visible
+  const pendingBtnResult = await page.evaluate(() => {
+    const btn = document.querySelector('.pending-expand-btn');
+    if (!btn) return { found: false };
+    return { found: true, text: btn.textContent.trim() };
+  });
+  if (!pendingBtnResult.found) fail('"N pending" expand button should be visible when pending tasks are hidden');
+  if (!pendingBtnResult.text.includes('pending')) fail('Pending button should contain "pending" text, got: ' + pendingBtnResult.text);
+  if (!pendingBtnResult.text.includes('1')) fail('Pending button should show count 1, got: ' + pendingBtnResult.text);
+  console.log('PASS: "N pending" button visible:', pendingBtnResult.text);
 
   await takeScreenshot('01-front-page');
 
   // =====================================================================
-  // Phase 1c: Toggle COMPLETED filter — completed task hidden/shown
+  // Phase 1c: "N pending" expand button — pending tasks hidden/shown
   // =====================================================================
-  console.log('=== Phase 1c: Toggle COMPLETED filter ===');
+  console.log('=== Phase 1c: Pending expand button ===');
 
-  // With 3 tasks (PENDING + FAILED + COMPLETED) and COMPLETED hidden,
+  // With 4 tasks (RUNNING + FAILED + PENDING + COMPLETED) and PENDING/COMPLETED hidden,
   // only 2 should be visible
   const visibleBefore = await page.evaluate(() => {
     return document.querySelectorAll('.task-item').length;
   });
-  if (visibleBefore !== 2) fail('Should show 2 tasks (COMPLETED hidden by default), got ' + visibleBefore);
-  console.log('PASS:', visibleBefore, 'tasks visible (COMPLETED hidden)');
+  if (visibleBefore !== 2) fail('Should show 2 tasks (PENDING and COMPLETED hidden by default), got ' + visibleBefore);
+  console.log('PASS:', visibleBefore, 'tasks visible (PENDING and COMPLETED hidden)');
 
-  // Verify the completed task is NOT in the list
-  const completedHidden = await page.evaluate((cid) => {
+  // Verify the pending task is NOT in the list
+  const pendingHidden = await page.evaluate((pid) => {
     const items = document.querySelectorAll('.task-item');
     for (const item of items) {
-      if (item.textContent.includes(cid)) return false;
+      if (item.textContent.includes(pid)) return false;
     }
     return true;
-  }, completedTaskId);
-  if (!completedHidden) fail('Completed task should be hidden by default');
-  console.log('PASS: Completed task hidden by default');
+  }, pendingTaskId);
+  if (!pendingHidden) fail('Pending task should be hidden by default');
+  console.log('PASS: Pending task hidden by default');
 
-  // Click COMPLETED filter button to show completed tasks
-  await clickEl('button[data-status="COMPLETED"]');
+  // Click the "N pending" expand button
+  await clickEl('.pending-expand-btn');
 
   // Wait for re-render
   await page.waitForTimeout(500);
 
-  // Now 3 tasks should be visible
+  // Now 3 tasks should be visible (RUNNING + FAILED + PENDING)
   const visibleAfter = await page.evaluate(() => {
     return document.querySelectorAll('.task-item').length;
   });
-  if (visibleAfter !== 3) fail('Should show 3 tasks (COMPLETED now shown), got ' + visibleAfter);
-  console.log('PASS:', visibleAfter, 'tasks visible (COMPLETED shown)');
+  if (visibleAfter !== 3) fail('Should show 3 tasks (PENDING now shown), got ' + visibleAfter);
+  console.log('PASS:', visibleAfter, 'tasks visible (PENDING shown)');
 
-  // Verify the completed task IS now in the list
-  const completedShown = await page.evaluate((cid) => {
+  // Verify the pending task IS now in the list
+  const pendingShown = await page.evaluate((pid) => {
     const items = document.querySelectorAll('.task-item');
     for (const item of items) {
-      if (item.textContent.includes(cid)) return true;
+      if (item.textContent.includes(pid)) return true;
     }
     return false;
-  }, completedTaskId);
-  if (!completedShown) fail('Completed task should be visible after toggling filter');
-  console.log('PASS: Completed task visible after toggling filter');
+  }, pendingTaskId);
+  if (!pendingShown) fail('Pending task should be visible after clicking expand button');
+  console.log('PASS: Pending task visible after expanding');
 
-  // Verify COMPLETED button is now active
-  const completedBtnActive = await page.evaluate(() => {
-    const btn = document.querySelector('button[data-status="COMPLETED"]');
+  // Verify the "N pending" button is gone (no more hidden pending tasks)
+  const pendingBtnGone = await page.evaluate(() => {
+    return document.querySelector('.pending-expand-btn') === null;
+  });
+  if (!pendingBtnGone) fail('"N pending" button should disappear after expanding');
+  console.log('PASS: "N pending" button disappeared after expanding');
+
+  // Verify PENDING filter button is now active
+  const pendingBtnActive = await page.evaluate(() => {
+    const btn = document.querySelector('button[data-status="PENDING"]');
     return btn && btn.classList.contains('active') && !btn.classList.contains('inactive');
   });
-  if (!completedBtnActive) fail('COMPLETED filter button should be active after toggle');
-  console.log('PASS: COMPLETED filter button active after toggle');
+  if (!pendingBtnActive) fail('PENDING filter button should be active after expanding');
+  console.log('PASS: PENDING filter button active after expanding');
 
-  // Toggle COMPLETED back to hide completed tasks
-  await clickEl('button[data-status="COMPLETED"]');
+  // Toggle PENDING filter button back to hide pending tasks
+  await clickEl('button[data-status="PENDING"]');
   await page.waitForTimeout(500);
 
-  // Back to 2 visible tasks
+  // Back to 2 visible tasks, "N pending" button reappears
   const visibleFinal = await page.evaluate(() => {
     return document.querySelectorAll('.task-item').length;
   });
-  if (visibleFinal !== 2) fail('Should show 2 tasks (COMPLETED hidden again), got ' + visibleFinal);
-  console.log('PASS:', visibleFinal, 'tasks visible (COMPLETED hidden again)');
+  if (visibleFinal !== 2) fail('Should show 2 tasks (PENDING hidden again), got ' + visibleFinal);
+  console.log('PASS:', visibleFinal, 'tasks visible (PENDING hidden again)');
 
-  await takeScreenshot('01b-filter-toggle');
+  const pendingBtnReappeared = await page.evaluate(() => {
+    return document.querySelector('.pending-expand-btn') !== null;
+  });
+  if (!pendingBtnReappeared) fail('"N pending" button should reappear when PENDING filter is toggled off');
+  console.log('PASS: "N pending" button reappeared');
+
+  await takeScreenshot('01b-pending-expand');
 
   // =====================================================================
   // Phase 2: Click task → Logs view with rich tool-block rendering
@@ -1386,7 +1434,7 @@ const { chromium } = require('playwright');
   console.log('All UI validation checks passed!');
   await browser.close();
 })().catch(e => { console.error('Test failed:', e); process.exit(1); });
-`, screenshotDir, baseURL, taskID, failedTaskID, completedTaskID, failureReason, logDate)
+`, screenshotDir, baseURL, taskID, failedTaskID, completedTaskID, pendingTaskID, failureReason, logDate)
 
 	tmpScript := t.TempDir() + "/validate_ui.js"
 	if err := os.WriteFile(tmpScript, []byte(script), 0o644); err != nil {
