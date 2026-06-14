@@ -493,6 +493,19 @@ func (h *Hub) UnregisterGuestConnection(guestID string) {
 	delete(h.guestConnections, guestID)
 }
 
+// GuestIDFromConnection looks up the guest ID for a given connection ID.
+// Returns the guest ID and true if found, or empty string and false otherwise.
+func (h *Hub) GuestIDFromConnection(connID string) (string, error) {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	for guestID, id := range h.guestConnections {
+		if id == connID {
+			return guestID, nil
+		}
+	}
+	return "", fmt.Errorf("no guest found for connection %s", connID)
+}
+
 // SendNotification sends a notification (no ID) to a specific connection
 // or broadcasts to all connections matching the given role.
 // If connID is empty, the message is broadcast to all connections with the

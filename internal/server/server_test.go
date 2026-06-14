@@ -1108,7 +1108,19 @@ func TestHandleGuestRegister_PreservesRunningState(t *testing.T) {
 		t.Errorf("expected status 'registered', got %v", result1["status"])
 	}
 
-	// Simulate the guest being assigned a task (state = RUNNING)
+	// Create a real task and assign it through the orchestrator.
+	// This is the authoritative path — ReconcileGuest checks the task queue.
+	task := &queue.Task{
+		ID:     "task-123",
+		Prompt: "test task",
+		Tags:   []string{"tag1"},
+	}
+	if err := srv.TaskQueue().Add(task); err != nil {
+		t.Fatalf("failed to add task: %v", err)
+	}
+	if err := srv.TaskQueue().Assign("task-123", "running-guest"); err != nil {
+		t.Fatalf("failed to assign task: %v", err)
+	}
 	if err := srv.Registry().SetGuestTask("running-guest", "task-123"); err != nil {
 		t.Fatalf("failed to set guest task: %v", err)
 	}
@@ -1134,7 +1146,7 @@ func TestHandleGuestRegister_PreservesRunningState(t *testing.T) {
 		t.Errorf("expected status 're-registered', got %v", result2["status"])
 	}
 
-	// Verify the guest state was preserved as RUNNING
+	// Verify the guest state was preserved as RUNNING (task is ASSIGNED in queue)
 	guest, _ = srv.Registry().GetGuest("running-guest")
 	if guest.State != registry.GuestStateRunning {
 		t.Errorf("expected guest state RUNNING after re-registration, got %s", guest.State)
@@ -1831,33 +1843,8 @@ func TestIntegration_TaskLogBroadcast(t *testing.T) {
 		t.Errorf("expected 'Hello **world**', got %q", logs[0].Line)
 	}
 
-	// First message: task.updated (RUNNING) - broadcast on first log entry
+	// Message: task.log (no task.updated on first log in new acknowledge model)
 	data, ok := conn.Recv()
-	if !ok {
-		t.Fatal("expected task.updated notification to be sent to the browser connection")
-	}
-
-	var updatedNotif rpc.JSONRPCMessage
-	if err := json.Unmarshal(data, &updatedNotif); err != nil {
-		t.Fatalf("failed to unmarshal task.updated notification: %v", err)
-	}
-	if updatedNotif.Method != "task.updated" {
-		t.Errorf("expected method 'task.updated', got %s", updatedNotif.Method)
-	}
-
-	var updatedParams map[string]interface{}
-	if err := json.Unmarshal(updatedNotif.Params, &updatedParams); err != nil {
-		t.Fatalf("failed to unmarshal task.updated params: %v", err)
-	}
-	if updatedParams["task_id"] != createdTask.ID {
-		t.Errorf("expected task_id %s, got %v", createdTask.ID, updatedParams["task_id"])
-	}
-	if updatedParams["status"] != "RUNNING" {
-		t.Errorf("expected status 'RUNNING', got %v", updatedParams["status"])
-	}
-
-	// Second message: task.log
-	data, ok = conn.Recv()
 	if !ok {
 		t.Fatal("expected task.log notification to be sent to the browser connection")
 	}
@@ -2500,7 +2487,7 @@ func TestHandleGuestHeartbeat_NoTaskID(t *testing.T) {
 	}
 
 	// Verify LastTaskHeartbeat was NOT updated
-	guest, _ := srv.registry.GetGuest("guest-1")
+	guest, _ := srv.Registry().GetGuest("guest-1")
 	if !guest.LastTaskHeartbeat.IsZero() {
 		t.Errorf("expected zero LastTaskHeartbeat (no task_id sent), got %v", guest.LastTaskHeartbeat)
 	}
@@ -2515,7 +2502,7 @@ func TestHandleGuestHeartbeat_WithTaskID(t *testing.T) {
 	srv.Registry().Register("guest-1", "Test Guest", []string{"tag1"})
 
 	// Assign a task
-	srv.registry.SetGuestTask("guest-1", "task-1")
+	srv.Registry().SetGuestTask("guest-1", "task-1")
 
 	// Heartbeat with task_id
 	hbParams, _ := json.Marshal(map[string]string{
@@ -2533,7 +2520,7 @@ func TestHandleGuestHeartbeat_WithTaskID(t *testing.T) {
 	}
 
 	// Verify LastTaskHeartbeat was updated
-	guest, _ := srv.registry.GetGuest("guest-1")
+	guest, _ := srv.Registry().GetGuest("guest-1")
 	if guest.LastTaskHeartbeat.IsZero() {
 		t.Error("expected LastTaskHeartbeat to be set after task-aware heartbeat")
 	}
@@ -2578,11 +2565,11 @@ func TestCheckStuckTasks_DetectsAndRequeues(t *testing.T) {
 
 	// Manually assign the task (tryAssignTask fails to send notification
 	// because there's no real WebSocket connection, which reverts the task).
-	srv.taskQueue.Assign(taskID, "guest-1")
-	srv.registry.SetGuestTask("guest-1", taskID)
+	srv.TaskQueue().Assign(taskID, "guest-1")
+	srv.Registry().SetGuestTask("guest-1", taskID)
 
 	// Verify task is ASSIGNED
-	task, _ := srv.taskQueue.Get(taskID)
+	task, _ := srv.TaskQueue().Get(taskID)
 	if task.Status != queue.TaskStatusAssigned {
 		t.Fatalf("expected task ASSIGNED, got %s", task.Status)
 	}
@@ -2594,7 +2581,7 @@ func TestCheckStuckTasks_DetectsAndRequeues(t *testing.T) {
 	srv.checkStuckTasks()
 
 	// Verify task was failed and re-queued
-	task, ok := srv.taskQueue.Get(taskID)
+	task, ok := srv.TaskQueue().Get(taskID)
 	if !ok {
 		t.Fatalf("task %s not found after checkStuckTasks", taskID)
 	}
@@ -2603,7 +2590,7 @@ func TestCheckStuckTasks_DetectsAndRequeues(t *testing.T) {
 	}
 
 	// Verify guest task was cleared
-	guest, _ := srv.registry.GetGuest("guest-1")
+	guest, _ := srv.Registry().GetGuest("guest-1")
 	if guest.TaskID != "" {
 		t.Errorf("expected guest task cleared, got %s", guest.TaskID)
 	}
@@ -2634,11 +2621,11 @@ func TestCheckStuckTasks_IgnoresHealthyGuests(t *testing.T) {
 
 	// Manually assign the task (tryAssignTask fails to send notification
 	// because there's no real WebSocket connection, which reverts the task).
-	srv.taskQueue.Assign(taskID, "guest-1")
-	srv.registry.SetGuestTask("guest-1", taskID)
+	srv.TaskQueue().Assign(taskID, "guest-1")
+	srv.Registry().SetGuestTask("guest-1", taskID)
 
 	// Verify task is ASSIGNED
-	task, _ := srv.taskQueue.Get(taskID)
+	task, _ := srv.TaskQueue().Get(taskID)
 	if task.Status != queue.TaskStatusAssigned {
 		t.Fatalf("expected task ASSIGNED after manual assign, got %s", task.Status)
 	}
@@ -2651,7 +2638,7 @@ func TestCheckStuckTasks_IgnoresHealthyGuests(t *testing.T) {
 	srv.handleGuestHeartbeat(nil, hbParams)
 
 	// Verify heartbeat updated LastTaskHeartbeat
-	guest, _ := srv.registry.GetGuest("guest-1")
+	guest, _ := srv.Registry().GetGuest("guest-1")
 	if guest.LastTaskHeartbeat.IsZero() {
 		t.Fatal("expected LastTaskHeartbeat to be set after heartbeat")
 	}
@@ -2664,7 +2651,7 @@ func TestCheckStuckTasks_IgnoresHealthyGuests(t *testing.T) {
 	srv.checkStuckTasks()
 
 	// Verify task is still ASSIGNED (not re-queued)
-	task, ok := srv.taskQueue.Get(taskID)
+	task, ok := srv.TaskQueue().Get(taskID)
 	if !ok {
 		t.Fatalf("task %s not found", taskID)
 	}
@@ -2673,7 +2660,7 @@ func TestCheckStuckTasks_IgnoresHealthyGuests(t *testing.T) {
 	}
 
 	// Verify guest still has the task
-	guest, _ = srv.registry.GetGuest("guest-1")
+	guest, _ = srv.Registry().GetGuest("guest-1")
 	if guest.TaskID != taskID {
 		t.Errorf("expected guest to still have task %s, got %s", taskID, guest.TaskID)
 	}
@@ -2703,8 +2690,8 @@ func TestCheckStuckTasks_Disabled(t *testing.T) {
 	taskID := createdTask.ID
 
 	// Manually assign the task
-	srv.taskQueue.Assign(taskID, "guest-1")
-	srv.registry.SetGuestTask("guest-1", taskID)
+	srv.TaskQueue().Assign(taskID, "guest-1")
+	srv.Registry().SetGuestTask("guest-1", taskID)
 
 	// Wait way past any reasonable timeout
 	time.Sleep(100 * time.Millisecond)
@@ -2713,7 +2700,7 @@ func TestCheckStuckTasks_Disabled(t *testing.T) {
 	srv.checkStuckTasks()
 
 	// Verify task is still ASSIGNED
-	task, ok := srv.taskQueue.Get(taskID)
+	task, ok := srv.TaskQueue().Get(taskID)
 	if !ok {
 		t.Fatalf("task %s not found", taskID)
 	}
@@ -2752,11 +2739,11 @@ func TestCheckStuckTasks_TaskAlreadyPending(t *testing.T) {
 	// but the guest still has a stale TaskID.
 	// We set it directly on the guest struct to avoid SetGuestTask
 	// triggering tryAssignTask (which would pick up the pending task).
-	guest, _ := srv.registry.GetGuest("guest-1")
+	guest, _ := srv.Registry().GetGuest("guest-1")
 	guest.TaskID = taskID
 	guest.State = registry.GuestStateRunning
 
-	task, _ := srv.taskQueue.Get(taskID)
+	task, _ := srv.TaskQueue().Get(taskID)
 	if task.Status != queue.TaskStatusPending {
 		t.Fatalf("expected task PENDING, got %s", task.Status)
 	}
@@ -2768,7 +2755,7 @@ func TestCheckStuckTasks_TaskAlreadyPending(t *testing.T) {
 	srv.checkStuckTasks()
 
 	// Task should still be PENDING (no error)
-	task, ok := srv.taskQueue.Get(taskID)
+	task, ok := srv.TaskQueue().Get(taskID)
 	if !ok {
 		t.Fatalf("task %s not found after checkStuckTasks", taskID)
 	}
@@ -2777,7 +2764,7 @@ func TestCheckStuckTasks_TaskAlreadyPending(t *testing.T) {
 	}
 
 	// Guest task should be cleared
-	guest, _ = srv.registry.GetGuest("guest-1")
+	guest, _ = srv.Registry().GetGuest("guest-1")
 	if guest.TaskID != "" {
 		t.Errorf("expected guest task cleared, got %s", guest.TaskID)
 	}
@@ -2843,7 +2830,7 @@ func TestCheckStuckTasks_TaskInTerminalState(t *testing.T) {
 
 			// But the guest still has a stale TaskID.
 			// Set it directly to avoid SetGuestTask triggering tryAssignTask.
-			guest, _ := srv.registry.GetGuest("guest-1")
+			guest, _ := srv.Registry().GetGuest("guest-1")
 			guest.TaskID = taskID
 			guest.State = registry.GuestStateRunning
 
@@ -2852,7 +2839,7 @@ func TestCheckStuckTasks_TaskInTerminalState(t *testing.T) {
 			srv.checkStuckTasks()
 
 			// Task should remain in terminal state
-			task, ok := srv.taskQueue.Get(taskID)
+			task, ok := srv.TaskQueue().Get(taskID)
 			if !ok {
 				t.Fatalf("task %s not found", taskID)
 			}
@@ -2861,7 +2848,7 @@ func TestCheckStuckTasks_TaskInTerminalState(t *testing.T) {
 			}
 
 			// Guest task should be cleared
-			guest, _ = srv.registry.GetGuest("guest-1")
+			guest, _ = srv.Registry().GetGuest("guest-1")
 			if guest.TaskID != "" {
 				t.Errorf("expected guest task cleared, got %s", guest.TaskID)
 			}

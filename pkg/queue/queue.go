@@ -79,7 +79,8 @@ type Task struct {
 	Status     TaskStatus `json:"status"`
 	CreatedAt  time.Time  `json:"created_at"`
 	AssignedTo string     `json:"assigned_to,omitempty"`
-	Timeout    int        `json:"timeout,omitempty"` // seconds, 0 = unlimited
+	AssignedAt time.Time  `json:"assigned_at,omitempty"` // when the task was assigned (for liveness probes)
+	Timeout    int        `json:"timeout,omitempty"`     // seconds, 0 = unlimited
 	Result     string     `json:"result,omitempty"`
 	Error      string     `json:"error,omitempty"`
 }
@@ -165,6 +166,7 @@ func (q *TaskQueue) Assign(taskID, guestID string) error {
 
 	task.Status = TaskStatusAssigned
 	task.AssignedTo = guestID
+	task.AssignedAt = time.Now()
 	q.logf("task %s assigned to guest %s", taskID, guestID)
 	return nil
 }

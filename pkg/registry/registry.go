@@ -415,6 +415,24 @@ func (r *GuestRegistry) IsStale(guestID string, timeout time.Duration) bool {
 	return time.Since(guest.LastHeartbeat) > timeout
 }
 
+// RemoveGuest unconditionally removes a guest from the registry.
+// Unlike Unregister, it does not check the guest's state.
+// Used by the orchestrator when force-unregistering a running guest.
+func (r *GuestRegistry) RemoveGuest(guestID string) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	if _, exists := r.guests[guestID]; !exists {
+		return fmt.Errorf("guest %s not found", guestID)
+	}
+
+	delete(r.guests, guestID)
+	if r.logf != nil {
+		r.logf("guest removed: %s (total: %d)", guestID, len(r.guests))
+	}
+	return nil
+}
+
 // RemoveStaleGuests removes guests that haven't sent a heartbeat within the timeout.
 func (r *GuestRegistry) RemoveStaleGuests(timeout time.Duration) []*Guest {
 	r.mu.Lock()

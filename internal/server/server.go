@@ -15,6 +15,7 @@ import (
 
 	"hotelier/pkg/config"
 	"hotelier/pkg/logstore"
+	"hotelier/pkg/orchestrator"
 	"hotelier/pkg/queue"
 	"hotelier/pkg/registry"
 	"hotelier/pkg/rpc"
@@ -219,8 +220,7 @@ func (a *LogAccumulator) emitNow(taskID, line, level string, emit func(TaskLogEn
 // Server is the Check-In Host that orchestrates guests and tasks.
 type Server struct {
 	cfg            config.ServerConfig
-	registry       *registry.GuestRegistry
-	taskQueue      *queue.TaskQueue
+	orchestrator   *orchestrator.Orchestrator
 	hub            *rpc.Hub
 	logStore       *TaskLogStore
 	diskLogStore   *logstore.LogStore
@@ -230,11 +230,6 @@ type Server struct {
 	mu             sync.RWMutex
 	webDir         string
 	templateDir    string
-
-	// trackedTasks records tasks that have had their first log entry,
-	// so we can detect the ASSIGNED → RUNNING transition.
-	trackedTasks map[string]bool
-	trackMu      sync.Mutex
 }
 
 // Reload updates the server's runtime configuration from a new ServerConfig.
@@ -251,7 +246,7 @@ func (s *Server) Reload(cfg config.ServerConfig) {
 
 	// Update max guests if changed
 	if cfg.MaxGuests != old.MaxGuests {
-		s.registry.SetMaxGuests(cfg.MaxGuests)
+		s.orchestrator.SetMaxGuests(cfg.MaxGuests)
 		s.log.Printf("max_guests updated: %d", cfg.MaxGuests)
 	}
 
@@ -292,8 +287,7 @@ func New(cfg config.ServerConfig) *Server {
 
 	s := &Server{
 		cfg:            cfg,
-		registry:       registry.NewGuestRegistry(cfg.MaxGuests, logger.Printf),
-		taskQueue:      queue.NewTaskQueue(logger.Printf),
+		orchestrator:   orchestrator.New(logger.Printf),
 		hub:            rpc.NewHub(logger.Printf),
 		logStore:       NewTaskLogStore(),
 		logAccumulator: NewLogAccumulator(logger),
@@ -301,8 +295,10 @@ func New(cfg config.ServerConfig) *Server {
 		upgrader:       rpc.NewUpgrader(),
 		webDir:         "web/static",
 		templateDir:    "web/templates",
-		trackedTasks:   make(map[string]bool),
 	}
+
+	// Set max guests on orchestrator
+	s.orchestrator.SetMaxGuests(cfg.MaxGuests)
 
 	// Initialize disk-backed log store if configured
 	if cfg.LogDir != "" {
@@ -360,14 +356,19 @@ func (s *Server) Stop(ctx context.Context) error {
 	return nil
 }
 
-// Registry returns the guest registry (for testing).
-func (s *Server) Registry() *registry.GuestRegistry {
-	return s.registry
+// Orchestrator returns the orchestrator (for testing).
+func (s *Server) Orchestrator() *orchestrator.Orchestrator {
+	return s.orchestrator
 }
 
-// TaskQueue returns the task queue (for testing).
+// Registry returns the guest registry (for testing, migration compat).
+func (s *Server) Registry() *registry.GuestRegistry {
+	return s.orchestrator.Registry()
+}
+
+// TaskQueue returns the task queue (for testing, migration compat).
 func (s *Server) TaskQueue() *queue.TaskQueue {
-	return s.taskQueue
+	return s.orchestrator.Queue()
 }
 
 // Hub returns the RPC hub (for testing).
@@ -399,6 +400,7 @@ func (s *Server) registerRPCMethods() {
 	s.hub.RegisterMethod("guest.result", s.handleGuestResult)
 	s.hub.RegisterMethod("guest.task_declined", s.handleGuestTaskDeclined)
 	s.hub.RegisterMethod("guest.cancelled", s.handleGuestCancelled)
+	s.hub.RegisterMethod("task.acknowledge", s.handleTaskAcknowledge)
 
 	// Host → Guest methods (pushed by scheduler)
 	s.hub.RegisterMethod("task.assign", s.handleTaskAssign)
@@ -421,53 +423,51 @@ func (s *Server) handleGuestRegister(ctx context.Context, params json.RawMessage
 		return nil, rpc.InvalidParamsError("guest id is required")
 	}
 
-	guest, err := s.registry.Register(req.ID, req.Name, req.Tags)
+	// Record the guest-to-connection mapping so SendToGuest can find it.
+	// Do this before registration so re-registration also updates the mapping.
+	if connID, ok := rpc.ConnectionIDFromContext(ctx); ok {
+		s.hub.RegisterGuestConnection(req.ID, connID)
+		s.hub.SetConnectionRole(connID, rpc.ConnectionRoleGuest)
+	}
+
+	guest, err := s.orchestrator.Registry().Register(req.ID, req.Name, req.Tags)
 	if err != nil {
-		// Guest is already registered — update its connection and heartbeat.
-		// This handles the case where a guest reconnects after a network blip.
-		existing, exists := s.registry.GetGuest(req.ID)
+		// Guest is already registered — reconcile its state against the
+		// authoritative task queue. This handles reconnection after a
+		// network blip, ensuring the guest's state matches reality.
+		existing, exists := s.orchestrator.GetGuest(req.ID)
 		if exists {
-			oldState := existing.State
+			// Update name and tags on re-registration
 			existing.Name = req.Name
 			existing.Tags = req.Tags
-			existing.ConnectedAt = time.Now()
-			existing.LastHeartbeat = time.Now()
+		}
 
-			// Preserve the guest's state. If the guest was RUNNING, it may
-			// still be executing a task on the client side. Resetting to IDLE
-			// would cause tryAssignTask to send a duplicate assignment.
-			// The guest will transition to IDLE naturally when it sends the
-			// task result via handleGuestResult.
-			// If the guest was IDLE, it stays IDLE and will get a task below.
+		reconState := s.orchestrator.ReconcileGuest(req.ID)
 
-			// Update the connection mapping
-			if connID, ok := rpc.ConnectionIDFromContext(ctx); ok {
-				s.hub.RegisterGuestConnection(req.ID, connID)
-				s.hub.SetConnectionRole(connID, rpc.ConnectionRoleGuest)
+		if exists {
+			s.log.Printf("guest re-registered: %s (reconciled to %s, task: %s)",
+				existing.ID, reconState.Status, reconState.TaskID)
+
+			// If the guest is now IDLE, try to assign a pending task.
+			if existing.State == registry.GuestStateIdle {
+				s.tryAssignTask(req.ID)
 			}
-
-			s.log.Printf("guest re-registered: %s (state: %s, tags: %v)", existing.ID, oldState, existing.Tags)
-
-			// Try to assign a pending task — but only if the guest is idle.
-			// If it was RUNNING, tryAssignTask will skip it (checks State).
-			s.tryAssignTask(existing.ID)
 
 			return map[string]interface{}{
 				"status": "re-registered",
 				"guest": map[string]interface{}{
-					"id":   existing.ID,
-					"name": existing.Name,
-					"tags": existing.Tags,
+					"id":    existing.ID,
+					"name":  existing.Name,
+					"tags":  existing.Tags,
+					"state": existing.State.String(),
+				},
+				"task": map[string]interface{}{
+					"status": reconState.Status.String(),
+					"id":     reconState.TaskID,
 				},
 			}, nil
 		}
 		return nil, rpc.InternalError(err.Error())
-	}
-
-	// Record the guest-to-connection mapping so SendToGuest can find it
-	if connID, ok := rpc.ConnectionIDFromContext(ctx); ok {
-		s.hub.RegisterGuestConnection(req.ID, connID)
-		s.hub.SetConnectionRole(connID, rpc.ConnectionRoleGuest)
 	}
 
 	s.log.Printf("guest registered: %s (tags: %v)", guest.ID, guest.Tags)
@@ -495,7 +495,7 @@ func (s *Server) handleGuestUnregister(ctx context.Context, params json.RawMessa
 		return nil, rpc.InvalidParamsError("invalid request parameters")
 	}
 
-	if err := s.registry.Unregister(req.ID); err != nil {
+	if err := s.orchestrator.UnregisterGuestForce(req.ID); err != nil {
 		return nil, rpc.InternalError(err.Error())
 	}
 
@@ -504,15 +504,7 @@ func (s *Server) handleGuestUnregister(ctx context.Context, params json.RawMessa
 
 	s.log.Printf("guest unregistered: %s", req.ID)
 
-	// If the guest had a running task, re-queue it
-	tasks := s.taskQueue.GetGuestTasks(req.ID)
-	for _, task := range tasks {
-		if task.Status == queue.TaskStatusRunning || task.Status == queue.TaskStatusAssigned {
-			if err := s.taskQueue.UpdateStatus(task.ID, queue.TaskStatusPending); err != nil {
-				s.log.Printf("failed to re-queue task %s: %v", task.ID, err)
-			}
-		}
-	}
+	// Orchestrator already re-queued any running task atomically.
 
 	return map[string]interface{}{
 		"status": "unregistered",
@@ -533,11 +525,11 @@ func (s *Server) handleGuestHeartbeat(ctx context.Context, params json.RawMessag
 	}
 
 	if req.TaskID != "" {
-		if err := s.registry.TaskHeartbeat(req.ID, req.TaskID); err != nil {
+		if err := s.orchestrator.TaskHeartbeat(req.ID, req.TaskID); err != nil {
 			return nil, rpc.InternalError(err.Error())
 		}
 	} else {
-		if err := s.registry.Heartbeat(req.ID); err != nil {
+		if err := s.orchestrator.Heartbeat(req.ID); err != nil {
 			return nil, rpc.InternalError(err.Error())
 		}
 	}
@@ -654,21 +646,6 @@ func (s *Server) handleGuestLog(ctx context.Context, params json.RawMessage) (in
 		return nil, rpc.InvalidParamsError("task_id and line are required")
 	}
 
-	// Detect the ASSIGNED → RUNNING transition on the first log entry.
-	// The guest sends "Task started" as the first log, which signals that
-	// execution has begun. Transition the task status and notify the UI.
-	s.trackMu.Lock()
-	if !s.trackedTasks[req.TaskID] {
-		s.trackedTasks[req.TaskID] = true
-		if err := s.taskQueue.Start(req.TaskID); err == nil {
-			s.log.Printf("task %s started (first log received)", req.TaskID)
-		}
-		s.trackMu.Unlock()
-		s.broadcastTaskUpdated(req.TaskID, "RUNNING")
-	} else {
-		s.trackMu.Unlock()
-	}
-
 	// Use the log accumulator to batch text deltas into complete messages.
 	// Only non-text levels (tool, system, error) bypass the buffer.
 	s.logAccumulator.Feed(
@@ -732,6 +709,7 @@ func (s *Server) handleGuestLog(ctx context.Context, params json.RawMessage) (in
 func (s *Server) handleGuestResult(ctx context.Context, params json.RawMessage) (interface{}, *rpc.RPCError) {
 	var result struct {
 		TaskID  string `json:"task_id"`
+		GuestID string `json:"guest_id"`
 		Success bool   `json:"success"`
 		Output  string `json:"output,omitempty"`
 		Error   string `json:"error,omitempty"`
@@ -745,14 +723,25 @@ func (s *Server) handleGuestResult(ctx context.Context, params json.RawMessage) 
 		return nil, rpc.InvalidParamsError("task_id is required")
 	}
 
+	// Find guest ID from task if not provided
+	guestID := result.GuestID
+	if guestID == "" {
+		if task, ok := s.orchestrator.GetTask(result.TaskID); ok && task.AssignedTo != "" {
+			guestID = task.AssignedTo
+		}
+	}
+
+	var statusStr string
 	if result.Success {
-		if err := s.taskQueue.Complete(result.TaskID, result.Output); err != nil {
+		if err := s.orchestrator.CompleteTask(result.TaskID, guestID, result.Output); err != nil {
 			return nil, rpc.InternalError(err.Error())
 		}
+		statusStr = "COMPLETED"
 	} else {
-		if err := s.taskQueue.Fail(result.TaskID, result.Error); err != nil {
+		if err := s.orchestrator.FailTask(result.TaskID, guestID, result.Error); err != nil {
 			return nil, rpc.InternalError(err.Error())
 		}
+		statusStr = "FAILED"
 	}
 
 	// Flush any remaining accumulated logs for this task
@@ -765,24 +754,14 @@ func (s *Server) handleGuestResult(ctx context.Context, params json.RawMessage) 
 		})
 	})
 
-	// Find the guest that submitted this result and clear its task assignment
-	if guestID, exists := s.taskQueue.GetAssignedGuest(result.TaskID); exists {
-		if err := s.registry.ClearGuestTask(guestID); err != nil {
-			s.log.Printf("failed to clear guest task for %s: %v", guestID, err)
-		}
-
-		// Try to assign the next pending task to this now-idle guest
+	// Orchestrator already cleared the guest atomically.
+	// Try to assign the next pending task to this now-idle guest.
+	if guestID != "" {
 		s.tryAssignTask(guestID)
 	}
 
 	// Notify UI of task completion
-	s.hub.Broadcast(rpc.ConnectionRoleBrowser, &rpc.JSONRPCMessage{
-		JSONRPC: "2.0",
-		Method:  "task.updated",
-		Params: json.RawMessage(fmt.Sprintf(`{"task_id":"%s","status":"%s"}`,
-			result.TaskID,
-			map[bool]string{true: "completed", false: "failed"}[result.Success])),
-	})
+	s.broadcastTaskUpdated(result.TaskID, statusStr)
 
 	return map[string]interface{}{
 		"status": "accepted",
@@ -810,21 +789,12 @@ func (s *Server) handleGuestTaskDeclined(ctx context.Context, params json.RawMes
 
 	s.log.Printf("task %s declined by guest %s: %s", req.TaskID, req.GuestID, req.Reason)
 
-	// Revert the task assignment in the queue
-	if err := s.taskQueue.UpdateStatus(req.TaskID, queue.TaskStatusPending); err != nil {
-		s.log.Printf("failed to re-queue task %s: %v", req.TaskID, err)
+	// Decline atomically: task→PENDING, guest→IDLE
+	if err := s.orchestrator.DeclineTask(req.TaskID, req.GuestID); err != nil {
+		s.log.Printf("failed to decline task %s: %v", req.TaskID, err)
 	} else {
-		// Clear the guest's task assignment in the registry
-		if err := s.registry.ClearGuestTask(req.GuestID); err != nil {
-			s.log.Printf("failed to clear guest task for %s: %v", req.GuestID, err)
-		}
-
 		// Notify UI of task re-queue
-		s.hub.Broadcast(rpc.ConnectionRoleBrowser, &rpc.JSONRPCMessage{
-			JSONRPC: "2.0",
-			Method:  "task.updated",
-			Params:  json.RawMessage(fmt.Sprintf(`{"task_id":"%s","status":"pending"}`, req.TaskID)),
-		})
+		s.broadcastTaskUpdated(req.TaskID, "PENDING")
 
 		// Try to assign the task to another eligible guest
 		s.tryAssignTaskToEligible(req.TaskID)
@@ -855,15 +825,11 @@ func (s *Server) handleGuestCancelled(ctx context.Context, params json.RawMessag
 
 	s.log.Printf("task %s cancelled by guest %s: %s", req.TaskID, req.GuestID, req.Reason)
 
-	// Update task status to CANCELLED (guest confirms the task was stopped)
-	if err := s.taskQueue.UpdateStatus(req.TaskID, queue.TaskStatusCancelled); err != nil {
+	// Cancel atomically: task→CANCELLED, guest→IDLE.
+	// Orchestrator.CancelTask handles RUNNING→CANCELLED (was missing before).
+	if err := s.orchestrator.CancelTask(req.TaskID, req.GuestID); err != nil {
 		s.log.Printf("failed to cancel task %s: %v", req.TaskID, err)
 		return nil, rpc.InternalError(err.Error())
-	}
-
-	// Clear the guest's task assignment in the registry
-	if err := s.registry.ClearGuestTask(req.GuestID); err != nil {
-		s.log.Printf("failed to clear guest task for %s: %v", req.GuestID, err)
 	}
 
 	// Flush any remaining accumulated logs for this task
@@ -872,10 +838,7 @@ func (s *Server) handleGuestCancelled(ctx context.Context, params json.RawMessag
 	})
 
 	// Notify UI of task cancellation
-	s.hub.SendNotification("", rpc.ConnectionRoleBrowser, "task.updated", map[string]interface{}{
-		"task_id": req.TaskID,
-		"status":  "CANCELLED",
-	})
+	s.broadcastTaskUpdated(req.TaskID, "CANCELLED")
 
 	return map[string]interface{}{
 		"status": "accepted",
@@ -889,6 +852,50 @@ func (s *Server) handleTaskAssign(ctx context.Context, params json.RawMessage) (
 	}, nil
 }
 
+// handleTaskAcknowledge handles the guest's explicit acknowledgment of a task
+// assignment. This is the handshake: the guest confirms it received the task
+// and is executing it. The server transitions ASSIGNED→RUNNING.
+func (s *Server) handleTaskAcknowledge(ctx context.Context, params json.RawMessage) (interface{}, *rpc.RPCError) {
+	var req struct {
+		TaskID  string `json:"task_id"`
+		GuestID string `json:"guest_id"`
+	}
+
+	if err := json.Unmarshal(params, &req); err != nil {
+		return nil, rpc.InvalidParamsError("invalid request parameters")
+	}
+
+	if req.TaskID == "" {
+		return nil, rpc.InvalidParamsError("task_id is required")
+	}
+
+	// Find guest ID from context if not provided
+	guestID := req.GuestID
+	if guestID == "" {
+		if connID, ok := rpc.ConnectionIDFromContext(ctx); ok {
+			if gid, err := s.hub.GuestIDFromConnection(connID); err == nil {
+				guestID = gid
+			}
+		}
+	}
+
+	if guestID == "" {
+		return nil, rpc.InvalidParamsError("guest_id is required")
+	}
+
+	if err := s.orchestrator.AcknowledgeTask(req.TaskID, guestID); err != nil {
+		s.log.Printf("task %s ack failed from guest %s: %v", req.TaskID, guestID, err)
+		return nil, rpc.InternalError(err.Error())
+	}
+
+	s.log.Printf("task %s acknowledged by guest %s (ASSIGNED→RUNNING)", req.TaskID, guestID)
+	s.broadcastTaskUpdated(req.TaskID, "RUNNING")
+
+	return map[string]interface{}{
+		"status": "ok",
+	}, nil
+}
+
 // handleTaskCancel is registered for host→guest task.cancel (for completeness).
 func (s *Server) handleTaskCancel(ctx context.Context, params json.RawMessage) (interface{}, *rpc.RPCError) {
 	return map[string]interface{}{
@@ -896,17 +903,16 @@ func (s *Server) handleTaskCancel(ctx context.Context, params json.RawMessage) (
 	}, nil
 }
 
-// tryAssignTask tries to assign a pending task to the given guest.
 // tryAssignTaskToEligible finds an idle guest that matches the given task's
 // tags and assigns the task to that guest. It is used when a previously-
 // assigned guest declines the task.
 func (s *Server) tryAssignTaskToEligible(taskID string) {
-	task, exists := s.taskQueue.Get(taskID)
-	if !exists {
+	task, ok := s.orchestrator.GetTask(taskID)
+	if !ok {
 		return
 	}
 
-	guests := s.registry.FindAvailableGuests(task.Tags)
+	guests := s.orchestrator.FindAvailableGuests(task.Tags)
 	if len(guests) == 0 {
 		return
 	}
@@ -918,14 +924,8 @@ func (s *Server) tryAssignTaskToEligible(taskID string) {
 			continue
 		}
 
-		if err := s.taskQueue.Assign(task.ID, guest.ID); err != nil {
+		if err := s.orchestrator.AssignTask(task.ID, guest.ID); err != nil {
 			s.log.Printf("failed to assign task %s to guest %s: %v", task.ID, guest.ID, err)
-			continue
-		}
-
-		if err := s.registry.SetGuestTask(guest.ID, task.ID); err != nil {
-			s.log.Printf("failed to set guest task: %v", err)
-			s.taskQueue.UpdateStatus(task.ID, queue.TaskStatusPending)
 			continue
 		}
 
@@ -938,8 +938,8 @@ func (s *Server) tryAssignTaskToEligible(taskID string) {
 
 		if err := s.hub.SendToGuest(guest.ID, "task.assign", taskData); err != nil {
 			s.log.Printf("failed to push task to guest %s: %v", guest.ID, err)
-			s.registry.ClearGuestTask(guest.ID)
-			s.taskQueue.UpdateStatus(task.ID, queue.TaskStatusPending)
+			// Rollback: re-queue the task
+			_ = s.orchestrator.RequeueTask(task.ID)
 			continue
 		}
 
@@ -949,17 +949,12 @@ func (s *Server) tryAssignTaskToEligible(taskID string) {
 		s.broadcastTaskUpdated(task.ID, "ASSIGNED")
 		return
 	}
-
-	// No guest accepted — re-queue the task
-	if err := s.taskQueue.UpdateStatus(taskID, queue.TaskStatusPending); err != nil {
-		s.log.Printf("failed to re-queue task %s after all guests declined: %v", taskID, err)
-	}
 }
 
 // tryAssignTask tries to assign a pending task to the given guest.
 func (s *Server) tryAssignTask(guestID string) {
-	guest, exists := s.registry.GetGuest(guestID)
-	if !exists {
+	guest, ok := s.orchestrator.GetGuest(guestID)
+	if !ok {
 		return
 	}
 
@@ -970,7 +965,7 @@ func (s *Server) tryAssignTask(guestID string) {
 	}
 
 	// Find a pending task that matches the guest's tags
-	pending := s.taskQueue.GetPendingTasks()
+	pending := s.orchestrator.GetPendingTasks()
 	var matchedTask *queue.Task
 
 	for _, task := range pending {
@@ -988,14 +983,9 @@ func (s *Server) tryAssignTask(guestID string) {
 		return
 	}
 
-	// Assign the task
-	if err := s.taskQueue.Assign(matchedTask.ID, guestID); err != nil {
+	// Assign atomically: task→ASSIGNED, guest→RUNNING
+	if err := s.orchestrator.AssignTask(matchedTask.ID, guestID); err != nil {
 		s.log.Printf("failed to assign task %s to guest %s: %v", matchedTask.ID, guestID, err)
-		return
-	}
-
-	if err := s.registry.SetGuestTask(guestID, matchedTask.ID); err != nil {
-		s.log.Printf("failed to set guest task: %v", err)
 		return
 	}
 
@@ -1009,13 +999,8 @@ func (s *Server) tryAssignTask(guestID string) {
 
 	if err := s.hub.SendToGuest(guestID, "task.assign", taskData); err != nil {
 		s.log.Printf("failed to push task to guest %s: %v", guestID, err)
-		// Rollback: revert both the task assignment and the guest state
-		if err := s.taskQueue.UpdateStatus(matchedTask.ID, queue.TaskStatusPending); err != nil {
-			s.log.Printf("failed to revert task %s to PENDING: %v", matchedTask.ID, err)
-		}
-		if err := s.registry.ClearGuestTask(guestID); err != nil {
-			s.log.Printf("failed to clear guest %s task: %v", guestID, err)
-		}
+		// Rollback: re-queue the task atomically
+		_ = s.orchestrator.RequeueTask(matchedTask.ID)
 		return
 	}
 
@@ -1050,7 +1035,7 @@ func (s *Server) staleGuestCleanup() {
 			s.checkSilentGuests()
 
 			// Then: Remove guests that have been completely silent (no heartbeat).
-			stale := s.registry.RemoveStaleGuests(time.Duration(s.cfg.HeartbeatInterval) * time.Second)
+			stale := s.orchestrator.Registry().RemoveStaleGuests(time.Duration(s.cfg.HeartbeatInterval) * time.Second)
 			for _, guest := range stale {
 				s.log.Printf("stale guest removed: %s", guest.ID)
 			}
@@ -1060,49 +1045,30 @@ func (s *Server) staleGuestCleanup() {
 
 // checkSilentGuests finds guests that have been silent (no heartbeat) for longer
 // than the configured SilenceTimeout and kills their running tasks.
+//
+// Uses the orchestrator's atomic check which inspects task status before acting,
+// preventing races with checkStuckTasks.
 func (s *Server) checkSilentGuests() {
 	timeout := time.Duration(s.cfg.SilenceTimeout) * time.Second
 	if timeout == 0 {
 		return // Silence detection disabled
 	}
 
-	now := time.Now()
-	for _, guest := range s.registry.GetAllGuests() {
-		if guest.TaskID == "" {
-			continue // Not running a task
+	silent := s.orchestrator.CheckSilentGuests(timeout)
+	for _, sg := range silent {
+		s.log.Printf("guest %s silent, task %s failed", sg.GuestID, sg.TaskID)
+
+		// Notify the UI
+		s.broadcastTaskUpdated(sg.TaskID, "FAILED")
+
+		// Send task.cancel RPC to the guest to abort the pi subprocess.
+		// This is best-effort — the guest may already be disconnected.
+		cancelParams := map[string]interface{}{
+			"task_id": sg.TaskID,
+			"reason":  "guest silence timeout",
 		}
-
-		if now.Sub(guest.LastHeartbeat) > timeout {
-			s.log.Printf("guest %s silent for %v, killing task %s",
-				guest.ID, now.Sub(guest.LastHeartbeat), guest.TaskID)
-
-			// Mark the task as failed in the queue
-			if err := s.taskQueue.Fail(guest.TaskID, fmt.Sprintf("guest went silent for %.0f seconds", now.Sub(guest.LastHeartbeat).Seconds())); err != nil {
-				s.log.Printf("failed to mark task %s as failed: %v", guest.TaskID, err)
-			}
-
-			// Clear the guest's task assignment
-			if err := s.registry.KillRunningGuestTask(guest.ID); err != nil {
-				s.log.Printf("failed to kill guest %s task: %v", guest.ID, err)
-			}
-
-			// Notify the UI
-			s.hub.Broadcast(rpc.ConnectionRoleBrowser, &rpc.JSONRPCMessage{
-				JSONRPC: "2.0",
-				Method:  "task.updated",
-				Params: json.RawMessage(fmt.Sprintf(`{"task_id":"%s","status":"failed"}`,
-					guest.TaskID)),
-			})
-
-			// Send task.cancel RPC to the guest to abort the pi subprocess.
-			// This is best-effort — the guest may already be disconnected.
-			cancelParams := map[string]interface{}{
-				"task_id": guest.TaskID,
-				"reason":  "guest silence timeout",
-			}
-			if err := s.hub.SendToGuest(guest.ID, "task.cancel", cancelParams); err != nil {
-				s.log.Printf("failed to send task.cancel to guest %s: %v (guest may be disconnected)", guest.ID, err)
-			}
+		if err := s.hub.SendToGuest(sg.GuestID, "task.cancel", cancelParams); err != nil {
+			s.log.Printf("failed to send task.cancel to guest %s: %v (guest may be disconnected)", sg.GuestID, err)
 		}
 	}
 }
@@ -1118,55 +1084,13 @@ func (s *Server) checkStuckTasks() {
 		return // Stuck task detection disabled
 	}
 
-	stuck := s.registry.GetStuckGuests(timeout)
-	for _, guest := range stuck {
-		s.log.Printf("task %s stuck on guest %s for > %v (guest never confirmed assignment), re-queuing",
-			guest.TaskID, guest.ID, timeout)
+	stuck := s.orchestrator.CheckStuckTasks(timeout)
+	for _, st := range stuck {
+		s.log.Printf("task %s stuck on guest %s for > %v, re-queuing",
+			st.TaskID, st.GuestID, timeout)
 
-		// Re-queue the task — but only if it's still in ASSIGNED state.
-		// The task may have already been re-queued by another code path
-		// (e.g. handleGuestTaskDeclined) or reached a terminal state.
-		task, exists := s.taskQueue.Get(guest.TaskID)
-		if !exists {
-			s.log.Printf("task %s not found, clearing guest %s stale reference", guest.TaskID, guest.ID)
-			if err := s.registry.ClearGuestTask(guest.ID); err != nil {
-				s.log.Printf("failed to clear guest %s task: %v", guest.ID, err)
-			}
-			continue
-		}
-
-		switch task.Status {
-		case queue.TaskStatusAssigned:
-			// Task is still ASSIGNED — safe to re-queue
-			if err := s.taskQueue.UpdateStatus(guest.TaskID, queue.TaskStatusPending); err != nil {
-				s.log.Printf("failed to re-queue stuck task %s: %v", guest.TaskID, err)
-				continue
-			}
-		case queue.TaskStatusPending:
-			// Task already re-queued by another path — just clear guest reference
-			s.log.Printf("task %s already PENDING, clearing guest %s stale reference", guest.TaskID, guest.ID)
-		default:
-			// Task in terminal or other state — just clear guest reference
-			s.log.Printf("task %s in %s state, clearing guest %s stale reference", guest.TaskID, task.Status, guest.ID)
-		}
-
-		// Clear the guest's task assignment
-		if err := s.registry.ClearGuestTask(guest.ID); err != nil {
-			s.log.Printf("failed to clear guest %s task: %v", guest.ID, err)
-		}
-
-		// Notify the UI (only if we actually re-queued)
-		if task.Status == queue.TaskStatusAssigned {
-			s.hub.Broadcast(rpc.ConnectionRoleBrowser, &rpc.JSONRPCMessage{
-				JSONRPC: "2.0",
-				Method:  "task.updated",
-				Params: json.RawMessage(fmt.Sprintf(`{"task_id":"%s","status":"pending"}`,
-					guest.TaskID)),
-			})
-		}
-
-		// Try to assign the re-queued task to another eligible guest
-		s.tryAssignTaskToEligible(guest.TaskID)
+		// Notify the UI
+		s.broadcastTaskUpdated(st.TaskID, "PENDING")
 	}
 }
 
@@ -1235,8 +1159,8 @@ func (s *Server) HandleHealth(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]interface{}{
 		"status": "healthy",
-		"guests": s.registry.Count(),
-		"tasks":  s.taskQueue.Count(),
+		"guests": s.orchestrator.Registry().Count(),
+		"tasks":  s.orchestrator.Queue().Count(),
 	})
 }
 
@@ -1256,7 +1180,7 @@ func (s *Server) HandleTasks(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleGetTasks(w http.ResponseWriter, r *http.Request) {
-	tasks := s.taskQueue.GetAllTasks()
+	tasks := s.orchestrator.GetAllTasks()
 	json.NewEncoder(w).Encode(map[string]interface{}{
 		"tasks": tasks,
 		"count": len(tasks),
@@ -1274,13 +1198,13 @@ func (s *Server) handleCreateTask(w http.ResponseWriter, r *http.Request) {
 		task.ID = fmt.Sprintf("task-%d", time.Now().UnixNano())
 	}
 
-	if err := s.taskQueue.Add(&task); err != nil {
+	if err := s.orchestrator.AddTask(&task); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
 
 	// Try to assign to an available guest
-	guests := s.registry.FindAvailableGuests(task.Tags)
+	guests := s.orchestrator.FindAvailableGuests(task.Tags)
 	if len(guests) > 0 {
 		s.tryAssignTask(guests[0].ID)
 	}
@@ -1315,8 +1239,8 @@ func (s *Server) HandleTaskDetail(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	task, exists := s.taskQueue.Get(taskID)
-	if !exists {
+	task, ok := s.orchestrator.GetTask(taskID)
+	if !ok {
 		http.Error(w, "task not found", http.StatusNotFound)
 		return
 	}
@@ -1345,8 +1269,8 @@ func (s *Server) handleTaskRerun(w http.ResponseWriter, r *http.Request, taskID 
 		return
 	}
 
-	orig, exists := s.taskQueue.Get(taskID)
-	if !exists {
+	orig, ok := s.orchestrator.GetTask(taskID)
+	if !ok {
 		http.Error(w, "task not found", http.StatusNotFound)
 		return
 	}
@@ -1359,13 +1283,13 @@ func (s *Server) handleTaskRerun(w http.ResponseWriter, r *http.Request, taskID 
 		Tags:   orig.Tags,
 	}
 
-	if err := s.taskQueue.Add(newTask); err != nil {
+	if err := s.orchestrator.AddTask(newTask); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
 
 	// Try to assign to an available guest
-	guests := s.registry.FindAvailableGuests(newTask.Tags)
+	guests := s.orchestrator.FindAvailableGuests(newTask.Tags)
 	if len(guests) > 0 {
 		s.tryAssignTask(guests[0].ID)
 	}
@@ -1389,8 +1313,8 @@ func (s *Server) handleTaskCancelHTTP(w http.ResponseWriter, r *http.Request, ta
 		return
 	}
 
-	task, exists := s.taskQueue.Get(taskID)
-	if !exists {
+	task, ok := s.orchestrator.GetTask(taskID)
+	if !ok {
 		http.Error(w, "task not found", http.StatusNotFound)
 		return
 	}
@@ -1404,15 +1328,11 @@ func (s *Server) handleTaskCancelHTTP(w http.ResponseWriter, r *http.Request, ta
 
 	switch task.Status {
 	case queue.TaskStatusPending, queue.TaskStatusAssigned:
-		// Cancel directly — no guest needs to be notified
-		if err := s.taskQueue.Cancel(taskID); err != nil {
+		// Cancel atomically — no guest needs to be notified.
+		// Orchestrator.CancelTask handles guest cleanup.
+		if err := s.orchestrator.CancelTask(taskID, task.AssignedTo); err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
-		}
-
-		// Clear guest task reference if assigned
-		if task.AssignedTo != "" {
-			_ = s.registry.ClearGuestTask(task.AssignedTo)
 		}
 
 	case queue.TaskStatusRunning:
@@ -1433,7 +1353,7 @@ func (s *Server) handleTaskCancelHTTP(w http.ResponseWriter, r *http.Request, ta
 	}
 
 	// Broadcast task.updated to browsers
-	task, _ = s.taskQueue.Get(taskID)
+	task, _ = s.orchestrator.GetTask(taskID)
 	s.hub.SendNotification("", rpc.ConnectionRoleBrowser, "task.updated", map[string]interface{}{
 		"task_id": task.ID,
 		"status":  task.Status.String(),
@@ -1453,7 +1373,7 @@ func (s *Server) HandleGuests(w http.ResponseWriter, r *http.Request) {
 
 	switch r.Method {
 	case http.MethodGet:
-		guests := s.registry.GetAllGuests()
+		guests := s.orchestrator.GetAllGuests()
 		json.NewEncoder(w).Encode(map[string]interface{}{
 			"guests": guests,
 			"count":  len(guests),
@@ -1472,8 +1392,8 @@ func (s *Server) HandleGuestDetail(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	guest, exists := s.registry.GetGuest(guestID)
-	if !exists {
+	guest, ok := s.orchestrator.GetGuest(guestID)
+	if !ok {
 		http.Error(w, "guest not found", http.StatusNotFound)
 		return
 	}
