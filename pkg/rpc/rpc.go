@@ -260,10 +260,13 @@ func (h *Hub) RegisterMethod(method string, handler Handler) {
 }
 
 // NewConnection creates a new connection in the hub.
-func (h *Hub) NewConnection(id string, conn *websocket.Conn) *Connection {
+// The role is set atomically with connection creation to avoid races
+// with Hub.Run() (the connection may not be in the map yet).
+func (h *Hub) NewConnection(id string, conn *websocket.Conn, role ConnectionRole) *Connection {
 	c := &Connection{
 		id:      id,
 		conn:    conn,
+		role:    role,
 		send:    make(chan []byte, 256),
 		hub:     h,
 		closeCh: make(chan struct{}),
@@ -438,6 +441,8 @@ func (h *Hub) GetAllConnectionIDs() []string {
 }
 
 // SetConnectionRole sets the role of a connection (browser or guest).
+// Used for post-registration role changes (e.g. browser → guest after
+// guest.register RPC). The connection must already be in the hub's map.
 func (h *Hub) SetConnectionRole(connID string, role ConnectionRole) {
 	h.mu.Lock()
 	defer h.mu.Unlock()

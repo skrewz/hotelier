@@ -1179,9 +1179,7 @@ func (s *Server) HandleWebSocket(w http.ResponseWriter, r *http.Request) {
 
 	// Generate a unique connection ID
 	connID := fmt.Sprintf("conn-%d", time.Now().UnixNano())
-	client := s.hub.NewConnection(connID, conn)
-	// Default to browser role; guest role is set after guest.register RPC
-	s.hub.SetConnectionRole(connID, rpc.ConnectionRoleBrowser)
+	client := s.hub.NewConnection(connID, conn, rpc.ConnectionRoleBrowser)
 	go client.ReadLoop()
 	go client.WriteLoop()
 }
