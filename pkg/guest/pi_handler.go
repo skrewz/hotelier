@@ -180,7 +180,7 @@ func (h *PIHandler) ExecuteTask(ctx context.Context, task TaskAssignment, sendLo
 
 	// Send the prompt
 	h.log.Printf("[PI] sending prompt to pi (client running: %v)", h.client.IsRunning())
-	if err := sendLog(LogEntry{TaskID: task.TaskID, Line: "Sending prompt to pi", Level: "system"}); err != nil {
+	if err := sendLog(LogEntry{TaskID: task.TaskID, Line: fmt.Sprintf("Prompt: %s", prompt), Level: "system"}); err != nil {
 		h.log.Printf("[PI] failed to send operational log: %v", err)
 	}
 	if err := h.client.Prompt(ctx, prompt); err != nil {
@@ -459,8 +459,13 @@ func (h *PIHandler) resetClient(ctx context.Context, workDir string) error {
 }
 
 // buildPrompt constructs the prompt for pi with repo context.
+// The user's prompt is always placed first so that template commands
+// (e.g. /repo-ideation) start at the top of the message and are
+// expanded by pi.  Context tidbits are appended after.
 func (h *PIHandler) buildPrompt(task TaskAssignment) string {
 	var parts []string
+
+	parts = append(parts, task.Prompt)
 
 	if len(task.Repos) > 0 {
 		parts = append(parts, fmt.Sprintf("Working repositories: %s", strings.Join(task.Repos, ", ")))
@@ -468,7 +473,6 @@ func (h *PIHandler) buildPrompt(task TaskAssignment) string {
 	if len(task.Tags) > 0 {
 		parts = append(parts, fmt.Sprintf("Required tags: %s", strings.Join(task.Tags, ", ")))
 	}
-	parts = append(parts, fmt.Sprintf("Task prompt: %s", task.Prompt))
 
 	return strings.Join(parts, "\n\n")
 }
