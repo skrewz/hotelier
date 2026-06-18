@@ -802,8 +802,10 @@ func (s *Server) handleGuestTaskDeclined(ctx context.Context, params json.RawMes
 		// Notify UI of task re-queue
 		s.broadcastTaskUpdated(req.TaskID, "PENDING")
 
-		// Try to assign the task to another eligible guest
-		s.tryAssignTaskToEligible(req.TaskID)
+		// Try to assign the task to another eligible guest.
+		// Pass the declining guest ID so we skip it — DeclineTask already
+		// cleared task.AssignedTo, so the skip check inside would not work.
+		s.tryAssignTaskToEligible(req.TaskID, req.GuestID)
 	}
 
 	return map[string]interface{}{
@@ -954,8 +956,10 @@ func (s *Server) tryAssignPendingTasks() {
 
 // tryAssignTaskToEligible finds an idle guest that matches the given task's
 // tags and assigns the task to that guest. It is used when a previously-
-// assigned guest declines the task.
-func (s *Server) tryAssignTaskToEligible(taskID string) {
+// assigned guest declines the task. The skipGuestID parameter identifies
+// the guest that declined and must be skipped (the task.AssignedTo field
+// is already cleared by the time this function is called).
+func (s *Server) tryAssignTaskToEligible(taskID, skipGuestID string) {
 	task, ok := s.orchestrator.GetTask(taskID)
 	if !ok {
 		return
@@ -969,7 +973,7 @@ func (s *Server) tryAssignTaskToEligible(taskID string) {
 	// Try each idle guest in order until one accepts
 	for _, guest := range guests {
 		// Skip the guest that already declined
-		if guest.ID == task.AssignedTo {
+		if guest.ID == skipGuestID {
 			continue
 		}
 
