@@ -173,8 +173,16 @@ func (a *LogAccumulator) Feed(taskID, line, level string, emit func(entry TaskLo
 
 	// Check if we should flush due to inactivity (only if buffer exists
 	// and hasn't been flushed by level change above).
+	//
+	// Skip inactivity flush for thinking level. Thinking deltas arrive in
+	// small chunks with pauses between them, and a long thinking block can
+	// easily exceed the flush period. Flushing thinking on inactivity would
+	// split it into multiple entries, producing piecemeal output.
 	if _, ok := a.buffer[taskID]; !ok {
 		// Fresh buffer — no inactivity check needed.
+	} else if effLevel == "thinking" {
+		// Thinking blocks must never be split by inactivity flush.
+		// They are flushed only on level change (thinking→text/tool) or FlushAll.
 	} else if last, ok := a.lastFlush[taskID]; ok && now.Sub(last) > a.flushPeriod {
 		a.flushBuffer(taskID, emit)
 	}

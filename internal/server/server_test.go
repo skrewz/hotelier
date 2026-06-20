@@ -1790,6 +1790,50 @@ func TestLogAccumulator_ToolFlushesThinkingBuffer(t *testing.T) {
 	}
 }
 
+// TestLogAccumulator_ThinkingNotFlushedByInactivity verifies that thinking
+// deltas are NOT split by the inactivity flush. Thinking blocks can be long
+// and arrive in small chunks with pauses between them. The accumulator should
+// batch the entire thinking block into a single entry, only flushing when
+// the level changes (thinking→text/tool) or FlushAll is called.
+func TestLogAccumulator_ThinkingNotFlushedByInactivity(t *testing.T) {
+	logger := log.New(io.Discard, "", 0)
+	acc := NewLogAccumulator(logger)
+
+	var emitted []TaskLogEntry
+	emit := func(e TaskLogEntry) {
+		emitted = append(emitted, e)
+	}
+
+	// Feed thinking deltas with >1s gaps between them (simulating slow Pi generation)
+	acc.Feed("task-1", "Let me think ", "thinking", emit)
+	time.Sleep(1100 * time.Millisecond) // exceed flushPeriod
+
+	acc.Feed("task-1", "about this ", "thinking", emit)
+	time.Sleep(1100 * time.Millisecond) // exceed flushPeriod again
+
+	acc.Feed("task-1", "problem.", "thinking", emit)
+
+	// Thinking deltas should NOT have been emitted yet — inactivity flush
+	// must be skipped for thinking level.
+	if len(emitted) != 0 {
+		t.Fatalf("expected 0 emitted entries (thinking should not be split by inactivity), got %d: %v",
+			len(emitted), emitted)
+	}
+
+	// Flush — should produce a single combined thinking entry
+	acc.FlushAll(emit)
+
+	if len(emitted) != 1 {
+		t.Fatalf("expected 1 emitted entry after FlushAll, got %d: %v", len(emitted), emitted)
+	}
+	if emitted[0].Line != "Let me think about this problem." {
+		t.Errorf("expected 'Let me think about this problem.', got %q", emitted[0].Line)
+	}
+	if emitted[0].Level != "thinking" {
+		t.Errorf("expected level 'thinking', got %q", emitted[0].Level)
+	}
+}
+
 // TestIntegration_TaskLogBroadcast verifies that when a guest sends a task.log
 // notification via RPC, the server stores it, broadcasts it via WebSocket, and
 // the receiving connection gets the notification.
