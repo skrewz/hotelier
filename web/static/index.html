@@ -19,7 +19,7 @@
         .stat-label { font-size: 0.75rem; color: #94a3b8; text-transform: uppercase; }
         .container { display: flex; height: calc(100vh - 60px); }
         .sidebar { width: 320px; background: #1e293b; border-right: 1px solid #334155; overflow-y: auto; }
-        .main { flex: 1; overflow-y: auto; padding: 1rem; min-height: 0; }
+        .main { display: flex; flex-direction: column; flex: 1; overflow: hidden; padding: 1rem; min-height: 0; }
         .panel { padding: 1rem; border-bottom: 1px solid #334155; }
         .panel h3 { font-size: 0.875rem; color: #94a3b8; margin-bottom: 0.75rem; text-transform: uppercase; letter-spacing: 0.05em; }
         .guest-item { padding: 0.5rem; margin-bottom: 0.5rem; background: #0f172a; border-radius: 0.375rem; cursor: pointer; }
@@ -55,7 +55,7 @@
         .btn-danger:hover { background: #991b1b; color: #fecaca; }
 
         /* Task detail view */
-        .task-detail { display: flex; flex-direction: column; height: 100%; }
+        .task-detail { display: flex; flex-direction: column; flex: 1; min-height: 0; }
         .task-detail-header { display: flex; justify-content: space-between; align-items: center; padding: 1rem; background: #1e293b; border-radius: 0.5rem 0.5rem 0 0; border: 1px solid #334155; border-bottom: none; }
         .task-detail-id { font-weight: 600; font-size: 0.875rem; color: #38bdf8; }
         .task-detail-meta { font-size: 0.75rem; color: #94a3b8; margin-top: 0.25rem; }
@@ -273,13 +273,13 @@
                 <div class="tab active" onclick="showTab('tasks')">Tasks</div>
                 <div class="tab" onclick="showTab('logs')">Logs</div>
             </div>
-            <div id="tab-tasks">
+            <div id="tab-tasks" style="display:flex;flex-direction:column;flex:1;overflow:hidden;min-height:0;">
                 <div id="task-summary" class="task-summary"></div>
                 <div id="task-filter-row" class="task-filter-row"></div>
-                <div id="task-list"></div>
+                <div id="task-list" style="flex:1;overflow-y:auto;min-height:0;"></div>
             </div>
-            <div id="tab-logs" style="display:none;">
-                <div id="log-view">
+            <div id="tab-logs" style="display:none;flex:1;overflow:hidden;min-height:0;position:relative;">
+                <div id="log-view" style="position:absolute;top:0;left:0;right:0;bottom:0;display:flex;flex-direction:column;">
                     <div class="empty-state"><span>📋</span>No logs configured</div>
                 </div>
             </div>
@@ -1099,10 +1099,40 @@
             };
         }
 
+        // isScrolledToBottom returns true if the element is scrolled within
+        // `threshold` pixels of the bottom.  Default threshold is 10px.
+        function isScrolledToBottom(el, threshold) {
+            threshold = threshold || 10;
+            return el.scrollHeight - el.scrollTop - el.clientHeight <= threshold;
+        }
+
+        // scrollToBottomIfNeeded scrolls the element to the bottom only if the
+        // user was already at (or near) the bottom.  This lets the user scroll
+        // up to read older content without being yanked back down.
+        //
+        // If wasAtBottom is provided (boolean), it is used directly instead of
+        // checking the current scroll position.  This is needed when the caller
+        // has already mutated the DOM (which changes scrollHeight), so the
+        // "at bottom" check must be done against the pre-mutation state.
+        function scrollToBottomIfNeeded(el, wasAtBottom) {
+            if (wasAtBottom === undefined) {
+                wasAtBottom = isScrolledToBottom(el);
+            }
+            if (wasAtBottom) {
+                el.scrollTop = el.scrollHeight;
+            }
+        }
+
         function appendLogToDetail(logEntry) {
             const view = document.getElementById('log-view');
             const body = view.querySelector('.task-detail-body');
             if (!body) return;
+
+            // Capture scroll position BEFORE any DOM mutation.
+            // After appending, scrollHeight increases and the "at bottom"
+            // check would incorrectly return false even if the user was
+            // at the bottom before the new content arrived.
+            const wasAtBottom = isScrolledToBottom(body);
 
             const level = logEntry.level || '';
             const line = logEntry.line;
@@ -1115,7 +1145,7 @@
                         args: logEntry.tool_args, output: '', status: 'running', hasOutput: false
                     }, '', '');
                     body.appendChild(frag);
-                    body.scrollTop = body.scrollHeight;
+                    scrollToBottomIfNeeded(body, wasAtBottom);
                     return;
                 }
 
@@ -1132,7 +1162,7 @@
                             }
                         }
                     }
-                    body.scrollTop = body.scrollHeight;
+                    scrollToBottomIfNeeded(body, wasAtBottom);
                     return;
                 }
 
@@ -1177,7 +1207,7 @@
                         const chevron = header.querySelector('.tool-chevron');
                         if (chevron) chevron.classList.add('open');
                     }
-                    body.scrollTop = body.scrollHeight;
+                    scrollToBottomIfNeeded(body, wasAtBottom);
                     return;
                 }
             }
@@ -1219,7 +1249,7 @@
                 msgEl.appendChild(inner);
             }
             body.appendChild(msgEl);
-            body.scrollTop = body.scrollHeight;
+            scrollToBottomIfNeeded(body, wasAtBottom);
 
             // Update log count in header
             const meta = view.querySelector('.task-detail-meta');
@@ -1260,7 +1290,7 @@
                 return;
             }
             let html = '<div class="log-breadcrumb"><span class="current">All Dates</span></div>';
-            html += '<div id="log-dates-list">';
+            html += '<div style="flex:1;overflow-y:auto;min-height:0;" id="log-dates-list">';
             html += dates.map(d => `
                 <div class="log-task-item" onclick="loadLogTasks('${d}')">
                     <span class="log-task-id">📅 ${d}</span>
@@ -1297,9 +1327,9 @@
             html += '<span class="current">' + date + ' (' + count + ' tasks)</span>';
             html += '</div>';
             if (summaries.length === 0) {
-                html += '<div class="empty-state"><span>📭</span>No tasks for this date</div>';
+                html += '<div style="flex:1;min-height:0;"><div class="empty-state"><span>📭</span>No tasks for this date</div></div>';
             } else {
-                html += '<div id="log-tasks-list">';
+                html += '<div style="flex:1;overflow-y:auto;min-height:0;" id="log-tasks-list">';
                 html += summaries.map(s => {
                     const ts = s.start_timestamp
                         ? new Date(s.start_timestamp).toLocaleString()
@@ -1345,7 +1375,7 @@
             html += '</div>';
 
             if (entries.length === 0) {
-                html += '<div class="empty-state"><span>📭</span>No log entries for this task</div>';
+                html += '<div style="flex:1;min-height:0;"><div class="empty-state"><span>📭</span>No log entries for this task</div></div>';
             } else {
                 // Use rich tool-block rendering (same as task detail view)
                 const isRunning = false; // Logs view is static; streaming handled separately
@@ -1427,7 +1457,7 @@
                     currentToolBlock = null;
                 }
 
-                html += '<div id="log-entries-list">' + entriesHtml + '</div>';
+                html += '<div style="flex:1;overflow-y:auto;min-height:0;" id="log-entries-list">' + entriesHtml + '</div>';
             }
             view.innerHTML = html;
             highlightCommandLines(view);

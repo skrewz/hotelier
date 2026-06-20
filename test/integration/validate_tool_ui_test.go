@@ -958,6 +958,153 @@ const { chromium } = require('playwright');
   }
 
   // =====================================================================
+  // Phase 3b: Scroll behaviour — auto-scroll to bottom on new messages
+  // =====================================================================
+  console.log('=== Phase 3b: Scroll behaviour ===');
+
+  // Ensure the body has enough content to be scrollable.
+  // The test data may fit exactly in the viewport, so we inject
+  // placeholder content to guarantee scrollHeight > clientHeight.
+  const scrollSetup = await page.evaluate(() => {
+    const body = document.querySelector('.task-detail-body');
+    if (!body) return { error: 'no .task-detail-body' };
+
+    // If already scrollable, nothing to do
+    if (body.scrollHeight > body.clientHeight) {
+      return { wasScrollable: true };
+    }
+
+    // Inject enough spacer content to make the body scrollable.
+    // Each spacer is ~20px tall; add enough to exceed clientHeight.
+    const needed = body.clientHeight + 100; // 100px of overflow
+    const spacer = document.createElement('div');
+    spacer.className = 'log-msg scroll-test-spacer';
+    spacer.style.height = needed + 'px';
+    spacer.style.background = '#1e293b';
+    spacer.textContent = 'spacer';
+    body.appendChild(spacer);
+
+    return { wasScrollable: false, newScrollHeight: body.scrollHeight };
+  });
+  if (scrollSetup.error) fail(scrollSetup.error);
+  console.log('Body scrollable:', scrollSetup.wasScrollable ? 'yes (already)' : 'yes (after spacer, height=' + scrollSetup.newScrollHeight + ')');
+
+  // 1. Verify isScrolledToBottom helper works correctly
+  const scrollHelpersOk = await page.evaluate(() => {
+    const body = document.querySelector('.task-detail-body');
+    if (!body) return { error: 'no .task-detail-body' };
+
+    // Scroll to bottom first
+    body.scrollTop = body.scrollHeight;
+    const atBottom = isScrolledToBottom(body);
+
+    // Scroll up by 50px (or as much as possible)
+    const scrollUp = Math.min(50, body.scrollHeight - body.clientHeight);
+    body.scrollTop = body.scrollHeight - body.clientHeight - scrollUp;
+    const notAtBottom = !isScrolledToBottom(body);
+
+    return { atBottom, notAtBottom };
+  });
+  if (scrollHelpersOk.error) fail(scrollHelpersOk.error);
+  const helperChecks = [
+    { name: 'isScrolledToBottom returns true when at bottom', pass: scrollHelpersOk.atBottom },
+    { name: 'isScrolledToBottom returns false when scrolled up', pass: scrollHelpersOk.notAtBottom },
+  ];
+  for (const c of helperChecks) {
+    if (!c.pass) fail(c.name);
+    console.log('PASS:', c.name);
+  }
+
+  // 2. Verify scrollToBottomIfNeeded only scrolls when already at bottom
+  const conditionalScrollOk = await page.evaluate(() => {
+    const body = document.querySelector('.task-detail-body');
+    if (!body) return { error: 'no .task-detail-body' };
+
+    // When scrolled up, scrollToBottomIfNeeded should NOT change scrollTop
+    const scrollUp = Math.min(50, body.scrollHeight - body.clientHeight);
+    body.scrollTop = body.scrollHeight - body.clientHeight - scrollUp;
+    const scrollTopBefore = body.scrollTop;
+    scrollToBottomIfNeeded(body);
+    const stayedPut = body.scrollTop === scrollTopBefore;
+
+    // When at bottom, scrollToBottomIfNeeded should keep us at bottom
+    body.scrollTop = body.scrollHeight;
+    scrollToBottomIfNeeded(body);
+    const stayedAtBottom = isScrolledToBottom(body);
+
+    return { stayedPut, stayedAtBottom };
+  });
+  if (conditionalScrollOk.error) fail(conditionalScrollOk.error);
+  const conditionalChecks = [
+    { name: 'scrollToBottomIfNeeded stays put when scrolled up', pass: conditionalScrollOk.stayedPut },
+    { name: 'scrollToBottomIfNeeded stays at bottom when already there', pass: conditionalScrollOk.stayedAtBottom },
+  ];
+  for (const c of conditionalChecks) {
+    if (!c.pass) fail(c.name);
+    console.log('PASS:', c.name);
+  }
+
+  // 3. Verify that appendLogToDetail respects scroll position
+  //    Simulate a new log entry and check scroll behaviour.
+  const appendScrollOk = await page.evaluate(() => {
+    const body = document.querySelector('.task-detail-body');
+    if (!body) return { error: 'no .task-detail-body' };
+
+    // Create a fake log entry
+    const fakeEntry = {
+      task_id: 'test-task',
+      line: '[SCROLL-TEST] This is a test message',
+      level: 'system',
+      timestamp: new Date().toISOString(),
+    };
+
+    // Test A: when scrolled up, appending should NOT scroll
+    const scrollUp = Math.min(50, body.scrollHeight - body.clientHeight);
+    body.scrollTop = body.scrollHeight - body.clientHeight - scrollUp;
+    const scrollTopBefore = body.scrollTop;
+    appendLogToDetail(fakeEntry);
+    const stayedPut = Math.abs(body.scrollTop - scrollTopBefore) < 5;
+
+    // Test B: when at bottom, appending SHOULD scroll
+    body.scrollTop = body.scrollHeight;
+    const oldHeight = body.scrollHeight;
+    appendLogToDetail(fakeEntry);
+    // scrollTop is capped at scrollHeight - clientHeight, so we check
+    // that the element is at the bottom, not that scrollTop >= oldHeight.
+    const scrolledDown = isScrolledToBottom(body);
+
+    // Clean up test entries (remove last 2 elements added)
+    for (let i = 0; i < 2; i++) {
+      const lastChild = body.lastElementChild;
+      if (lastChild && lastChild.textContent && lastChild.textContent.includes('[SCROLL-TEST]')) {
+        body.removeChild(lastChild);
+      }
+    }
+
+    return {
+      stayedPut,
+      scrolledDown,
+    };
+  });
+  if (appendScrollOk.error) fail(appendScrollOk.error);
+  const appendChecks = [
+    { name: 'appendLogToDetail stays put when scrolled up', pass: appendScrollOk.stayedPut },
+    { name: 'appendLogToDetail scrolls down when at bottom', pass: appendScrollOk.scrolledDown },
+  ];
+  for (const c of appendChecks) {
+    if (!c.pass) fail(c.name);
+    console.log('PASS:', c.name);
+  }
+
+  // Clean up spacer content
+  await page.evaluate(() => {
+    const spacer = document.querySelector('.scroll-test-spacer');
+    if (spacer) spacer.remove();
+  });
+
+  await takeScreenshot('03b-scroll-behaviour');
+
+  // =====================================================================
   // Phase 4: Logs tab — dates, tasks, entries, breadcrumbs
   // =====================================================================
   console.log('=== Phase 4: Logs tab ===');
