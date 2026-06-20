@@ -422,6 +422,124 @@ func TestPIHandler_PrepareReposCloning(t *testing.T) {
 	}
 }
 
+// TestPIHandler_CleanupTaskDir_RemovesDirectory verifies that cleanupTaskDir
+// removes the task directory after a task completes. Guests should clean up
+// after themselves regardless of success or failure.
+func TestPIHandler_CleanupTaskDir_RemovesDirectory(t *testing.T) {
+	baseDir, err := os.MkdirTemp("", "hotelier-base-*")
+	if err != nil {
+		t.Fatalf("create temp base dir: %v", err)
+	}
+	defer os.RemoveAll(baseDir)
+
+	client := pi.NewClient(pi.PiClientConfig{
+		CWD: baseDir,
+		Log: log.New(io.Discard, "", 0),
+	})
+
+	h := &PIHandler{
+		baseCWD: baseDir,
+		client:  client,
+		log:     log.New(io.Discard, "", 0),
+	}
+
+	// Create a task directory via prepareRepos
+	taskDir, err := h.prepareRepos(context.Background(), "task-1", []string{}, nil)
+	if err != nil {
+		t.Fatalf("prepareRepos failed: %v", err)
+	}
+
+	// Verify the directory exists before cleanup
+	if _, err := os.Stat(taskDir); err != nil {
+		t.Fatalf("task dir %s should exist before cleanup: %v", taskDir, err)
+	}
+
+	// Clean up the task directory
+	err = h.cleanupTaskDir("task-1")
+	if err != nil {
+		t.Fatalf("cleanupTaskDir failed: %v", err)
+	}
+
+	// Verify the directory no longer exists
+	if _, err := os.Stat(taskDir); !os.IsNotExist(err) {
+		t.Errorf("task dir %s should have been removed after cleanup", taskDir)
+	}
+}
+
+// TestPIHandler_CleanupTaskDir_Idempotent verifies that cleanupTaskDir is
+// safe to call even when the directory has already been removed.
+func TestPIHandler_CleanupTaskDir_Idempotent(t *testing.T) {
+	baseDir, err := os.MkdirTemp("", "hotelier-base-*")
+	if err != nil {
+		t.Fatalf("create temp base dir: %v", err)
+	}
+	defer os.RemoveAll(baseDir)
+
+	client := pi.NewClient(pi.PiClientConfig{
+		CWD: baseDir,
+		Log: log.New(io.Discard, "", 0),
+	})
+
+	h := &PIHandler{
+		baseCWD: baseDir,
+		client:  client,
+		log:     log.New(io.Discard, "", 0),
+	}
+
+	// Cleanup a non-existent directory should not error
+	err = h.cleanupTaskDir("nonexistent-task")
+	if err != nil {
+		t.Errorf("cleanupTaskDir should not error on missing directory: %v", err)
+	}
+}
+
+// TestPIHandler_CleanupTaskDir_WithContents verifies that cleanupTaskDir
+// removes the task directory and all its contents (including cloned repos).
+func TestPIHandler_CleanupTaskDir_WithContents(t *testing.T) {
+	baseDir, err := os.MkdirTemp("", "hotelier-base-*")
+	if err != nil {
+		t.Fatalf("create temp base dir: %v", err)
+	}
+	defer os.RemoveAll(baseDir)
+
+	client := pi.NewClient(pi.PiClientConfig{
+		CWD: baseDir,
+		Log: log.New(io.Discard, "", 0),
+	})
+
+	h := &PIHandler{
+		baseCWD: baseDir,
+		client:  client,
+		log:     log.New(io.Discard, "", 0),
+	}
+
+	// Create a task directory
+	taskDir, err := h.prepareRepos(context.Background(), "task-1", []string{}, nil)
+	if err != nil {
+		t.Fatalf("prepareRepos failed: %v", err)
+	}
+
+	// Create some files inside the task directory (simulating work artefacts)
+	testFile := filepath.Join(taskDir, "output.txt")
+	if err := os.WriteFile(testFile, []byte("hello"), 0o644); err != nil {
+		t.Fatalf("create test file: %v", err)
+	}
+
+	// Clean up
+	err = h.cleanupTaskDir("task-1")
+	if err != nil {
+		t.Fatalf("cleanupTaskDir failed: %v", err)
+	}
+
+	// Both the directory and its contents should be gone
+	if _, err := os.Stat(taskDir); !os.IsNotExist(err) {
+		t.Errorf("task dir %s should have been removed", taskDir)
+	}
+	if _, err := os.Stat(testFile); !os.IsNotExist(err) {
+		t.Errorf("file inside task dir should have been removed: %s", testFile)
+	}
+}
+
 // TestPIHandler_FinalOutputPreservesNewlines verifies that the model's
 // final output (sent via agent_end) is transmitted as a single log entry
 // with newlines preserved, not split into separate entries.

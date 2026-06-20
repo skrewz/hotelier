@@ -164,6 +164,14 @@ func (h *PIHandler) ExecuteTask(ctx context.Context, task TaskAssignment, sendLo
 		return nil, fmt.Errorf("prepare repos: %w", err)
 	}
 
+	// Clean up the task directory when the task completes (success or failure).
+	// Guests should clean up after themselves.
+	defer func() {
+		if err := h.cleanupTaskDir(task.TaskID); err != nil {
+			h.log.Printf("[CLEANUP] failed to remove task directory: %v", err)
+		}
+	}()
+
 	// Build the prompt for pi — include repo context
 	prompt := h.buildPrompt(task)
 
@@ -455,6 +463,19 @@ func (h *PIHandler) resetClient(ctx context.Context, workDir string) error {
 		return fmt.Errorf("start pi client in %s: %w", workDir, err)
 	}
 	h.log.Printf("[PI] pi subprocess started in: %s", workDir)
+	return nil
+}
+
+// cleanupTaskDir removes the task directory and all its contents.
+// Guests clean up after themselves so stale directories don't accumulate.
+// This method is safe to call even if the directory does not exist.
+func (h *PIHandler) cleanupTaskDir(taskID string) error {
+	taskDir := filepath.Join(h.baseCWD, "tasks", taskID)
+	h.log.Printf("[CLEANUP] removing task directory: %s", taskDir)
+	if err := os.RemoveAll(taskDir); err != nil {
+		return fmt.Errorf("cleanup task dir %s: %w", taskDir, err)
+	}
+	h.log.Printf("[CLEANUP] task directory removed: %s", taskDir)
 	return nil
 }
 
