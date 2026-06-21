@@ -1687,9 +1687,10 @@ func TestLogAccumulator_TextBufferFlushedBeforeTool(t *testing.T) {
 	}
 }
 
-// TestLogAccumulator_ThinkingDeltasBatched verifies that thinking deltas
-// are batched like text deltas but emitted with level "thinking".
-func TestLogAccumulator_ThinkingDeltasBatched(t *testing.T) {
+// TestLogAccumulator_ThinkingDeltasEmitImmediately verifies that thinking
+// deltas are emitted one-by-one (not batched) so the frontend can stream
+// them piecemeal.
+func TestLogAccumulator_ThinkingDeltasEmitImmediately(t *testing.T) {
 	logger := log.New(io.Discard, "", 0)
 	acc := NewLogAccumulator(logger)
 
@@ -1698,33 +1699,39 @@ func TestLogAccumulator_ThinkingDeltasBatched(t *testing.T) {
 		emitted = append(emitted, e)
 	}
 
-	// Thinking deltas should accumulate
+	// Each thinking delta should be emitted immediately
 	acc.Feed("task-1", "Let me think ", "thinking", emit)
-	acc.Feed("task-1", "about this", "thinking", emit)
-
-	// Nothing emitted yet - still buffering
-	if len(emitted) != 0 {
-		t.Fatalf("expected 0 emitted entries during buffer, got %d", len(emitted))
-	}
-
-	// Flush
-	acc.FlushAll(emit)
-
 	if len(emitted) != 1 {
-		t.Fatalf("expected 1 emitted entry after flush, got %d", len(emitted))
+		t.Fatalf("expected 1 emitted entry after first thinking delta, got %d", len(emitted))
 	}
-	if emitted[0].Line != "Let me think about this" {
-		t.Errorf("expected 'Let me think about this', got %q", emitted[0].Line)
+	if emitted[0].Line != "Let me think " {
+		t.Errorf("expected 'Let me think ', got %q", emitted[0].Line)
 	}
 	if emitted[0].Level != "thinking" {
 		t.Errorf("expected level 'thinking', got %q", emitted[0].Level)
 	}
+
+	acc.Feed("task-1", "about this", "thinking", emit)
+	if len(emitted) != 2 {
+		t.Fatalf("expected 2 emitted entries after second thinking delta, got %d", len(emitted))
+	}
+	if emitted[1].Line != "about this" {
+		t.Errorf("expected 'about this', got %q", emitted[1].Line)
+	}
+	if emitted[1].Level != "thinking" {
+		t.Errorf("expected level 'thinking', got %q", emitted[1].Level)
+	}
+
+	// Flush should produce no additional entries
+	acc.FlushAll(emit)
+	if len(emitted) != 2 {
+		t.Fatalf("expected 2 emitted entries after FlushAll, got %d", len(emitted))
+	}
 }
 
-// TestLogAccumulator_ThinkingTextLevelTransition verifies that when
-// thinking deltas are buffered and text deltas arrive, the thinking
-// buffer is flushed first with level "thinking", then text accumulates.
-func TestLogAccumulator_ThinkingTextLevelTransition(t *testing.T) {
+// TestLogAccumulator_ThinkingFlushesTextBuffer verifies that when thinking
+// deltas arrive, any pending text buffer is flushed first.
+func TestLogAccumulator_ThinkingFlushesTextBuffer(t *testing.T) {
 	logger := log.New(io.Discard, "", 0)
 	acc := NewLogAccumulator(logger)
 
@@ -1733,40 +1740,40 @@ func TestLogAccumulator_ThinkingTextLevelTransition(t *testing.T) {
 		emitted = append(emitted, e)
 	}
 
-	// Thinking deltas accumulate
-	acc.Feed("task-1", "Let me think ", "thinking", emit)
-	acc.Feed("task-1", "about this", "thinking", emit)
+	// Text accumulates in buffer
+	acc.Feed("task-1", "First ", "text", emit)
+	acc.Feed("task-1", "sentence.", "text", emit)
 
-	// Text delta arrives - should flush thinking buffer first
-	acc.Feed("task-1", "Here is my answer", "text", emit)
+	// Thinking arrives - should flush text buffer, then emit thinking immediately
+	acc.Feed("task-1", "Hmm, let me think.", "thinking", emit)
 
-	// Should have 1 entry: the flushed thinking block
-	if len(emitted) != 1 {
-		t.Fatalf("expected 1 emitted entry after level transition, got %d", len(emitted))
-	}
-	if emitted[0].Line != "Let me think about this" {
-		t.Errorf("entry 0: expected 'Let me think about this', got %q", emitted[0].Line)
-	}
-	if emitted[0].Level != "thinking" {
-		t.Errorf("entry 0: expected level 'thinking', got %q", emitted[0].Level)
-	}
-
-	// Flush remaining text
-	acc.FlushAll(emit)
-
+	// Should have 2 entries: flushed text, then thinking
 	if len(emitted) != 2 {
-		t.Fatalf("expected 2 emitted entries total, got %d", len(emitted))
+		t.Fatalf("expected 2 emitted entries after thinking arrives, got %d", len(emitted))
 	}
-	if emitted[1].Line != "Here is my answer" {
-		t.Errorf("entry 1: expected 'Here is my answer', got %q", emitted[1].Line)
+	if emitted[0].Line != "First sentence." {
+		t.Errorf("entry 0: expected 'First sentence.', got %q", emitted[0].Line)
 	}
-	if emitted[1].Level != "text" {
-		t.Errorf("entry 1: expected level 'text', got %q", emitted[1].Level)
+	if emitted[0].Level != "text" {
+		t.Errorf("entry 0: expected level 'text', got %q", emitted[0].Level)
+	}
+	if emitted[1].Line != "Hmm, let me think." {
+		t.Errorf("entry 1: expected 'Hmm, let me think.', got %q", emitted[1].Line)
+	}
+	if emitted[1].Level != "thinking" {
+		t.Errorf("entry 1: expected level 'thinking', got %q", emitted[1].Level)
+	}
+
+	// Flush should produce no additional entries
+	acc.FlushAll(emit)
+	if len(emitted) != 2 {
+		t.Fatalf("expected 2 emitted entries after FlushAll, got %d", len(emitted))
 	}
 }
 
 // TestLogAccumulator_TextThinkingTextTransition verifies the full cycle:
-// text → thinking → text, with each buffer flushed on level change.
+// text → thinking → text, with thinking emitted immediately and text
+// buffered.
 func TestLogAccumulator_TextThinkingTextTransition(t *testing.T) {
 	logger := log.New(io.Discard, "", 0)
 	acc := NewLogAccumulator(logger)
@@ -1780,17 +1787,18 @@ func TestLogAccumulator_TextThinkingTextTransition(t *testing.T) {
 	acc.Feed("task-1", "First ", "text", emit)
 	acc.Feed("task-1", "sentence.", "text", emit)
 
-	// Thinking arrives - flushes text buffer
+	// Thinking arrives - flushes text buffer, emits immediately
 	acc.Feed("task-1", "Hmm, ", "thinking", emit)
 	acc.Feed("task-1", "let me reconsider.", "thinking", emit)
 
-	// Text arrives again - flushes thinking buffer
+	// Text arrives again - thinking doesn't buffer so nothing to flush.
+	// Text accumulates in buffer.
 	acc.Feed("task-1", "Actually, ", "text", emit)
 	acc.Feed("task-1", "here's my answer.", "text", emit)
 
-	// Should have 2 entries so far: text flushed, thinking flushed
-	if len(emitted) != 2 {
-		t.Fatalf("expected 2 emitted entries after transitions, got %d", len(emitted))
+	// Should have 3 entries: text flushed, thinking x2
+	if len(emitted) != 3 {
+		t.Fatalf("expected 3 emitted entries after transitions, got %d", len(emitted))
 	}
 	if emitted[0].Line != "First sentence." {
 		t.Errorf("entry 0: expected 'First sentence.', got %q", emitted[0].Line)
@@ -1798,30 +1806,36 @@ func TestLogAccumulator_TextThinkingTextTransition(t *testing.T) {
 	if emitted[0].Level != "text" {
 		t.Errorf("entry 0: expected level 'text', got %q", emitted[0].Level)
 	}
-	if emitted[1].Line != "Hmm, let me reconsider." {
-		t.Errorf("entry 1: expected 'Hmm, let me reconsider.', got %q", emitted[1].Line)
+	if emitted[1].Line != "Hmm, " {
+		t.Errorf("entry 1: expected 'Hmm, ', got %q", emitted[1].Line)
 	}
 	if emitted[1].Level != "thinking" {
 		t.Errorf("entry 1: expected level 'thinking', got %q", emitted[1].Level)
+	}
+	if emitted[2].Line != "let me reconsider." {
+		t.Errorf("entry 2: expected 'let me reconsider.', got %q", emitted[2].Line)
+	}
+	if emitted[2].Level != "thinking" {
+		t.Errorf("entry 2: expected level 'thinking', got %q", emitted[2].Level)
 	}
 
 	// Flush remaining text
 	acc.FlushAll(emit)
 
-	if len(emitted) != 3 {
-		t.Fatalf("expected 3 emitted entries total, got %d", len(emitted))
+	if len(emitted) != 4 {
+		t.Fatalf("expected 4 emitted entries total, got %d", len(emitted))
 	}
-	if emitted[2].Line != "Actually, here's my answer." {
-		t.Errorf("entry 2: expected \"Actually, here's my answer.\", got %q", emitted[2].Line)
+	if emitted[3].Line != "Actually, here's my answer." {
+		t.Errorf("entry 3: expected \"Actually, here's my answer.\", got %q", emitted[3].Line)
 	}
-	if emitted[2].Level != "text" {
-		t.Errorf("entry 2: expected level 'text', got %q", emitted[2].Level)
+	if emitted[3].Level != "text" {
+		t.Errorf("entry 3: expected level 'text', got %q", emitted[3].Level)
 	}
 }
 
-// TestLogAccumulator_ToolFlushesThinkingBuffer verifies that a tool message
-// flushes any pending thinking buffer.
-func TestLogAccumulator_ToolFlushesThinkingBuffer(t *testing.T) {
+// TestLogAccumulator_ToolFlushesPendingBuffers verifies that a tool message
+// flushes any pending text buffer and is emitted immediately.
+func TestLogAccumulator_ToolFlushesPendingBuffers(t *testing.T) {
 	logger := log.New(io.Discard, "", 0)
 	acc := NewLogAccumulator(logger)
 
@@ -1830,36 +1844,43 @@ func TestLogAccumulator_ToolFlushesThinkingBuffer(t *testing.T) {
 		emitted = append(emitted, e)
 	}
 
-	// Thinking accumulates
-	acc.Feed("task-1", "Let me think ", "thinking", emit)
-	acc.Feed("task-1", "about this", "thinking", emit)
+	// Text accumulates
+	acc.Feed("task-1", "Let me think ", "text", emit)
+	acc.Feed("task-1", "about this", "text", emit)
 
-	// Tool message should flush thinking buffer
+	// Thinking emitted immediately
+	acc.Feed("task-1", "Hmm.", "thinking", emit)
+
+	// Tool message should flush any pending text buffer (there shouldn't be any)
 	acc.Feed("task-1", "[TOOL_START] bash: ls (id: t1)", "tool", emit)
 
-	if len(emitted) != 2 {
-		t.Fatalf("expected 2 emitted entries, got %d", len(emitted))
+	if len(emitted) != 3 {
+		t.Fatalf("expected 3 emitted entries, got %d", len(emitted))
 	}
 	if emitted[0].Line != "Let me think about this" {
 		t.Errorf("entry 0: expected 'Let me think about this', got %q", emitted[0].Line)
 	}
-	if emitted[0].Level != "thinking" {
-		t.Errorf("entry 0: expected level 'thinking', got %q", emitted[0].Level)
+	if emitted[0].Level != "text" {
+		t.Errorf("entry 0: expected level 'text', got %q", emitted[0].Level)
 	}
-	if emitted[1].Line != "[TOOL_START] bash: ls (id: t1)" {
-		t.Errorf("entry 1: expected tool start, got %q", emitted[1].Line)
+	if emitted[1].Line != "Hmm." {
+		t.Errorf("entry 1: expected 'Hmm.', got %q", emitted[1].Line)
 	}
-	if emitted[1].Level != "tool" {
-		t.Errorf("entry 1: expected level 'tool', got %q", emitted[1].Level)
+	if emitted[1].Level != "thinking" {
+		t.Errorf("entry 1: expected level 'thinking', got %q", emitted[1].Level)
+	}
+	if emitted[2].Line != "[TOOL_START] bash: ls (id: t1)" {
+		t.Errorf("entry 2: expected tool start, got %q", emitted[2].Line)
+	}
+	if emitted[2].Level != "tool" {
+		t.Errorf("entry 2: expected level 'tool', got %q", emitted[2].Level)
 	}
 }
 
-// TestLogAccumulator_ThinkingNotFlushedByInactivity verifies that thinking
-// deltas are NOT split by the inactivity flush. Thinking blocks can be long
-// and arrive in small chunks with pauses between them. The accumulator should
-// batch the entire thinking block into a single entry, only flushing when
-// the level changes (thinking→text/tool) or FlushAll is called.
-func TestLogAccumulator_ThinkingNotFlushedByInactivity(t *testing.T) {
+// TestLogAccumulator_ThinkingDeltasEmitImmediatelyWithGaps verifies that
+// thinking deltas are emitted immediately even with long gaps between them.
+// This replaces the old TestLogAccumulator_ThinkingNotFlushedByInactivity.
+func TestLogAccumulator_ThinkingDeltasEmitImmediatelyWithGaps(t *testing.T) {
 	logger := log.New(io.Discard, "", 0)
 	acc := NewLogAccumulator(logger)
 
@@ -1868,33 +1889,35 @@ func TestLogAccumulator_ThinkingNotFlushedByInactivity(t *testing.T) {
 		emitted = append(emitted, e)
 	}
 
-	// Feed thinking deltas with >1s gaps between them (simulating slow Pi generation)
+	// Feed thinking deltas with >1s gaps between them
 	acc.Feed("task-1", "Let me think ", "thinking", emit)
+	if len(emitted) != 1 {
+		t.Fatalf("expected 1 emitted entry after first delta, got %d", len(emitted))
+	}
+
 	time.Sleep(1100 * time.Millisecond) // exceed flushPeriod
 
 	acc.Feed("task-1", "about this ", "thinking", emit)
+	if len(emitted) != 2 {
+		t.Fatalf("expected 2 emitted entries after second delta, got %d", len(emitted))
+	}
+
 	time.Sleep(1100 * time.Millisecond) // exceed flushPeriod again
 
 	acc.Feed("task-1", "problem.", "thinking", emit)
-
-	// Thinking deltas should NOT have been emitted yet — inactivity flush
-	// must be skipped for thinking level.
-	if len(emitted) != 0 {
-		t.Fatalf("expected 0 emitted entries (thinking should not be split by inactivity), got %d: %v",
-			len(emitted), emitted)
+	if len(emitted) != 3 {
+		t.Fatalf("expected 3 emitted entries after third delta, got %d", len(emitted))
 	}
 
-	// Flush — should produce a single combined thinking entry
-	acc.FlushAll(emit)
-
-	if len(emitted) != 1 {
-		t.Fatalf("expected 1 emitted entry after FlushAll, got %d: %v", len(emitted), emitted)
+	// Each delta should be its own entry
+	if emitted[0].Line != "Let me think " {
+		t.Errorf("entry 0: expected 'Let me think ', got %q", emitted[0].Line)
 	}
-	if emitted[0].Line != "Let me think about this problem." {
-		t.Errorf("expected 'Let me think about this problem.', got %q", emitted[0].Line)
+	if emitted[1].Line != "about this " {
+		t.Errorf("entry 1: expected 'about this ', got %q", emitted[1].Line)
 	}
-	if emitted[0].Level != "thinking" {
-		t.Errorf("expected level 'thinking', got %q", emitted[0].Level)
+	if emitted[2].Line != "problem." {
+		t.Errorf("entry 2: expected 'problem.', got %q", emitted[2].Line)
 	}
 }
 

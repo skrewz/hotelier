@@ -825,14 +825,38 @@
                 const isRunning = task.status === 'RUNNING' || task.status === 'ASSIGNED';
                 let currentToolBlock = null;
 
+                // Accumulators for merging consecutive thinking/text entries
+                let pendingThinkingLines = '';
+                let pendingTextLines = '';
+
+                function flushPendingThinking() {
+                    if (pendingThinkingLines) {
+                        logsHtml += buildThinkingBlockHTML(pendingThinkingLines);
+                        pendingThinkingLines = '';
+                    }
+                }
+
+                function flushPendingText() {
+                    if (pendingTextLines) {
+                        logsHtml += `<div class="log-msg guest${pendingTextCursor ? ' streaming-cursor' : ''}"><div class="md-rendered">${renderMarkdown(pendingTextLines)}</div></div>`;
+                        pendingTextLines = '';
+                        pendingTextCursor = '';
+                    }
+                }
+
+                let pendingTextCursor = '';
+
                 logs.forEach((log, i) => {
                     const isLast = i === logs.length - 1 && isRunning;
-                    const timeStr = new Date(log.timestamp).toLocaleTimeString();
                     const cursorClass = isLast ? ' streaming-cursor' : '';
                     const level = log.level || '';
 
                     // Use structured fields to determine event type.
                     if (level === 'tool' && log.tool_type) {
+                        // Flush any pending thinking/text before tool processing.
+                        flushPendingThinking();
+                        flushPendingText();
+
                         if (log.tool_type === 'start') {
                             if (currentToolBlock) {
                                 // Flush previous incomplete block
@@ -883,18 +907,30 @@
                         currentToolBlock = null;
                     }
 
-                    let msgHtml;
                     if (level === 'thinking') {
-                        msgHtml = buildThinkingBlockHTML(log.line);
-                    } else if (level === 'system') {
-                        msgHtml = `<div class="log-msg system${cursorClass}">${escapeHtml(log.line)}</div>`;
-                    } else if (level === 'error') {
-                        msgHtml = `<div class="log-msg error${cursorClass}">${escapeHtml(log.line)}</div>`;
+                        // Merge consecutive thinking entries into a single block
+                        flushPendingText();
+                        pendingThinkingLines += log.line;
                     } else {
-                        msgHtml = `<div class="log-msg guest${cursorClass}"><div class="md-rendered">${renderMarkdown(log.line)}</div></div>`;
+                        // Non-thinking entry: flush pending thinking, then
+                        // accumulate or flush text.
+                        flushPendingThinking();
+                        if (level === 'system') {
+                            logsHtml += `<div class="log-msg system${cursorClass}">${escapeHtml(log.line)}</div>`;
+                        } else if (level === 'error') {
+                            logsHtml += `<div class="log-msg error${cursorClass}">${escapeHtml(log.line)}</div>`;
+                        } else {
+                            // Text/info — accumulate consecutive text entries
+                            // and merge into a single guest message.
+                            pendingTextLines += log.line;
+                            if (isLast) pendingTextCursor = cursorClass;
+                        }
                     }
-                    logsHtml += msgHtml;
                 });
+
+                // Flush any remaining accumulators
+                flushPendingThinking();
+                flushPendingText();
 
                 // Close any remaining open tool block
                 if (currentToolBlock) {
@@ -1124,6 +1160,86 @@
             }
         }
 
+        // Track the last appended level for streaming logic
+        let _lastAppendedLevel = '';
+
+        // _appendThinkingToDetail appends a thinking delta to the last
+        // thinking block (streaming). If no thinking block exists, creates
+        // a new one that starts open so the user can see content arriving.
+        function _appendThinkingToDetail(body, line, wasAtBottom) {
+            const blocks = body.querySelectorAll('.thinking-block');
+            const lastBlock = blocks.length > 0 ? blocks[blocks.length - 1] : null;
+            if (lastBlock) {
+                // Append to existing block's thinking-content div
+                const contentEl = lastBlock.querySelector('.thinking-content');
+                if (contentEl) {
+                    contentEl.textContent += line;
+                }
+                // Ensure the block is open
+                const bodyEl = lastBlock.querySelector('.thinking-block-body');
+                const chevron = lastBlock.querySelector('.thinking-chevron');
+                if (bodyEl) bodyEl.classList.add('open');
+                if (chevron) chevron.classList.add('open');
+            } else {
+                // Create a new thinking block, open by default
+                const blockId = nextThinkingBlockId();
+                const msgEl = document.createElement('div');
+                msgEl.className = 'thinking-block';
+                msgEl.id = 'thinking-' + blockId;
+                msgEl.innerHTML = `
+                    <div class="thinking-block-header" onclick="toggleThinkingBlock('${blockId}')">
+                        <div>
+                            <span class="thinking-icon">💭</span>
+                            <span class="thinking-label">Thinking</span>
+                        </div>
+                        <span class="thinking-chevron open">▶</span>
+                    </div>
+                    <div class="thinking-block-body open" id="thinking-body-${blockId}">
+                        <div class="thinking-content">${escapeHtml(line)}</div>
+                    </div>
+                `;
+                body.appendChild(msgEl);
+            }
+            scrollToBottomIfNeeded(body, wasAtBottom);
+        }
+
+        // _closeLastThinkingBlock closes the last thinking block (collapses it)
+        // if one exists. Used when a non-thinking entry arrives.
+        function _closeLastThinkingBlock(body) {
+            const blocks = body.querySelectorAll('.thinking-block');
+            const lastBlock = blocks.length > 0 ? blocks[blocks.length - 1] : null;
+            if (lastBlock) {
+                const bodyEl = lastBlock.querySelector('.thinking-block-body');
+                const chevron = lastBlock.querySelector('.thinking-chevron');
+                if (bodyEl) bodyEl.classList.remove('open');
+                if (chevron) chevron.classList.remove('open');
+            }
+        }
+
+        // _appendTextToDetail appends a text delta to the last text message div.
+        // If no text message div exists, creates a new one.
+        function _appendTextToDetail(body, line, wasAtBottom) {
+            const guestMsgs = body.querySelectorAll('.log-msg.guest');
+            const lastMsg = guestMsgs.length > 0 ? guestMsgs[guestMsgs.length - 1] : null;
+            if (lastMsg) {
+                // Append to existing message's md-rendered div
+                const mdEl = lastMsg.querySelector('.md-rendered');
+                if (mdEl) {
+                    mdEl.innerHTML = renderMarkdown(mdEl.textContent + line);
+                }
+            } else {
+                // Create a new text message div
+                const msgEl = document.createElement('div');
+                msgEl.className = 'log-msg guest';
+                const inner = document.createElement('div');
+                inner.className = 'md-rendered';
+                inner.innerHTML = renderMarkdown(line);
+                msgEl.appendChild(inner);
+                body.appendChild(msgEl);
+            }
+            scrollToBottomIfNeeded(body, wasAtBottom);
+        }
+
         function appendLogToDetail(logEntry) {
             const view = document.getElementById('log-view');
             const body = view.querySelector('.task-detail-body');
@@ -1141,12 +1257,15 @@
             // Use structured fields to determine event type.
             if (level === 'tool' && logEntry.tool_type) {
                 if (logEntry.tool_type === 'start') {
+                    // Close any open thinking block before tool starts
+                    _closeLastThinkingBlock(body);
                     const frag = renderToolBlockStart({
                         toolName: logEntry.tool_name, toolId: logEntry.tool_id,
                         args: logEntry.tool_args, output: '', status: 'running', hasOutput: false
                     }, '', '');
                     body.appendChild(frag);
                     scrollToBottomIfNeeded(body, wasAtBottom);
+                    _lastAppendedLevel = 'tool';
                     return;
                 }
 
@@ -1209,47 +1328,38 @@
                         if (chevron) chevron.classList.add('open');
                     }
                     scrollToBottomIfNeeded(body, wasAtBottom);
+                    _lastAppendedLevel = 'tool';
                     return;
                 }
             }
 
             // Non-tool log lines: render based on level
-            let msgEl;
             if (level === 'thinking') {
-                // Render as a collapsible thinking block
-                const blockId = nextThinkingBlockId();
-                msgEl = document.createElement('div');
-                msgEl.className = 'thinking-block';
-                msgEl.id = 'thinking-' + blockId;
-                msgEl.innerHTML = `
-                    <div class="thinking-block-header" onclick="toggleThinkingBlock('${blockId}')">
-                        <div>
-                            <span class="thinking-icon">💭</span>
-                            <span class="thinking-label">Thinking</span>
-                        </div>
-                        <span class="thinking-chevron">▶</span>
-                    </div>
-                    <div class="thinking-block-body" id="thinking-body-${blockId}">
-                        <div class="thinking-content">${escapeHtml(line)}</div>
-                    </div>
-                `;
-            } else if (level === 'system') {
-                msgEl = document.createElement('div');
-                msgEl.className = 'log-msg system';
-                msgEl.textContent = line;
-            } else if (level === 'error') {
-                msgEl = document.createElement('div');
-                msgEl.className = 'log-msg error';
-                msgEl.textContent = line;
+                // Append to the last thinking block (streaming), or create a new
+                // one that starts open so the user can see content arriving.
+                _appendThinkingToDetail(body, line, wasAtBottom);
+                _lastAppendedLevel = 'thinking';
             } else {
-                msgEl = document.createElement('div');
-                msgEl.className = 'log-msg guest';
-                const inner = document.createElement('div');
-                inner.className = 'md-rendered';
-                inner.innerHTML = renderMarkdown(line);
-                msgEl.appendChild(inner);
+                // Non-thinking entry: close the last thinking block if open,
+                // then append the new entry.
+                _closeLastThinkingBlock(body);
+
+                if (level === 'system') {
+                    const msgEl = document.createElement('div');
+                    msgEl.className = 'log-msg system';
+                    msgEl.textContent = line;
+                    body.appendChild(msgEl);
+                } else if (level === 'error') {
+                    const msgEl = document.createElement('div');
+                    msgEl.className = 'log-msg error';
+                    msgEl.textContent = line;
+                    body.appendChild(msgEl);
+                } else {
+                    // Text/info: append to the last text message div.
+                    _appendTextToDetail(body, line, wasAtBottom);
+                }
+                _lastAppendedLevel = level;
             }
-            body.appendChild(msgEl);
             scrollToBottomIfNeeded(body, wasAtBottom);
 
             // Update log count in header

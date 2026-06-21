@@ -264,9 +264,10 @@ func sendLogEntries(t *testing.T, guestWS *websocket.Conn, taskID string, entrie
 }
 
 // flushAccumulator forces the LogAccumulator to flush any buffered entries.
-// This is needed because thinking and text deltas are batched and only
-// flushed on level change or explicit FlushAll. When the last entries sent
-// are thinking/text deltas, they remain buffered until this call.
+// This is needed because text deltas are batched and only flushed on level
+// change or explicit FlushAll. Thinking deltas are emitted immediately,
+// so they don't need flushing. When the last entries sent are text deltas,
+// they remain buffered until this call.
 func flushAccumulator(t *testing.T, srv *server.Server) {
 	acc := srv.LogAccumulator()
 	if acc == nil {
@@ -484,9 +485,10 @@ func validateServerLogs(t *testing.T, srv *server.Server, taskID string, expecte
 	entries := logStore.Get(taskID)
 
 	// Validate structural properties rather than exact entry-by-entry matching.
-	// Thinking and text deltas are batched by the LogAccumulator, so the
-	// stored entries are fewer than the raw capture entries. The Playwright
-	// test validates the rendered UI; this validates the server-side storage.
+	// Text deltas are batched by the LogAccumulator, so stored text entries
+	// are fewer than the raw capture entries. Thinking deltas are emitted
+	// immediately (1:1 with raw deltas). The Playwright test validates the
+	// rendered UI; this validates the server-side storage.
 
 	// Count entries by level
 	var systemCount, thinkingCount, toolCount, textCount int
@@ -514,19 +516,17 @@ func validateServerLogs(t *testing.T, srv *server.Server, taskID string, expecte
 		t.Errorf("expected %d system entries, got %d", expectedSystemCount, systemCount)
 	}
 
-	// Thinking entries should be batched (fewer than raw deltas)
+	// Thinking entries should match 1:1 (emitted immediately, not batched)
 	var expectedThinkingDeltas int
 	for _, e := range expectedEntries {
 		if e.level == "thinking" {
 			expectedThinkingDeltas++
 		}
 	}
-	if thinkingCount == 0 {
-		t.Errorf("expected at least 1 thinking entry (batched), got %d", thinkingCount)
-	} else if thinkingCount > expectedThinkingDeltas {
-		t.Errorf("thinking entries (%d) should not exceed raw deltas (%d)", thinkingCount, expectedThinkingDeltas)
+	if thinkingCount != expectedThinkingDeltas {
+		t.Errorf("expected %d thinking entries (1:1 with raw deltas), got %d", expectedThinkingDeltas, thinkingCount)
 	}
-	t.Logf("Thinking: %d batched entries from %d raw deltas", thinkingCount, expectedThinkingDeltas)
+	t.Logf("Thinking: %d entries (1:1 with %d raw deltas)", thinkingCount, expectedThinkingDeltas)
 
 	// Tool entries should match 1:1 (no batching)
 	var expectedToolCount int
