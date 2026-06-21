@@ -535,9 +535,10 @@
                 }
                 const isCancellable = t.status !== 'COMPLETED' && t.status !== 'FAILED' && t.status !== 'CANCELLED';
                 const cancelBtn = isCancellable ? `<button class="btn btn-sm btn-danger task-cancel-btn" onclick="event.stopPropagation(); cancelTask('${t.id}')">✖</button>` : '';
+                const logCount = t.log_count != null ? ` · ${t.log_count} log${t.log_count === 1 ? '' : 's'}` : '';
                 return `<div class="task-item ${itemClass}${isActive}" onclick="selectTask('${t.id}')">
                     <div class="task-id">${t.id} <span class="badge ${badgeClass}">${t.status}</span></div>
-                    <div class="task-meta">${t.assigned_to ? '→ ' + t.assigned_to : 'unassigned'} · ${new Date(t.created_at).toLocaleString()}</div>
+                    <div class="task-meta">${t.assigned_to ? '→ ' + t.assigned_to : 'unassigned'} · ${new Date(t.created_at).toLocaleString()}${logCount}</div>
                     <div class="task-prompt">${escapeHtml(t.prompt.substring(0, 120))}${t.prompt.length > 120 ? '...' : ''}</div>
                     ${errorHtml}
                     ${cancelBtn}

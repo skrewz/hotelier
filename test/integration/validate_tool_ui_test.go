@@ -747,6 +747,33 @@ const { chromium } = require('playwright');
   if (!pendingBtnResult.text.includes('1')) fail('Pending button should show count 1, got: ' + pendingBtnResult.text);
   console.log('PASS: "N pending" button visible:', pendingBtnResult.text);
 
+  // Verify log count is displayed in task meta line
+  const logCountResult = await page.evaluate(() => {
+    const items = document.querySelectorAll('.task-item');
+    const results = [];
+    for (const item of items) {
+      const meta = item.querySelector('.task-meta');
+      if (!meta) continue;
+      const metaText = meta.textContent;
+      const match = metaText.match(/(\d+)\s+logs?/);
+      results.push({
+        hasLogCount: !!match,
+        count: match ? parseInt(match[1], 10) : -1,
+        metaText: metaText,
+      });
+    }
+    return results;
+  });
+  if (logCountResult.length === 0) fail('No task items found to check log count');
+  for (const r of logCountResult) {
+    if (!r.hasLogCount) fail('Task meta should contain log count, got: ' + r.metaText);
+    if (r.count < 0) fail('Log count should be non-negative, got: ' + r.count);
+  }
+  // The RUNNING task should have logs (from testLogEntries), the FAILED task should too
+  const runningTaskHasLogs = logCountResult.some(r => r.count > 0);
+  if (!runningTaskHasLogs) fail('At least one visible task should have log entries > 0');
+  console.log('PASS: Log counts displayed in task meta:', logCountResult.map(r => r.count + ' logs').join(', '));
+
   await takeScreenshot('01-front-page');
 
   // =====================================================================
@@ -796,6 +823,23 @@ const { chromium } = require('playwright');
   }, pendingTaskId);
   if (!pendingShown) fail('Pending task should be visible after clicking expand button');
   console.log('PASS: Pending task visible after expanding');
+
+  // Verify the pending task shows "0 logs" (it has no log entries)
+  const pendingLogCount = await page.evaluate((pid) => {
+    const items = document.querySelectorAll('.task-item');
+    for (const item of items) {
+      if (item.textContent.includes(pid)) {
+        const meta = item.querySelector('.task-meta');
+        if (meta) {
+          const match = meta.textContent.match(/(\d+)\s+logs?/);
+          if (match) return parseInt(match[1], 10);
+        }
+      }
+    }
+    return -1;
+  }, pendingTaskId);
+  if (pendingLogCount !== 0) fail('Pending task should show 0 logs, got: ' + pendingLogCount);
+  console.log('PASS: Pending task shows 0 logs');
 
   // Verify the "N pending" button is gone (no more hidden pending tasks)
   const pendingBtnGone = await page.evaluate(() => {

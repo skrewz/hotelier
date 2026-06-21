@@ -224,13 +224,77 @@ func TestHandleTasks_GET_Empty(t *testing.T) {
 	}
 
 	var response struct {
-		Tasks []queue.Task `json:"tasks"`
-		Count int          `json:"count"`
+		Tasks []map[string]interface{} `json:"tasks"`
+		Count int                      `json:"count"`
 	}
 	json.Unmarshal(w.Body.Bytes(), &response)
 
 	if response.Count != 0 {
 		t.Errorf("expected 0 tasks, got %d", response.Count)
+	}
+}
+
+func TestHandleTasks_GET_LogCount(t *testing.T) {
+	srv := newTestServer(t)
+
+	// Create two tasks
+	for i := 0; i < 2; i++ {
+		task := map[string]interface{}{
+			"id":     fmt.Sprintf("task-log-%d", i),
+			"repos":  []string{""},
+			"prompt": fmt.Sprintf("Task %d", i),
+		}
+		body, _ := json.Marshal(task)
+		req := httptest.NewRequest(http.MethodPost, "/api/tasks", bytes.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		w := httptest.NewRecorder()
+		srv.HandleTasks(w, req)
+	}
+
+	// Add logs to first task only
+	srv.LogStore().Add(TaskLogEntry{TaskID: "task-log-0", Line: "hello", Level: "text", Timestamp: time.Now()})
+	srv.LogStore().Add(TaskLogEntry{TaskID: "task-log-0", Line: "world", Level: "text", Timestamp: time.Now()})
+
+	// List tasks
+	req := httptest.NewRequest(http.MethodGet, "/api/tasks", nil)
+	w := httptest.NewRecorder()
+	srv.HandleTasks(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+
+	var response struct {
+		Tasks []map[string]interface{} `json:"tasks"`
+		Count int                      `json:"count"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &response); err != nil {
+		t.Fatalf("failed to unmarshal: %v", err)
+	}
+
+	if response.Count != 2 {
+		t.Fatalf("expected 2 tasks, got %d", response.Count)
+	}
+
+	// Check log_count for each task
+	for _, task := range response.Tasks {
+		id := task["id"].(string)
+		logCount, ok := task["log_count"]
+		if !ok {
+			t.Errorf("task %s: expected 'log_count' field", id)
+			continue
+		}
+		count, ok := logCount.(float64)
+		if !ok {
+			t.Errorf("task %s: expected log_count to be a number, got %T", id, logCount)
+			continue
+		}
+		if id == "task-log-0" && count != 2 {
+			t.Errorf("task-log-0: expected log_count 2, got %v", count)
+		}
+		if id == "task-log-1" && count != 0 {
+			t.Errorf("task-log-1: expected log_count 0, got %v", count)
+		}
 	}
 }
 

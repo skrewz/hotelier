@@ -1246,9 +1246,28 @@ func (s *Server) HandleTasks(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleGetTasks(w http.ResponseWriter, r *http.Request) {
 	tasks := s.orchestrator.GetAllTasks()
+	// Build task list with log_count annotation
+	taskList := make([]map[string]interface{}, len(tasks))
+	for i, t := range tasks {
+		taskMap := map[string]interface{}{
+			"id":          t.ID,
+			"repos":       t.Repos,
+			"prompt":      t.Prompt,
+			"tags":        t.Tags,
+			"status":      t.Status.String(),
+			"created_at":  t.CreatedAt,
+			"assigned_to": t.AssignedTo,
+			"assigned_at": t.AssignedAt,
+			"timeout":     t.Timeout,
+			"result":      t.Result,
+			"error":       t.Error,
+			"log_count":   s.logStore.Count(t.ID),
+		}
+		taskList[i] = taskMap
+	}
 	json.NewEncoder(w).Encode(map[string]interface{}{
-		"tasks": tasks,
-		"count": len(tasks),
+		"tasks": taskList,
+		"count": len(taskList),
 	})
 }
 
