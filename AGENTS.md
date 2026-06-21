@@ -128,11 +128,11 @@ For quick checks outside the integration test suite:
 - DOM selectors match actual element IDs/classes
 - `innerHTML` vs `textContent` — use `textContent` for user data, `innerHTML` only for trusted HTML
 
-### UI screenshots
+### README screenshot
 
 The README includes a screenshot of the dashboard at `docs/screenshot.png`.
-When making UI changes, **consider** whether the screenshot should be updated.
-Do this by comparing the old and new screenshots side by side:
+
+**If your diff touches any file under `web/static/` you must generate and compare a screenshot candidate before committing.** This is not optional — the path match is the trigger, not your judgment of whether the change "looks significant".
 
 1. Generate a candidate screenshot:
    ```bash
@@ -142,22 +142,23 @@ Do this by comparing the old and new screenshots side by side:
    two guests via WebSocket, takes a Playwright screenshot, and saves it to
    `docs/screenshot-candidate.png`.
 
-2. **Read both screenshots** and compare them visually
+2. **Read both** `docs/screenshot.png` and `docs/screenshot-candidate.png`
+   side by side.
 
-3. Decide whether the change is significant enough to warrant an update:
-   - **Update it** if the change is visually significant (new sections, layout
-     shifts, new controls, major colour/typography changes)
-   - **Skip it** for minor tweaks (bug fixes, small label changes, edge-case
-     handling) that don't alter the overall look of the dashboard
-
-4. If updating:
+3. Either replace the original:
    ```bash
    mv -v docs/screenshot-candidate.png docs/screenshot.png
    ```
-   Otherwise:
+   **Or** discard the candidate and **state in your handback why** the change
+   does not warrant an update:
    ```bash
    rm docs/screenshot-candidate.png
    ```
+
+> **Why mandatory:** "Consider whether to update" is an invitation to skip.
+> Requiring the candidate to be generated and compared removes the
+> rationalisation step. If the diff touches `web/static/`, produce the
+> artefact — always.
 
 # Go formatting
 
