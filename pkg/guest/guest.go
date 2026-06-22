@@ -472,9 +472,19 @@ func (g *Guest) ExecuteTask(task TaskAssignment) (*TaskResult, error) {
 	defer func() {
 		g.mu.Lock()
 		g.running = false
+		taskID := g.currentTaskID
 		g.currentTaskID = ""
 		g.cancel = nil
 		g.mu.Unlock()
+
+		// Send a final heartbeat with the task ID before clearing it.
+		// This gives the server a chance to see the task-specific heartbeat
+		// and not mark the task as stuck while the guest is transitioning.
+		if taskID != "" {
+			if err := g.Heartbeat(); err != nil {
+				g.log.Printf("failed to send final heartbeat for task %s: %v", taskID, err)
+			}
+		}
 	}()
 
 	ctx, cancel := context.WithCancel(context.Background())

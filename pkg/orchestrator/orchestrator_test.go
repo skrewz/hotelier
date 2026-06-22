@@ -780,6 +780,39 @@ func TestCheckStuckTasks_SkipsRunningTask(t *testing.T) {
 	}
 }
 
+func TestCheckStuckTasks_GracePeriodForFinishedTask(t *testing.T) {
+	orch := newTestOrchestrator(t)
+	_ = orch.RegisterGuest("guest-1", "Test Guest", []string{})
+
+	task := &queue.Task{ID: "task-1", Prompt: "test"}
+	_ = orch.AddTask(task)
+	_ = orch.AssignTask("task-1", "guest-1")
+	_ = orch.AcknowledgeTask("task-1", "guest-1")
+
+	// Simulate: task was assigned a long time ago and the task-specific
+	// heartbeat is stale (guest finished the task and cleared its state),
+	// but the general heartbeat is recent (guest is still alive).
+	task, _ = orch.GetTask("task-1")
+	task.AssignedAt = time.Now().Add(-5 * time.Minute)
+
+	// Stale task-specific heartbeat
+	guest, _ := orch.GetGuest("guest-1")
+	guest.LastTaskHeartbeat = time.Now().Add(-3 * time.Minute)
+
+	// But general heartbeat is recent — guest is alive
+	guest.LastHeartbeat = time.Now()
+
+	requeued := orch.CheckStuckTasks(1 * time.Minute)
+	if len(requeued) != 0 {
+		t.Errorf("expected no tasks requeued (grace period), got %d", len(requeued))
+	}
+
+	task, _ = orch.GetTask("task-1")
+	if task.Status != queue.TaskStatusRunning {
+		t.Errorf("expected task still RUNNING, got %s", task.Status)
+	}
+}
+
 // --- Liveness: CheckSilentGuests ---
 
 func TestCheckSilentGuests_FailsSilentTask(t *testing.T) {

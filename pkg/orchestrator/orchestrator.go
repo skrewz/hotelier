@@ -561,6 +561,29 @@ func (o *Orchestrator) CheckStuckTasks(timeout time.Duration) []StuckTask {
 			}
 
 			guestID := task.AssignedTo
+
+			// Check if the guest is truly stuck or just transitioning.
+			// A guest that has heartbeated with the task ID recently is
+			// actively working — not stuck. A guest that previously
+			// acknowledged (LastTaskHeartbeat set) but it's now stale may
+			// have just finished the task and is about to clear its
+			// internal reference. In that case, check the general heartbeat:
+			// if the guest is alive, give it a grace period.
+			// If the guest never acknowledged (LastTaskHeartbeat is zero),
+			// it never received the assignment — true stuck task.
+			if guest, ok := o.registry.GetGuest(guestID); ok {
+				if now.Sub(guest.LastTaskHeartbeat) <= timeout {
+					continue // Guest is actively working, not stuck
+				}
+				// Task-specific heartbeat is stale or zero.
+				if !guest.LastTaskHeartbeat.IsZero() &&
+					now.Sub(guest.LastHeartbeat) <= timeout {
+					// Guest previously acknowledged but just finished.
+					// Give it time to send a final heartbeat before re-queueing.
+					continue
+				}
+			}
+
 			requeued = append(requeued, StuckTask{TaskID: task.ID, GuestID: guestID})
 
 			o.requeueTaskInternal(task.ID)
@@ -568,7 +591,11 @@ func (o *Orchestrator) CheckStuckTasks(timeout time.Duration) []StuckTask {
 				o.clearGuestTaskInternal(guestID)
 			}
 
-			o.logf("stuck task %s re-queued (was ASSIGNED to %s for %v)", task.ID, guestID, now.Sub(task.AssignedAt))
+			dur := now.Sub(task.AssignedAt)
+			if dur < 0 {
+				dur = 0
+			}
+			o.logf("stuck task %s re-queued (was ASSIGNED to %s for %v)", task.ID, guestID, dur)
 			continue
 		}
 
