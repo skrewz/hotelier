@@ -465,6 +465,22 @@ func (g *Guest) ExecuteTask(task TaskAssignment) (*TaskResult, error) {
 		g.mu.Unlock()
 		return nil, fmt.Errorf("guest is already running a task")
 	}
+
+	// Signal the server that we're about to execute this task so the
+	// orchestrator's registry reflects the true state (RUNNING). This
+	// prevents the server from reassigning the task to this guest if
+	// ExecuteTask fails and the guest declines — FindAvailableGuests
+	// will not return a guest whose registry state is RUNNING.
+	_, err := g.client.Call("guest.acknowledge", map[string]interface{}{
+		"task_id":  task.TaskID,
+		"guest_id": g.id,
+	})
+	if err != nil {
+		g.log.Printf("[DISPATCH] failed to acknowledge task %s: %v",
+			task.TaskID, err)
+		// Continue anyway — the server may already know via heartbeat.
+	}
+
 	g.running = true
 	g.currentTaskID = task.TaskID
 	g.mu.Unlock()

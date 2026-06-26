@@ -918,6 +918,44 @@ func TestDeclineTask(t *testing.T) {
 	}
 }
 
+func TestDeclineTask_RunningToPending(t *testing.T) {
+	orch := newTestOrchestrator(t)
+	_ = orch.RegisterGuest("guest-1", "Test Guest", []string{})
+
+	task := &queue.Task{ID: "task-1", Prompt: "test"}
+	_ = orch.AddTask(task)
+	_ = orch.AssignTask("task-1", "guest-1")
+
+	// Transition to RUNNING (as if guest acknowledged before ExecuteTask failed)
+	_ = orch.AcknowledgeTask("task-1", "guest-1")
+
+	task, _ = orch.GetTask("task-1")
+	if task.Status != queue.TaskStatusRunning {
+		t.Fatalf("expected task RUNNING, got %s", task.Status)
+	}
+
+	// Guest declines after ExecuteTask failed
+	err := orch.DeclineTask("task-1", "guest-1")
+	if err != nil {
+		t.Fatalf("DeclineTask failed: %v", err)
+	}
+
+	// Task should be PENDING again
+	task, _ = orch.GetTask("task-1")
+	if task.Status != queue.TaskStatusPending {
+		t.Errorf("expected task PENDING after decline, got %s", task.Status)
+	}
+	if task.AssignedTo != "" {
+		t.Errorf("expected assigned_to cleared, got %s", task.AssignedTo)
+	}
+
+	// Guest should be IDLE
+	guest, _ := orch.GetGuest("guest-1")
+	if guest.State != registry.GuestStateIdle {
+		t.Errorf("expected guest IDLE, got %s", guest.State)
+	}
+}
+
 // --- RemoveStaleGuests ---
 
 func TestRemoveStaleGuests_RemovesStaleGuest(t *testing.T) {

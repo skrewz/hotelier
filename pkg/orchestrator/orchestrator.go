@@ -339,6 +339,10 @@ func (o *Orchestrator) RequeueTask(taskID string) error {
 // DeclineTask handles a guest declining an assigned task.
 //
 // Task: ASSIGNED → PENDING (AssignedTo cleared)
+//
+//	RUNNING → PENDING (AssignedTo cleared) — when guest acknowledged
+//	  before ExecuteTask failed
+//
 // Guest: RUNNING → IDLE (TaskID cleared)
 func (o *Orchestrator) DeclineTask(taskID, guestID string) error {
 	o.mu.Lock()
@@ -349,17 +353,29 @@ func (o *Orchestrator) DeclineTask(taskID, guestID string) error {
 		return fmt.Errorf("task %s not found", taskID)
 	}
 
-	if task.Status != queue.TaskStatusAssigned {
-		return fmt.Errorf("task %s is not assigned (status: %s)", taskID, task.Status)
-	}
 	if task.AssignedTo != guestID {
 		return fmt.Errorf("task %s is assigned to %s, not %s", taskID, task.AssignedTo, guestID)
 	}
 
-	o.requeueTaskInternal(taskID)
+	switch task.Status {
+	case queue.TaskStatusAssigned:
+		o.requeueTaskInternal(taskID)
+	case queue.TaskStatusRunning:
+		// Guest acknowledged (RUNNING) but ExecuteTask failed and
+		// guest declined. Transition back to PENDING so it can be
+		// reassigned to another guest.
+		o.requeueTaskInternal(taskID)
+	default:
+		return fmt.Errorf("task %s is not assignable (status: %s)", taskID, task.Status)
+	}
+
 	o.clearGuestTaskInternal(guestID)
 
-	o.logf("task %s declined by guest %s (ASSIGNED→PENDING, RUNNING→IDLE)", taskID, guestID)
+	statusFrom := "ASSIGNED"
+	if task.Status == queue.TaskStatusRunning {
+		statusFrom = "RUNNING"
+	}
+	o.logf("task %s declined by guest %s (%s→PENDING, RUNNING→IDLE)", taskID, guestID, statusFrom)
 	return nil
 }
 
