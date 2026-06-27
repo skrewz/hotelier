@@ -201,7 +201,7 @@ func (g *Guest) Register() error {
 		g.log.Printf("[RPC] dispatching task %s to execution", task.TaskID)
 		select {
 		case g.taskCh <- task:
-			g.log.Printf("[RPC] task %s queued for execution", task.TaskID)
+			g.log.Printf("[RPC] task %s queued on guest for execution", task.TaskID)
 		default:
 			g.log.Printf("[RPC] task queue full, dropping task %s", task.TaskID)
 		}
