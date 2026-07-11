@@ -174,8 +174,15 @@ func (c *PiClient) Stop(ctx context.Context) error {
 	case <-time.After(5 * time.Second):
 		// Process didn't exit gracefully — force kill
 		c.log.Printf("pi subprocess did not exit within 5s, force killing")
-		_ = c.cmd.Process.Kill()
-		c.cmd.Wait()
+		killErr := c.cmd.Process.Kill()
+		if killErr != nil {
+			c.log.Printf("pi subprocess kill failed: %v", killErr)
+		}
+		waitErr := c.cmd.Wait()
+		if waitErr != nil {
+			c.log.Printf("pi subprocess wait after kill: %v", waitErr)
+		}
+		c.log.Printf("pi subprocess force killed")
 		c.mu.Lock()
 		c.started = false
 		close(c.doneCh)
