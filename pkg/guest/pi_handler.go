@@ -464,6 +464,8 @@ func (h *PIHandler) resetClient(ctx context.Context, workDir string) error {
 	if h.client != nil && h.client.IsRunning() {
 		if err := h.client.Stop(ctx); err != nil {
 			h.log.Printf("[PI] stopping old client: %v", err)
+		} else {
+			h.log.Printf("[PI] stopped old client")
 		}
 	}
 

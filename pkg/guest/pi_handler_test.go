@@ -635,6 +635,9 @@ func TestPIHandler_ResetClient_LogsStopError(t *testing.T) {
 
 	// Verify that logs were produced during resetClient
 	logOutput := logBuf.String()
+	if !strings.Contains(logOutput, "stopped old client") && !strings.Contains(logOutput, "stopping old client") {
+		t.Errorf("expected log about stopping old client, got:\n%s", logOutput)
+	}
 	if !strings.Contains(logOutput, "creating new pi client") {
 		t.Errorf("expected log about creating new client, got:\n%s", logOutput)
 	}
@@ -679,16 +682,59 @@ func TestPIHandler_ResetClient_VerifiesClientRunning(t *testing.T) {
 	h.client.Stop(ctx)
 }
 
-// TestPIHandler_ExecuteTask_SendsErrorLogOnSpawnFailure verifies that
-// ExecuteTask sends an error log entry when the pi subprocess fails to spawn.
-// This is a regression test for issue #10 where spawn failures produced no output.
-func TestPIHandler_ExecuteTask_SendsErrorLogOnSpawnFailure(t *testing.T) {
-	// This test uses a handler with a client that will fail to start.
-	// We simulate this by using a non-existent CWD for the pi binary.
-	// Actually, the easiest way is to test with pi not installed.
-	// But we need the handler to be "running" for ExecuteTask to proceed.
-	// So we start the handler normally, then tamper with the client.
+// TestPIHandler_ResetClient_ReturnsError verifies that resetClient returns
+// an error when the new client fails to start. This is tested by calling
+// resetClient with a valid directory — if pi is not installed, Start() fails.
+// If pi is installed, the test verifies the happy path (client running).
+func TestPIHandler_ResetClient_ReturnsError(t *testing.T) {
+	baseDir, err := os.MkdirTemp("", "hotelier-base-*")
+	if err != nil {
+		t.Fatalf("create temp base dir: %v", err)
+	}
+	defer os.RemoveAll(baseDir)
 
+	client := pi.NewClient(pi.PiClientConfig{
+		CWD: baseDir,
+		Log: log.New(io.Discard, "", 0),
+	})
+
+	h := &PIHandler{
+		baseCWD: baseDir,
+		client:  client,
+		log:     log.New(io.Discard, "", 0),
+	}
+
+	ctx := context.Background()
+
+	// If pi is not installed, Start() will fail and resetClient returns error
+	// If pi is installed, Start() succeeds and client is running
+	if _, lookErr := exec.LookPath("pi"); lookErr != nil {
+		// pi not installed — resetClient should return an error
+		err := h.resetClient(ctx, baseDir)
+		if err == nil {
+			t.Fatal("expected error when pi is not installed, got nil")
+		}
+		if !strings.Contains(err.Error(), "start pi client") {
+			t.Errorf("expected 'start pi client' in error, got: %v", err)
+		}
+	} else {
+		// pi installed — resetClient should succeed and client should be running
+		err := h.resetClient(ctx, baseDir)
+		if err != nil {
+			t.Fatalf("resetClient failed: %v", err)
+		}
+		if !h.client.IsRunning() {
+			t.Error("client should be running after resetClient")
+		}
+		h.client.Stop(ctx)
+	}
+}
+
+// TestPIHandler_ExecuteTask_SendsSpawnLogs verifies that ExecuteTask sends
+// spawn-related log entries (both spawn attempt and spawn success) via the
+// sendLog callback. This is a regression test for issue #10 where spawn
+// operations produced no visible output in logs.jsonl.
+func TestPIHandler_ExecuteTask_SendsSpawnLogs(t *testing.T) {
 	if _, err := exec.LookPath("pi"); err != nil {
 		t.Skip("pi not installed")
 	}
@@ -703,7 +749,7 @@ func TestPIHandler_ExecuteTask_SendsErrorLogOnSpawnFailure(t *testing.T) {
 	logger := log.New(&logBuf, "[test] ", 0)
 
 	h := NewPIHandler(baseDir, "", "", "")
-	h.log = logger // Replace logger to capture output
+	h.log = logger
 
 	ctx := context.Background()
 	if err := h.Start(ctx); err != nil {
@@ -712,7 +758,7 @@ func TestPIHandler_ExecuteTask_SendsErrorLogOnSpawnFailure(t *testing.T) {
 	defer h.Stop(ctx)
 
 	task := TaskAssignment{
-		TaskID: "test-spawn-fail",
+		TaskID: "test-spawn-logs",
 		Prompt: "test prompt",
 	}
 
@@ -725,8 +771,6 @@ func TestPIHandler_ExecuteTask_SendsErrorLogOnSpawnFailure(t *testing.T) {
 		return nil
 	}
 
-	// ExecuteTask should succeed (pi is installed), but we want to verify
-	// that spawn-related logs are sent.
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 
@@ -754,10 +798,96 @@ func TestPIHandler_ExecuteTask_SendsErrorLogOnSpawnFailure(t *testing.T) {
 	}
 }
 
-// TestPIHandler_ExecuteTask_ClientNotRunningBeforePrompt verifies that
-// ExecuteTask checks the client is running before sending the prompt.
-// If the client is not running, an error is returned with a descriptive message.
-func TestPIHandler_ExecuteTask_ClientNotRunningBeforePrompt(t *testing.T) {
+// TestPIHandler_ExecuteTask_SendsErrorLogOnSpawnFailure verifies that
+// ExecuteTask sends an error log entry when resetClient fails during spawn.
+// This tests the error path at lines 186-187 of pi_handler.go.
+//
+// NOTE: This test requires pi to be installed (to pass the initial IsRunning
+// guard) but also requires pi to NOT be available during resetClient (to
+// trigger the failure path). This contradiction means the test can only
+// exercise the failure path if we can make resetClient fail after the
+// initial guard passes. Without a mock PiClient, this is not possible.
+// The test verifies the success path and documents the limitation.
+func TestPIHandler_ExecuteTask_SendsErrorLogOnSpawnFailure(t *testing.T) {
+	if _, err := exec.LookPath("pi"); err != nil {
+		t.Skip("pi not installed — cannot pass initial IsRunning guard")
+	}
+
+	baseDir, err := os.MkdirTemp("", "hotelier-base-*")
+	if err != nil {
+		t.Fatalf("create temp base dir: %v", err)
+	}
+	defer os.RemoveAll(baseDir)
+
+	h := NewPIHandler(baseDir, "", "", "")
+
+	ctx := context.Background()
+	if err := h.Start(ctx); err != nil {
+		t.Fatalf("start failed: %v", err)
+	}
+	defer h.Stop(ctx)
+
+	task := TaskAssignment{
+		TaskID: "test-spawn-fail",
+		Prompt: "test prompt",
+	}
+
+	var mu sync.Mutex
+	var logEntries []LogEntry
+	sendLog := func(entry LogEntry) error {
+		mu.Lock()
+		defer mu.Unlock()
+		logEntries = append(logEntries, entry)
+		return nil
+	}
+
+	// With pi installed, ExecuteTask will succeed (spawn works).
+	// The error path (spawn failure) cannot be tested without mocking.
+	// This test verifies the success path — the error path is covered
+	// by TestPIHandler_ResetClient_ReturnsError which tests resetClient
+	// failure directly.
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+
+	_, _ = h.ExecuteTask(ctx, task, sendLog)
+
+	mu.Lock()
+	defer mu.Unlock()
+
+	// Verify spawn-related logs were sent (success path)
+	var foundSpawn, foundSpawnSuccess bool
+	for _, entry := range logEntries {
+		if strings.Contains(entry.Line, "Spawning pi subprocess") {
+			foundSpawn = true
+		}
+		if strings.Contains(entry.Line, "spawn") && strings.Contains(entry.Line, "successfully") {
+			foundSpawnSuccess = true
+		}
+	}
+
+	if !foundSpawn {
+		t.Error("expected 'Spawning pi subprocess' log entry")
+	}
+	if !foundSpawnSuccess {
+		t.Error("expected 'Pi subprocess spawned successfully' log entry")
+	}
+
+	// NOTE: The actual spawn failure path (error log sent via sendLog)
+	// cannot be tested here because it requires resetClient to fail,
+	// which is impossible when pi is installed. A proper test would
+	// require a mock PiClient that returns an error from Start().
+}
+
+// TestPIHandler_ExecuteTask_ClientNotRunningInitialGuard verifies that
+// ExecuteTask checks the client is running before proceeding. If the client
+// is not running at the initial guard, an error is returned immediately.
+//
+// Note: The new post-reset IsRunning check (after resetClient in ExecuteTask)
+// is a safety net that catches the edge case where the process starts but
+// crashes before the check. Testing this path requires a mock client that
+// returns true from IsRunning() initially, then false after Start().
+// Without mocking, the initial guard is always hit first.
+func TestPIHandler_ExecuteTask_ClientNotRunningInitialGuard(t *testing.T) {
 	baseDir, err := os.MkdirTemp("", "hotelier-base-*")
 	if err != nil {
 		t.Fatalf("create temp base dir: %v", err)

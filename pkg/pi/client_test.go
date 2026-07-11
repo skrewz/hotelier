@@ -234,6 +234,15 @@ func TestExtractTextDelta(t *testing.T) {
 // TestPiClient_Stop_LogsForceKill verifies that Stop() logs detailed
 // information when force killing the subprocess. This is a regression test
 // for issue #10 where the force kill path produced minimal logging.
+//
+// NOTE: This test is inherently flaky. Whether the force kill path triggers
+// depends on how quickly pi exits after stdin is closed, which varies by
+// system load and timing. The test passes even when force kill is not
+// triggered (pi exits cleanly within 5s). In CI environments without pi
+// installed, the test is skipped entirely.
+//
+// A deterministic unit test would require a mock subprocess that simulates
+// the timeout scenario, which is not currently available.
 func TestPiClient_Stop_LogsForceKill(t *testing.T) {
 	if _, err := exec.LookPath("pi"); err != nil {
 		t.Skip("pi not installed")
