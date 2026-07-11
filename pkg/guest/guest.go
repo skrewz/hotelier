@@ -3,6 +3,7 @@ package guest
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"os"
@@ -80,6 +81,10 @@ type Guest struct {
 	callResp      chan *rpc.JSONRPCMessage
 	taskCh        chan TaskAssignment // incoming task assignments
 	currentTaskID string              // task currently being worked on (for task-aware heartbeat)
+
+	// heartbeatForTest allows tests to stub the Heartbeat method.
+	// When nil, heartbeatLoop calls g.Heartbeat() directly.
+	heartbeatForTest func() error
 }
 
 // New creates a new Guest instance.
@@ -434,6 +439,24 @@ func (g *Guest) Stop() {
 	}
 }
 
+// isGuestNotFound checks whether an error indicates that the server
+// no longer knows about this guest (e.g. server restart, guest removed).
+// It matches RPC errors with code -32603 (InternalError) and a message
+// containing "not found", which is the exact pattern the server returns
+// when a guest ID is not in the registry.
+func isGuestNotFound(err error) bool {
+	if err == nil {
+		return false
+	}
+	var rpcErr *rpc.RPCError
+	if errors.As(err, &rpcErr) {
+		// CodeInternalError (-32603) is used by the server for "guest not found".
+		// CodeMethodNotFound (-32601) also contains "not found" but is unrelated.
+		return rpcErr.Code == rpc.CodeInternalError && strings.Contains(rpcErr.Message, "not found")
+	}
+	return false
+}
+
 func (g *Guest) heartbeatLoop() {
 	interval := g.config.HeartbeatInterval
 	if interval == 0 {
@@ -446,7 +469,16 @@ func (g *Guest) heartbeatLoop() {
 	for {
 		select {
 		case <-ticker.C:
-			if err := g.Heartbeat(); err != nil {
+			heartbeatFn := g.heartbeatForTest
+			if heartbeatFn == nil {
+				heartbeatFn = g.Heartbeat
+			}
+			if err := heartbeatFn(); err != nil {
+				if isGuestNotFound(err) {
+					g.log.Printf("guest not found on server, triggering reconnect: %v", err)
+					g.setConnLost()
+					return
+				}
 				g.log.Printf("heartbeat failed: %v", err)
 			}
 		case <-g.stopCh:
