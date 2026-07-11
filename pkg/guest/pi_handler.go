@@ -183,11 +183,26 @@ func (h *PIHandler) ExecuteTask(ctx context.Context, task TaskAssignment, sendLo
 		h.log.Printf("[PI] failed to send operational log: %v", err)
 	}
 	if err := h.resetClient(ctx, workDir); err != nil {
+		h.log.Printf("[PI] spawn failed: %v", err)
+		_ = sendLog(LogEntry{TaskID: task.TaskID, Line: fmt.Sprintf("Spawn failed: %v", err), Level: "error"})
 		return nil, fmt.Errorf("reset pi client with working dir %s: %w", workDir, err)
+	}
+	h.log.Printf("[PI] spawn succeeded, client running: %v", h.client.IsRunning())
+	if err := sendLog(LogEntry{TaskID: task.TaskID, Line: "Pi subprocess spawned successfully", Level: "system"}); err != nil {
+		h.log.Printf("[PI] failed to send operational log: %v", err)
+	}
+
+	// Verify the client is still running before sending the prompt.
+	// The process could have started and then immediately crashed.
+	if !h.client.IsRunning() {
+		err := fmt.Errorf("pi client not running after spawn")
+		h.log.Printf("[PI] %v", err)
+		_ = sendLog(LogEntry{TaskID: task.TaskID, Line: err.Error(), Level: "error"})
+		return nil, err
 	}
 
 	// Send the prompt
-	h.log.Printf("[PI] sending prompt to pi (client running: %v)", h.client.IsRunning())
+	h.log.Printf("[PI] sending prompt to pi")
 	if err := sendLog(LogEntry{TaskID: task.TaskID, Line: fmt.Sprintf("Prompt: %s", prompt), Level: "system"}); err != nil {
 		h.log.Printf("[PI] failed to send operational log: %v", err)
 	}
@@ -447,10 +462,13 @@ func (h *PIHandler) resetClient(ctx context.Context, workDir string) error {
 
 	// Stop the old client if it's running
 	if h.client != nil && h.client.IsRunning() {
-		_ = h.client.Stop(ctx)
+		if err := h.client.Stop(ctx); err != nil {
+			h.log.Printf("[PI] stopping old client: %v", err)
+		}
 	}
 
 	// Create a new client with the task-specific working directory
+	h.log.Printf("[PI] creating new pi client for working dir: %s", workDir)
 	cfg := pi.PiClientConfig{
 		CWD:           workDir,
 		Provider:      "",
@@ -462,7 +480,10 @@ func (h *PIHandler) resetClient(ctx context.Context, workDir string) error {
 	if err := h.client.Start(ctx); err != nil {
 		return fmt.Errorf("start pi client in %s: %w", workDir, err)
 	}
-	h.log.Printf("[PI] pi subprocess started in: %s", workDir)
+	if !h.client.IsRunning() {
+		return fmt.Errorf("pi client in %s: started but not running", workDir)
+	}
+	h.log.Printf("[PI] new pi subprocess started in: %s", workDir)
 	return nil
 }
 

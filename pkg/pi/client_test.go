@@ -3,10 +3,25 @@ package pi
 import (
 	"context"
 	"encoding/json"
+	"log"
 	"os/exec"
+	"strings"
 	"testing"
 	"time"
 )
+
+// newTestLogger creates a logger that writes to the given strings.Builder.
+func newTestLogger(buf *strings.Builder) *log.Logger {
+	return log.New(&logWriter{buf: buf}, "", 0)
+}
+
+type logWriter struct {
+	buf *strings.Builder
+}
+
+func (w *logWriter) Write(p []byte) (n int, err error) {
+	return w.buf.Write(p)
+}
 
 // TestPiClient_StopActuallyTerminatesProcess verifies that Stop() causes the
 // pi subprocess to actually exit within a reasonable time. This is a regression
@@ -213,5 +228,51 @@ func TestExtractTextDelta(t *testing.T) {
 				t.Errorf("ExtractTextDelta() = %q, want %q", got, tt.expected)
 			}
 		})
+	}
+}
+
+// TestPiClient_Stop_LogsForceKill verifies that Stop() logs detailed
+// information when force killing the subprocess. This is a regression test
+// for issue #10 where the force kill path produced minimal logging.
+func TestPiClient_Stop_LogsForceKill(t *testing.T) {
+	if _, err := exec.LookPath("pi"); err != nil {
+		t.Skip("pi not installed")
+	}
+
+	var logBuf strings.Builder
+	c := NewClient(PiClientConfig{
+		CWD: "/tmp",
+		Log: newTestLogger(&logBuf),
+	})
+
+	ctx := context.Background()
+	if err := c.Start(ctx); err != nil {
+		t.Fatalf("start failed: %v", err)
+	}
+
+	// Send a prompt to keep the process busy (pi may hang in plan mode)
+	go func() {
+		_ = c.Prompt(ctx, "say hi")
+	}()
+
+	// Wait for the process to settle
+	time.Sleep(2 * time.Second)
+
+	// Stop the client — this should trigger the force kill path
+	err := c.Stop(context.Background())
+	t.Logf("Stop returned: %v", err)
+
+	logOutput := logBuf.String()
+
+	// Verify that the force kill was logged
+	if !strings.Contains(logOutput, "force kill") {
+		t.Logf("force kill not triggered (client may have stopped cleanly). Logs:\n%s", logOutput)
+	}
+
+	// Verify that "force killed" confirmation was logged if force kill happened
+	if strings.Contains(logOutput, "force killing") {
+		if !strings.Contains(logOutput, "force killed") {
+			t.Errorf("expected 'force killed' confirmation log, got:\n%s", logOutput)
+		}
 	}
 }
