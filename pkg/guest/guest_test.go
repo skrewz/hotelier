@@ -10,6 +10,7 @@ import (
 	"crypto/x509/pkix"
 	"encoding/json"
 	"encoding/pem"
+	"fmt"
 	"math/big"
 	"os"
 	"strings"
@@ -944,6 +945,175 @@ func TestGuest_DuplicateTaskAssignmentIgnored(t *testing.T) {
 	default:
 		// Correct — task was not queued
 	}
+}
+
+// TestIsGuestNotFound_GuestNotFound verifies that isGuestNotFound
+// detects the "guest not found" error from the server.
+func TestIsGuestNotFound_GuestNotFound(t *testing.T) {
+	// Simulate the error chain: RPC error wrapped in heartbeat error
+	rpcErr := &rpc.RPCError{
+		Code:    rpc.CodeInternalError,
+		Message: "guest guest-89b13060 not found",
+	}
+	heartbeatErr := fmt.Errorf("heartbeat: all 3 attempts failed: %w", rpcErr)
+
+	if !isGuestNotFound(heartbeatErr) {
+		t.Error("expected isGuestNotFound to return true for wrapped 'guest not found' error")
+	}
+}
+
+// TestIsGuestNotFound_DirectRPCError verifies that isGuestNotFound
+// works with the raw RPC error (not wrapped).
+func TestIsGuestNotFound_DirectRPCError(t *testing.T) {
+	rpcErr := &rpc.RPCError{
+		Code:    rpc.CodeInternalError,
+		Message: "guest guest-abc123 not found",
+	}
+
+	if !isGuestNotFound(rpcErr) {
+		t.Error("expected isGuestNotFound to return true for raw 'guest not found' RPC error")
+	}
+}
+
+// TestIsGuestNotFound_TransientError verifies that isGuestNotFound
+// returns false for transient errors (network issues, etc.).
+func TestIsGuestNotFound_TransientError(t *testing.T) {
+	err := fmt.Errorf("websocket write: connection reset by peer")
+
+	if isGuestNotFound(err) {
+		t.Error("expected isGuestNotFound to return false for transient error")
+	}
+}
+
+// TestIsGuestNotFound_MethodNotFound verifies that isGuestNotFound
+// returns false for method-not-found errors.
+func TestIsGuestNotFound_MethodNotFound(t *testing.T) {
+	rpcErr := rpc.MethodNotFoundError("guest.heartbeat")
+
+	if isGuestNotFound(rpcErr) {
+		t.Error("expected isGuestNotFound to return false for method-not-found error")
+	}
+}
+
+// TestIsGuestNotFound_NilError verifies that isGuestNotFound
+// returns false for nil errors.
+func TestIsGuestNotFound_NilError(t *testing.T) {
+	if isGuestNotFound(nil) {
+		t.Error("expected isGuestNotFound to return false for nil error")
+	}
+}
+
+// TestGuestHeartbeatLoop_ReconnectsOnGuestNotFound verifies that when
+// Heartbeat() returns a "guest not found" error, the heartbeatLoop
+// signals connLost and exits, triggering a reconnect cycle.
+func TestGuestHeartbeatLoop_ReconnectsOnGuestNotFound(t *testing.T) {
+	cfg := config.GuestConfig{
+		ID:                "test-guest-not-found",
+		Name:              "Test Guest",
+		Tags:              []string{"test"},
+		HeartbeatInterval: 1, // short interval for test
+	}
+	handler := func(ctx context.Context, task TaskAssignment, _ LogCallback) (*TaskResult, error) {
+		return &TaskResult{TaskID: task.TaskID, Success: true}, nil
+	}
+	g := New(cfg, handler)
+
+	// Replace Heartbeat with a stub that returns "guest not found".
+	// We do this by monkey-patching via the Heartbeat method.
+	// Since Heartbeat is a method on Guest, we use a wrapper approach.
+	originalHeartbeat := g.heartbeatForTest
+	g.heartbeatForTest = func() error {
+		rpcErr := &rpc.RPCError{
+			Code:    rpc.CodeInternalError,
+			Message: "guest test-guest-not-found not found",
+		}
+		return fmt.Errorf("heartbeat: all 3 attempts failed: %w", rpcErr)
+	}
+
+	done := make(chan struct{})
+	go func() {
+		g.heartbeatLoop()
+		close(done)
+	}()
+
+	// Wait for heartbeat to fire and detect the error.
+	select {
+	case <-done:
+		// expected — heartbeatLoop should exit after detecting guest not found
+	case <-time.After(5 * time.Second):
+		t.Fatal("heartbeatLoop did not exit after guest-not-found error")
+	}
+
+	// Verify connLost was signalled.
+	select {
+	case <-g.connLost:
+		// expected — connLost should be closed
+	default:
+		t.Error("expected connLost to be signalled after guest-not-found error")
+	}
+
+	// Restore for cleanup.
+	g.heartbeatForTest = originalHeartbeat
+}
+
+// TestGuestHeartbeatLoop_ContinuesOnTransientError verifies that when
+// Heartbeat() returns a transient error (not "guest not found"), the
+// heartbeatLoop continues normally without signalling connLost.
+func TestGuestHeartbeatLoop_ContinuesOnTransientError(t *testing.T) {
+	cfg := config.GuestConfig{
+		ID:                "test-guest-transient",
+		Name:              "Test Guest",
+		Tags:              []string{"test"},
+		HeartbeatInterval: 1, // short interval for test
+	}
+	handler := func(ctx context.Context, task TaskAssignment, _ LogCallback) (*TaskResult, error) {
+		return &TaskResult{TaskID: task.TaskID, Success: true}, nil
+	}
+	g := New(cfg, handler)
+
+	// Replace Heartbeat with a stub that returns a transient error.
+	originalHeartbeat := g.heartbeatForTest
+	g.heartbeatForTest = func() error {
+		return fmt.Errorf("websocket write: connection reset by peer")
+	}
+
+	done := make(chan struct{})
+	go func() {
+		g.heartbeatLoop()
+		close(done)
+	}()
+
+	// Wait for a heartbeat to fire (should NOT exit).
+	time.Sleep(2 * time.Second)
+
+	// connLost should NOT be signalled for transient errors.
+	select {
+	case <-g.connLost:
+		t.Error("expected connLost to NOT be signalled for transient error")
+	default:
+		// expected — connLost should still be open
+	}
+
+	// heartbeatLoop should still be running.
+	select {
+	case <-done:
+		t.Error("expected heartbeatLoop to still be running after transient error")
+	default:
+		// expected — still running
+	}
+
+	// Stop the loop cleanly.
+	g.Stop()
+
+	select {
+	case <-done:
+		// expected
+	case <-time.After(2 * time.Second):
+		t.Fatal("heartbeatLoop did not exit after Stop()")
+	}
+
+	// Restore for cleanup.
+	g.heartbeatForTest = originalHeartbeat
 }
 
 // TestGuest_DifferentTaskAssignmentQueued verifies that a task.assign for
