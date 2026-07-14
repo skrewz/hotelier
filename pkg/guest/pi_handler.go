@@ -182,7 +182,7 @@ func (h *PIHandler) ExecuteTask(ctx context.Context, task TaskAssignment, sendLo
 	if err := sendLog(LogEntry{TaskID: task.TaskID, Line: fmt.Sprintf("Spawning pi subprocess in: %s", workDir), Level: "system"}); err != nil {
 		h.log.Printf("[PI] failed to send operational log: %v", err)
 	}
-	if err := h.resetClient(ctx, workDir); err != nil {
+	if err := h.resetClient(ctx, workDir, task.TaskID, sendLog); err != nil {
 		h.log.Printf("[PI] spawn failed: %v", err)
 		_ = sendLog(LogEntry{TaskID: task.TaskID, Line: fmt.Sprintf("Spawn failed: %v", err), Level: "error"})
 		return nil, fmt.Errorf("reset pi client with working dir %s: %w", workDir, err)
@@ -456,7 +456,7 @@ func (h *PIHandler) prepareRepos(ctx context.Context, taskID string, repos []str
 
 // resetClient restarts the pi subprocess with a new working directory.
 // This is needed per-task so the guest operates inside the cloned repo tree.
-func (h *PIHandler) resetClient(ctx context.Context, workDir string) error {
+func (h *PIHandler) resetClient(ctx context.Context, workDir string, taskID string, sendLog func(LogEntry) error) error {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 
@@ -477,6 +477,11 @@ func (h *PIHandler) resetClient(ctx context.Context, workDir string) error {
 		Model:         "",
 		ThinkingLevel: "",
 		Log:           h.log,
+		SpawnOutput: func(line string) {
+			// Echo spawn-phase output to guest logs for troubleshooting.
+			// See issue #19: without this, spawn failures produce silence.
+			_ = sendLog(LogEntry{TaskID: taskID, Line: fmt.Sprintf("[spawn] %s", line), Level: "system"})
+		},
 	}
 	h.client = pi.NewClient(cfg)
 	if err := h.client.Start(ctx); err != nil {

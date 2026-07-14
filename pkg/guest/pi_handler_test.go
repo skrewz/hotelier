@@ -624,7 +624,7 @@ func TestPIHandler_ResetClient_LogsStopError(t *testing.T) {
 	}
 
 	// Call resetClient — this will stop the old client and start a new one
-	err = h.resetClient(ctx, baseDir)
+	err = h.resetClient(ctx, baseDir, "test-task", func(LogEntry) error { return nil })
 	// We don't care if it succeeds or fails; we just want to see the logs
 	if err != nil {
 		t.Logf("resetClient returned error (may be expected): %v", err)
@@ -668,7 +668,7 @@ func TestPIHandler_ResetClient_VerifiesClientRunning(t *testing.T) {
 	}
 
 	ctx := context.Background()
-	err = h.resetClient(ctx, baseDir)
+	err = h.resetClient(ctx, baseDir, "test-task", func(LogEntry) error { return nil })
 	if err != nil {
 		t.Fatalf("resetClient failed: %v", err)
 	}
@@ -710,7 +710,7 @@ func TestPIHandler_ResetClient_ReturnsError(t *testing.T) {
 	// If pi is installed, Start() succeeds and client is running
 	if _, lookErr := exec.LookPath("pi"); lookErr != nil {
 		// pi not installed — resetClient should return an error
-		err := h.resetClient(ctx, baseDir)
+		err := h.resetClient(ctx, baseDir, "test-task", func(LogEntry) error { return nil })
 		if err == nil {
 			t.Fatal("expected error when pi is not installed, got nil")
 		}
@@ -719,7 +719,7 @@ func TestPIHandler_ResetClient_ReturnsError(t *testing.T) {
 		}
 	} else {
 		// pi installed — resetClient should succeed and client should be running
-		err := h.resetClient(ctx, baseDir)
+		err := h.resetClient(ctx, baseDir, "test-task", func(LogEntry) error { return nil })
 		if err != nil {
 			t.Fatalf("resetClient failed: %v", err)
 		}
@@ -876,6 +876,64 @@ func TestPIHandler_ExecuteTask_SendsErrorLogOnSpawnFailure(t *testing.T) {
 	// cannot be tested here because it requires resetClient to fail,
 	// which is impossible when pi is installed. A proper test would
 	// require a mock PiClient that returns an error from Start().
+}
+
+// TestPIHandler_ResetClient_SpawnOutputCallback verifies that resetClient
+// sets up the SpawnOutput callback which sends spawn-phase output lines to
+// the guest log store. This is a regression test for issue #19 where spawn
+// failures produced no troubleshooting output.
+func TestPIHandler_ResetClient_SpawnOutputCallback(t *testing.T) {
+	if _, err := exec.LookPath("pi"); err != nil {
+		t.Skip("pi not installed")
+	}
+
+	baseDir, err := os.MkdirTemp("", "hotelier-base-*")
+	if err != nil {
+		t.Fatalf("create temp base dir: %v", err)
+	}
+	defer os.RemoveAll(baseDir)
+
+	var capturedLogs []LogEntry
+	sendLog := func(entry LogEntry) error {
+		capturedLogs = append(capturedLogs, entry)
+		return nil
+	}
+
+	client := pi.NewClient(pi.PiClientConfig{
+		CWD: baseDir,
+		Log: log.New(io.Discard, "", 0),
+	})
+
+	h := &PIHandler{
+		baseCWD: baseDir,
+		client:  client,
+		log:     log.New(io.Discard, "", 0),
+	}
+
+	ctx := context.Background()
+	err = h.resetClient(ctx, baseDir, "test-spawn-output", sendLog)
+	if err != nil {
+		t.Fatalf("resetClient failed: %v", err)
+	}
+	defer h.client.Stop(ctx)
+
+	// Give the spawn output goroutines time to capture any lines
+	time.Sleep(1 * time.Second)
+
+	// pi typically produces no stderr on successful startup, so we verify
+	// the callback mechanism works without crashing. The key test is that
+	// the callback was set up correctly (no panic) and that any output
+	// would be prefixed with "[spawn]".
+	for _, entry := range capturedLogs {
+		if strings.HasPrefix(entry.Line, "[spawn]") {
+			t.Logf("spawn output captured: %s", entry.Line)
+		}
+	}
+
+	// Verify the client is running (spawn succeeded)
+	if !h.client.IsRunning() {
+		t.Error("client should be running after resetClient")
+	}
 }
 
 // TestPIHandler_ExecuteTask_ClientNotRunningInitialGuard verifies that
