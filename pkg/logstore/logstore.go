@@ -5,19 +5,25 @@
 //	<logDir>/
 //	  2026-05-10/
 //	    task-abc123/
-//	      logs.jsonl
+//	      logs.jsonl.bz2
 //
-// Each log entry is stored as one JSON line (JSONL) for append efficiency.
+// Each log entry is stored as one JSON line (JSONL), compressed with bzip2
+// for efficient storage. Legacy uncompressed `.jsonl` files are still
+// readable for backward compatibility.
 package logstore
 
 import (
+	"bufio"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"sort"
 	"sync"
 	"time"
+
+	"github.com/dsnet/compress/bzip2"
 )
 
 // Entry represents a single log line persisted to disk.
@@ -54,51 +60,85 @@ func New(dir string) (*LogStore, error) {
 	return &LogStore{dir: dir}, nil
 }
 
+// CloseAll is a no-op for the current implementation.
+// It exists for API compatibility with callers that expect it.
+func (s *LogStore) CloseAll() {
+	// Nothing to close — writers are closed after each Append
+}
+
 // dirForDate returns the date-partitioned directory path for the given date.
 func (s *LogStore) dirForDate(date time.Time) string {
 	return filepath.Join(s.dir, date.Format("2006-01-02"))
 }
 
-// filePath returns the full path to the JSONL file for the given task ID.
-func (s *LogStore) filePath(taskID string, date time.Time) string {
+// compressedPath returns the full path to the compressed JSONL file for the given task ID.
+func (s *LogStore) compressedPath(taskID string, date time.Time) string {
+	return filepath.Join(s.dirForDate(date), taskID, "logs.jsonl.bz2")
+}
+
+// uncompressedPath returns the full path to the legacy uncompressed JSONL file.
+func (s *LogStore) uncompressedPath(taskID string, date time.Time) string {
 	return filepath.Join(s.dirForDate(date), taskID, "logs.jsonl")
 }
 
 // Append persists a single log entry to the filesystem.
 // Creates parent directories as needed (date dir, task dir).
+// Data is written through a bzip2-compressed stream.
+// Each append opens the file, appends a bzip2 stream block, and closes it.
+// The bzip2 reader can handle concatenated streams transparently.
 func (s *LogStore) Append(entry Entry) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	date := entry.Timestamp
-	dir := s.dirForDate(date)
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return fmt.Errorf("create date dir %s: %w", dir, err)
+	path := s.compressedPath(entry.TaskID, date)
+
+	// Create parent directories as needed
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return fmt.Errorf("create task dir: %w", err)
 	}
 
-	taskDir := filepath.Join(dir, entry.TaskID)
-	if err := os.MkdirAll(taskDir, 0o755); err != nil {
-		return fmt.Errorf("create task dir %s: %w", taskDir, err)
-	}
-
-	path := filepath.Join(taskDir, "logs.jsonl")
-
-	f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
+	// Open file in append mode to add a new bzip2 stream block
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
 	if err != nil {
 		return fmt.Errorf("open log file %s: %w", path, err)
 	}
-	defer f.Close()
+
+	writer, err := bzip2.NewWriter(f, &bzip2.WriterConfig{
+		Level: 1, // fastest compression; storage efficiency is the goal
+	})
+	if err != nil {
+		f.Close()
+		return fmt.Errorf("create bzip2 writer: %w", err)
+	}
 
 	data, err := json.Marshal(entry)
 	if err != nil {
+		writer.Close()
+		f.Close()
 		return fmt.Errorf("marshal log entry: %w", err)
 	}
 
-	if _, err := f.Write(data); err != nil {
+	_, err = writer.Write(data)
+	if err != nil {
+		writer.Close()
+		f.Close()
 		return fmt.Errorf("write log entry: %w", err)
 	}
-	if _, err := f.Write([]byte("\n")); err != nil {
+	_, err = writer.Write([]byte("\n"))
+	if err != nil {
+		writer.Close()
+		f.Close()
 		return fmt.Errorf("write newline: %w", err)
+	}
+
+	// Close finalises the bzip2 stream block
+	if err := writer.Close(); err != nil {
+		f.Close()
+		return fmt.Errorf("close bzip2 writer: %w", err)
+	}
+	if err := f.Close(); err != nil {
+		return fmt.Errorf("close file: %w", err)
 	}
 
 	return nil
@@ -133,6 +173,58 @@ type TaskSummary struct {
 	StartTimestamp time.Time `json:"start_timestamp"`
 }
 
+// readFirstTimestamp reads the first log entry from a task's log file
+// and returns its timestamp. Supports both compressed (.bz2) and
+// uncompressed (.jsonl) formats for backward compatibility.
+func readFirstTimestamp(taskDir string) (time.Time, bool) {
+	// Try compressed file first
+	bz2Path := filepath.Join(taskDir, "logs.jsonl.bz2")
+	if ts, ok := readFirstTimestampFromFile(bz2Path, true); ok {
+		return ts, true
+	}
+
+	// Fall back to uncompressed file
+	jsonlPath := filepath.Join(taskDir, "logs.jsonl")
+	if ts, ok := readFirstTimestampFromFile(jsonlPath, false); ok {
+		return ts, true
+	}
+
+	return time.Time{}, false
+}
+
+// readFirstTimestampFromFile reads the first JSON line from a file
+// and returns the timestamp from the Entry.
+func readFirstTimestampFromFile(path string, compressed bool) (time.Time, bool) {
+	f, err := os.Open(path)
+	if err != nil {
+		return time.Time{}, false
+	}
+	defer f.Close()
+
+	var reader io.Reader = f
+	if compressed {
+		r, err := bzip2.NewReader(f, nil)
+		if err != nil {
+			return time.Time{}, false
+		}
+		reader = r
+	}
+
+	scanner := bufio.NewScanner(reader)
+	for scanner.Scan() {
+		line := scanner.Bytes()
+		if isEmptyLine(line) {
+			continue
+		}
+		var entry Entry
+		if err := json.Unmarshal(line, &entry); err != nil {
+			return time.Time{}, false
+		}
+		return entry.Timestamp, true
+	}
+	return time.Time{}, false
+}
+
 // ListTasksWithTimestamps returns all tasks for a given date along with
 // the earliest (starting) timestamp for each task, sorted by task ID.
 func (s *LogStore) ListTasksWithTimestamps(date string) ([]TaskSummary, error) {
@@ -150,33 +242,13 @@ func (s *LogStore) ListTasksWithTimestamps(date string) ([]TaskSummary, error) {
 			continue
 		}
 		taskID := e.Name()
-		// Read the first line of the JSONL file to get the earliest timestamp
-		logPath := filepath.Join(s.dir, date, taskID, "logs.jsonl")
-		data, err := os.ReadFile(logPath)
-		if err != nil {
-			// If we can't read the file, skip this task
-			continue
-		}
+		taskDir := filepath.Join(s.dir, date, taskID)
 
-		// Find the first non-empty line and parse its timestamp
-		var firstTimestamp time.Time
-		found := false
-		for _, line := range splitLines(data) {
-			if isEmptyLine(line) {
-				continue
-			}
-			var entry Entry
-			if err := json.Unmarshal(line, &entry); err != nil {
-				break // Malformed line; stop looking
-			}
-			firstTimestamp = entry.Timestamp
-			found = true
-			break
-		}
-		if found {
+		ts, ok := readFirstTimestamp(taskDir)
+		if ok {
 			summaries = append(summaries, TaskSummary{
 				TaskID:         taskID,
-				StartTimestamp: firstTimestamp,
+				StartTimestamp: ts,
 			})
 		}
 	}
@@ -197,7 +269,7 @@ func (s *LogStore) ListTasks(date string) ([]string, error) {
 		if os.IsNotExist(err) {
 			return nil, nil
 		}
-		return nil, fmt.Errorf("read date dir %s: %w", dir, err)
+		return nil, fmt.Errorf("read date dir %s: %w", date, err)
 	}
 
 	var tasks []string
@@ -209,15 +281,49 @@ func (s *LogStore) ListTasks(date string) ([]string, error) {
 	return tasks, nil
 }
 
-// ReadLogs reads all log entries for a task from its JSONL file.
+// ReadLogs reads all log entries for a task from its log file.
+// Supports both compressed (.bz2) and uncompressed (.jsonl) formats
+// for backward compatibility. Compressed files are preferred.
 func (s *LogStore) ReadLogs(date, taskID string) ([]Entry, error) {
-	path := filepath.Join(s.dir, date, taskID, "logs.jsonl")
+	// Try compressed file first
+	bz2Path := filepath.Join(s.dir, date, taskID, "logs.jsonl.bz2")
+	entries, err := readLogFile(bz2Path, true)
+	if err == nil && len(entries) > 0 {
+		return entries, nil
+	}
 
-	data, err := os.ReadFile(path)
+	// Fall back to uncompressed file
+	jsonlPath := filepath.Join(s.dir, date, taskID, "logs.jsonl")
+	entries, err = readLogFile(jsonlPath, false)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil, nil
 		}
+		return nil, fmt.Errorf("read log file %s: %w", jsonlPath, err)
+	}
+
+	return entries, nil
+}
+
+// readLogFile reads all entries from a log file.
+func readLogFile(path string, compressed bool) ([]Entry, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+
+	var reader io.Reader = f
+	if compressed {
+		r, err := bzip2.NewReader(f, nil)
+		if err != nil {
+			return nil, fmt.Errorf("create bzip2 reader: %w", err)
+		}
+		reader = r
+	}
+
+	data, err := io.ReadAll(reader)
+	if err != nil {
 		return nil, fmt.Errorf("read log file %s: %w", path, err)
 	}
 

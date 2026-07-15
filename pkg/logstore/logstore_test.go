@@ -1,29 +1,218 @@
 package logstore
 
 import (
+	"bytes"
 	"encoding/json"
+	"io"
 	"os"
 	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/dsnet/compress/bzip2"
 )
 
-func newTestLogStore(t *testing.T) (*LogStore, string) {
-	t.Helper()
-	dir, err := os.MkdirTemp("", "hotelier-logstore-*")
+func TestLogStore_AppendWritesCompressed(t *testing.T) {
+	s, dir := newTestLogStore(t)
+	defer func() {
+		s.CloseAll()
+		os.RemoveAll(dir)
+	}()
+
+	ts := time.Date(2026, 5, 10, 12, 0, 0, 0, time.UTC)
+	s.Append(Entry{TaskID: "task-1", Line: "compressed log", Level: "info", Timestamp: ts})
+
+	// Close writers to flush data to disk
+	s.CloseAll()
+
+	// Verify compressed file exists
+	bz2Path := filepath.Join(dir, "2026-05-10", "task-1", "logs.jsonl.bz2")
+	info, err := os.Stat(bz2Path)
 	if err != nil {
-		t.Fatalf("create temp dir: %v", err)
+		t.Fatalf("logs.jsonl.bz2 should exist: %v", err)
 	}
-	s, err := New(dir)
+	if info.Size() == 0 {
+		t.Fatal("logs.jsonl.bz2 should not be empty")
+	}
+
+	// Verify we can decompress and read the entry
+	data, err := os.ReadFile(bz2Path)
 	if err != nil {
-		t.Fatalf("new logstore: %v", err)
+		t.Fatalf("read bz2: %v", err)
 	}
-	return s, dir
+
+	r, err := bzip2.NewReader(bytes.NewReader(data), nil)
+	if err != nil {
+		t.Fatalf("create bzip2 reader: %v", err)
+	}
+	decompressed, err := io.ReadAll(r)
+	if err != nil {
+		t.Fatalf("decompress bz2: %v", err)
+	}
+
+	lines := splitLines(decompressed)
+	if len(lines) != 1 {
+		t.Fatalf("expected 1 line, got %d", len(lines))
+	}
+
+	var entry Entry
+	if err := json.Unmarshal(lines[0], &entry); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if entry.Line != "compressed log" {
+		t.Errorf("expected line 'compressed log', got %q", entry.Line)
+	}
+}
+
+func TestLogStore_AppendMultipleEntries(t *testing.T) {
+	s, dir := newTestLogStore(t)
+	defer func() {
+		s.CloseAll()
+		os.RemoveAll(dir)
+	}()
+
+	base := time.Date(2026, 5, 10, 12, 0, 0, 0, time.UTC)
+	for i := 0; i < 5; i++ {
+		s.Append(Entry{TaskID: "task-1", Line: "entry " + string(rune('A'+i)), Level: "info", Timestamp: base.Add(time.Duration(i) * time.Second)})
+	}
+
+	s.CloseAll()
+
+	// Read back via API
+	entries, err := s.ReadLogs("2026-05-10", "task-1")
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	if len(entries) != 5 {
+		t.Fatalf("expected 5 entries, got %d", len(entries))
+	}
+
+	for i, e := range entries {
+		expected := "entry " + string(rune('A'+i))
+		if e.Line != expected {
+			t.Errorf("entry %d: line = %q, want %q", i, e.Line, expected)
+		}
+	}
+}
+
+func TestLogStore_ReadBackwardCompat_Uncompressed(t *testing.T) {
+	s, dir := newTestLogStore(t)
+	defer os.RemoveAll(dir)
+
+	// Manually create an uncompressed logs.jsonl file
+	taskDir := filepath.Join(dir, "2026-05-10", "legacy-task")
+	if err := os.MkdirAll(taskDir, 0o755); err != nil {
+		t.Fatalf("create task dir: %v", err)
+	}
+
+	ts := time.Date(2026, 5, 10, 12, 0, 0, 0, time.UTC)
+	entry := Entry{TaskID: "legacy-task", Line: "legacy log", Level: "info", Timestamp: ts}
+	data, _ := json.Marshal(entry)
+
+	if err := os.WriteFile(filepath.Join(taskDir, "logs.jsonl"), append(data, '\n'), 0o644); err != nil {
+		t.Fatalf("write legacy file: %v", err)
+	}
+
+	// ReadLogs should find the uncompressed file
+	entries, err := s.ReadLogs("2026-05-10", "legacy-task")
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("expected 1 entry, got %d", len(entries))
+	}
+	if entries[0].Line != "legacy log" {
+		t.Errorf("expected 'legacy log', got %q", entries[0].Line)
+	}
+}
+
+func TestLogStore_ReadPrefersCompressed(t *testing.T) {
+	s, dir := newTestLogStore(t)
+	defer func() {
+		s.CloseAll()
+		os.RemoveAll(dir)
+	}()
+
+	// Write a compressed file
+	ts := time.Date(2026, 5, 10, 12, 0, 0, 0, time.UTC)
+	s.Append(Entry{TaskID: "task-1", Line: "compressed", Level: "info", Timestamp: ts})
+	s.CloseAll()
+
+	// Also create an uncompressed file with different content
+	taskDir := filepath.Join(dir, "2026-05-10", "task-1")
+	legacyEntry := Entry{TaskID: "task-1", Line: "uncompressed", Level: "info", Timestamp: ts}
+	legacyData, _ := json.Marshal(legacyEntry)
+	os.WriteFile(filepath.Join(taskDir, "logs.jsonl"), append(legacyData, '\n'), 0o644)
+
+	// ReadLogs should prefer the compressed file
+	entries, err := s.ReadLogs("2026-05-10", "task-1")
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("expected 1 entry, got %d", len(entries))
+	}
+	if entries[0].Line != "compressed" {
+		t.Errorf("expected 'compressed' (from bz2), got %q", entries[0].Line)
+	}
+}
+
+func TestLogStore_ListTasksWithTimestamps_Compressed(t *testing.T) {
+	s, dir := newTestLogStore(t)
+	defer func() {
+		s.CloseAll()
+		os.RemoveAll(dir)
+	}()
+
+	tsA := time.Date(2026, 5, 10, 8, 30, 0, 0, time.UTC)
+	tsB := time.Date(2026, 5, 10, 10, 15, 0, 0, time.UTC)
+
+	s.Append(Entry{TaskID: "task-a", Line: "A1", Level: "info", Timestamp: tsA})
+	s.Append(Entry{TaskID: "task-b", Line: "B1", Level: "info", Timestamp: tsB})
+	s.CloseAll()
+
+	summaries, err := s.ListTasksWithTimestamps("2026-05-10")
+	if err != nil {
+		t.Fatalf("list tasks with timestamps: %v", err)
+	}
+	if len(summaries) != 2 {
+		t.Fatalf("expected 2 tasks, got %d", len(summaries))
+	}
+
+	if summaries[0].TaskID != "task-a" {
+		t.Errorf("expected first task 'task-a', got %q", summaries[0].TaskID)
+	}
+	if !summaries[0].StartTimestamp.Equal(tsA) {
+		t.Errorf("expected task-a start %v, got %v", tsA, summaries[0].StartTimestamp)
+	}
+}
+
+func TestLogStore_CloseAll(t *testing.T) {
+	s, dir := newTestLogStore(t)
+	defer os.RemoveAll(dir)
+
+	ts := time.Date(2026, 5, 10, 12, 0, 0, 0, time.UTC)
+	s.Append(Entry{TaskID: "task-1", Line: "before close", Level: "info", Timestamp: ts})
+	s.Append(Entry{TaskID: "task-2", Line: "before close too", Level: "info", Timestamp: ts})
+
+	// CloseAll should flush all writers
+	s.CloseAll()
+
+	// Verify both tasks have compressed files
+	for _, taskID := range []string{"task-1", "task-2"} {
+		bz2Path := filepath.Join(dir, "2026-05-10", taskID, "logs.jsonl.bz2")
+		if _, err := os.Stat(bz2Path); err != nil {
+			t.Errorf("%s: logs.jsonl.bz2 should exist: %v", taskID, err)
+		}
+	}
 }
 
 func TestLogStore_AppendAndRead(t *testing.T) {
 	s, dir := newTestLogStore(t)
-	defer os.RemoveAll(dir)
+	defer func() {
+		s.CloseAll()
+		os.RemoveAll(dir)
+	}()
 
 	entries := []Entry{
 		{TaskID: "task-1", Line: "Hello **world**", Level: "text", Timestamp: time.Date(2026, 5, 10, 12, 0, 0, 0, time.UTC)},
@@ -36,6 +225,8 @@ func TestLogStore_AppendAndRead(t *testing.T) {
 			t.Fatalf("append: %v", err)
 		}
 	}
+
+	s.CloseAll()
 
 	got, err := s.ReadLogs("2026-05-10", "task-1")
 	if err != nil {
@@ -59,9 +250,25 @@ func TestLogStore_AppendAndRead(t *testing.T) {
 	}
 }
 
+func newTestLogStore(t *testing.T) (*LogStore, string) {
+	t.Helper()
+	dir, err := os.MkdirTemp("", "hotelier-logstore-*")
+	if err != nil {
+		t.Fatalf("create temp dir: %v", err)
+	}
+	s, err := New(dir)
+	if err != nil {
+		t.Fatalf("new logstore: %v", err)
+	}
+	return s, dir
+}
+
 func TestLogStore_DatePartitioning(t *testing.T) {
 	s, dir := newTestLogStore(t)
-	defer os.RemoveAll(dir)
+	defer func() {
+		s.CloseAll()
+		os.RemoveAll(dir)
+	}()
 
 	// Two entries on different dates
 	s.Append(Entry{TaskID: "task-1", Line: "Day 1", Level: "info", Timestamp: time.Date(2026, 5, 9, 12, 0, 0, 0, time.UTC)})
@@ -99,11 +306,15 @@ func TestLogStore_DatePartitioning(t *testing.T) {
 
 func TestLogStore_MultipleTasksSameDate(t *testing.T) {
 	s, dir := newTestLogStore(t)
-	defer os.RemoveAll(dir)
+	defer func() {
+		s.CloseAll()
+		os.RemoveAll(dir)
+	}()
 
 	s.Append(Entry{TaskID: "task-a", Line: "A1", Level: "info", Timestamp: time.Date(2026, 5, 10, 10, 0, 0, 0, time.UTC)})
 	s.Append(Entry{TaskID: "task-b", Line: "B1", Level: "info", Timestamp: time.Date(2026, 5, 10, 10, 0, 0, 0, time.UTC)})
 	s.Append(Entry{TaskID: "task-a", Line: "A2", Level: "info", Timestamp: time.Date(2026, 5, 10, 10, 0, 0, 0, time.UTC)})
+	s.CloseAll()
 
 	tasks, err := s.ListTasks("2026-05-10")
 	if err != nil {
@@ -133,13 +344,16 @@ func TestLogStore_MultipleTasksSameDate(t *testing.T) {
 
 func TestLogStore_AppendToNonExistentDate(t *testing.T) {
 	s, dir := newTestLogStore(t)
-	defer os.RemoveAll(dir)
+	defer func() {
+		s.CloseAll()
+		os.RemoveAll(dir)
+	}()
 
 	// Append to a date that doesn't exist yet — should create directories
-	err := s.Append(Entry{TaskID: "future-task", Line: "future log", Level: "info", Timestamp: time.Date(2027, 1, 15, 0, 0, 0, 0, time.UTC)})
-	if err != nil {
+	if err := s.Append(Entry{TaskID: "future-task", Line: "future log", Level: "info", Timestamp: time.Date(2027, 1, 15, 0, 0, 0, 0, time.UTC)}); err != nil {
 		t.Fatalf("append to future date: %v", err)
 	}
+	s.CloseAll()
 
 	dates, err := s.ListDates()
 	if err != nil {
@@ -152,12 +366,18 @@ func TestLogStore_AppendToNonExistentDate(t *testing.T) {
 
 func TestLogStore_AppendCreatesTaskDir(t *testing.T) {
 	s, dir := newTestLogStore(t)
-	defer os.RemoveAll(dir)
+	defer func() {
+		s.CloseAll()
+		os.RemoveAll(dir)
+	}()
 
 	err := s.Append(Entry{TaskID: "deep-task", Line: "log", Level: "info", Timestamp: time.Date(2026, 5, 10, 0, 0, 0, 0, time.UTC)})
 	if err != nil {
 		t.Fatalf("append: %v", err)
 	}
+
+	// Flush writer to disk
+	s.CloseAll()
 
 	// Verify the task directory exists
 	taskDir := filepath.Join(dir, "2026-05-10", "deep-task")
@@ -169,14 +389,14 @@ func TestLogStore_AppendCreatesTaskDir(t *testing.T) {
 		t.Fatal("task path should be a directory")
 	}
 
-	// Verify the JSONL file exists
-	jsonl := filepath.Join(taskDir, "logs.jsonl")
-	info, err = os.Stat(jsonl)
+	// Verify the compressed file exists
+	bz2 := filepath.Join(taskDir, "logs.jsonl.bz2")
+	info, err = os.Stat(bz2)
 	if err != nil {
-		t.Fatalf("logs.jsonl should exist: %v", err)
+		t.Fatalf("logs.jsonl.bz2 should exist: %v", err)
 	}
 	if info.Size() == 0 {
-		t.Fatal("logs.jsonl should not be empty")
+		t.Fatal("logs.jsonl.bz2 should not be empty")
 	}
 }
 
@@ -221,7 +441,10 @@ func TestLogStore_ListTasksEmptyDate(t *testing.T) {
 
 func TestLogStore_AppendPreservesTimestamp(t *testing.T) {
 	s, dir := newTestLogStore(t)
-	defer os.RemoveAll(dir)
+	defer func() {
+		s.CloseAll()
+		os.RemoveAll(dir)
+	}()
 
 	ts := time.Date(2026, 5, 10, 14, 30, 45, 123000000, time.UTC)
 	entry := Entry{TaskID: "ts-test", Line: "timestamp test", Level: "text", Timestamp: ts}
@@ -229,6 +452,7 @@ func TestLogStore_AppendPreservesTimestamp(t *testing.T) {
 	if err := s.Append(entry); err != nil {
 		t.Fatalf("append: %v", err)
 	}
+	s.CloseAll()
 
 	read, err := s.ReadLogs("2026-05-10", "ts-test")
 	if err != nil {
@@ -244,7 +468,10 @@ func TestLogStore_AppendPreservesTimestamp(t *testing.T) {
 
 func TestLogStore_ListTasksWithTimestamps(t *testing.T) {
 	s, dir := newTestLogStore(t)
-	defer os.RemoveAll(dir)
+	defer func() {
+		s.CloseAll()
+		os.RemoveAll(dir)
+	}()
 
 	tsA := time.Date(2026, 5, 10, 8, 30, 0, 0, time.UTC)
 	tsB := time.Date(2026, 5, 10, 10, 15, 0, 0, time.UTC)
@@ -252,6 +479,7 @@ func TestLogStore_ListTasksWithTimestamps(t *testing.T) {
 	s.Append(Entry{TaskID: "task-a", Line: "A1", Level: "info", Timestamp: tsA})
 	s.Append(Entry{TaskID: "task-b", Line: "B1", Level: "info", Timestamp: tsB})
 	s.Append(Entry{TaskID: "task-a", Line: "A2", Level: "info", Timestamp: tsA.Add(5 * time.Minute)})
+	s.CloseAll()
 
 	summaries, err := s.ListTasksWithTimestamps("2026-05-10")
 	if err != nil {
@@ -292,14 +520,28 @@ func TestLogStore_ListTasksWithTimestamps_Empty(t *testing.T) {
 
 func TestLogStore_JSONLFormat(t *testing.T) {
 	s, dir := newTestLogStore(t)
-	defer os.RemoveAll(dir)
+	defer func() {
+		s.CloseAll()
+		os.RemoveAll(dir)
+	}()
 
 	s.Append(Entry{TaskID: "jsonl-test", Line: "multi\nline", Level: "text", Timestamp: time.Date(2026, 5, 10, 0, 0, 0, 0, time.UTC)})
+	s.CloseAll()
 
-	// Read raw file content
-	raw, err := os.ReadFile(filepath.Join(dir, "2026-05-10", "jsonl-test", "logs.jsonl"))
+	// Read compressed file and decompress
+	bz2Path := filepath.Join(dir, "2026-05-10", "jsonl-test", "logs.jsonl.bz2")
+	compressed, err := os.ReadFile(bz2Path)
 	if err != nil {
-		t.Fatalf("read raw: %v", err)
+		t.Fatalf("read bz2: %v", err)
+	}
+
+	r, err := bzip2.NewReader(bytes.NewReader(compressed), nil)
+	if err != nil {
+		t.Fatalf("create bzip2 reader: %v", err)
+	}
+	raw, err := io.ReadAll(r)
+	if err != nil {
+		t.Fatalf("decompress: %v", err)
 	}
 
 	lines := splitLines(raw)
