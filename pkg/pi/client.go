@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -45,6 +46,11 @@ type PiClient struct {
 	thinkingLevel string
 	guestDir      string
 	debug         bool
+	// spawnOutput is invoked for each line of combined stderr/stdout output
+	// during the initial spawn phase (first 10 lines total).
+	spawnOutput *func(line string)
+	// spawnLineCount tracks how many spawn output lines have been captured.
+	spawnLineCount int32
 }
 
 // PiClientConfig holds configuration for the pi client.
@@ -63,6 +69,11 @@ type PiClientConfig struct {
 	Log *log.Logger
 	// Debug enables verbose RPC logging to stdout.
 	Debug bool
+	// SpawnOutput is called for each line of combined stderr/stdout output
+	// during the initial spawn phase (first 10 lines total). After the limit
+	// is reached, regular logging takes over. Useful for troubleshooting spawn
+	// failures where the subprocess produces output before dying.
+	SpawnOutput func(line string)
 }
 
 // NewClient creates a new pi RPC client.
@@ -70,7 +81,7 @@ func NewClient(cfg PiClientConfig) *PiClient {
 	if cfg.Log == nil {
 		cfg.Log = log.New(os.Stderr, "[pi] ", log.LstdFlags)
 	}
-	return &PiClient{
+	c := &PiClient{
 		log:           cfg.Log,
 		cwd:           cfg.CWD,
 		provider:      cfg.Provider,
@@ -81,6 +92,10 @@ func NewClient(cfg PiClientConfig) *PiClient {
 		eventCh:       make(chan Event, 256),
 		doneCh:        make(chan struct{}),
 	}
+	if cfg.SpawnOutput != nil {
+		c.spawnOutput = &cfg.SpawnOutput
+	}
+	return c
 }
 
 // Start launches the pi RPC subprocess.
@@ -270,6 +285,11 @@ func (c *PiClient) readEvents() {
 			continue
 		}
 
+		// Capture spawn-phase output (first 10 lines combined with stderr)
+		if c.trySpawnOutput(line) {
+			continue
+		}
+
 		// Log raw RPC events to stdout when debug is enabled.
 		if c.debug {
 			fmt.Fprintf(os.Stdout, "[RPC] <- %s\n", line)
@@ -306,8 +326,28 @@ func (c *PiClient) readEvents() {
 func (c *PiClient) readStderr() {
 	scanner := bufio.NewScanner(c.stderr)
 	for scanner.Scan() {
-		c.log.Printf("pi stderr: %s", scanner.Text())
+		line := scanner.Text()
+		// Capture spawn-phase output (first 10 lines combined with stdout)
+		if c.trySpawnOutput(line) {
+			continue
+		}
+		c.log.Printf("pi stderr: %s", line)
 	}
+}
+
+// trySpawnOutput captures the first 10 lines of combined stderr/stdout output
+// during the spawn phase. Returns true if the line was captured (and should
+// not be processed further), false if the limit has been reached.
+func (c *PiClient) trySpawnOutput(line string) bool {
+	if c.spawnOutput == nil {
+		return false
+	}
+	count := atomic.AddInt32(&c.spawnLineCount, 1)
+	if count <= 10 {
+		(*c.spawnOutput)(line)
+		return true
+	}
+	return false
 }
 
 // ExtractTextDelta extracts text content from message_update events.
