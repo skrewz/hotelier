@@ -378,7 +378,7 @@ func (h *PIHandler) ExecuteTask(ctx context.Context, task TaskAssignment, sendLo
 			}, nil
 		case <-idleCheck.C:
 			idle := time.Since(getLastActivity())
-			if idle > 3*time.Minute {
+			if idle > 10*time.Minute {
 				h.log.Printf("[PI] task %s idle for %s — agent may be stuck", task.TaskID, idle)
 				_ = h.client.Abort()
 				return &TaskResult{
