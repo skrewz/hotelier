@@ -855,33 +855,32 @@ func TestPIHandler_ResetClient_SpawnOutputCallback(t *testing.T) {
 	}
 }
 
-// TestPIHandler_ExecuteTask_ClientNotRunningInitialGuard verifies that
-// ExecuteTask checks the client is running before proceeding. If the client
-// is not running at the initial guard, an error is returned immediately.
-//
-// Note: The new post-reset IsRunning check (after resetClient in ExecuteTask)
-// is a safety net that catches the edge case where the process starts but
-// crashes before the check. Testing this path requires a mock client that
-// returns true from IsRunning() initially, then false after Start().
-// Without mocking, the initial guard is always hit first.
-func TestPIHandler_ExecuteTask_ClientNotRunningInitialGuard(t *testing.T) {
+// TestPIHandler_ExecuteTask_ClientNotRunningAttemptsRestart verifies that
+// when the pi client is not running at the start of ExecuteTask, the handler
+// attempts to restart the client before proceeding. If pi is installed, the
+// restart will succeed and the task will proceed (or fail for other reasons
+// like context timeout). If pi is not installed, the restart will fail and
+// a descriptive error is returned.
+func TestPIHandler_ExecuteTask_ClientNotRunningAttemptsRestart(t *testing.T) {
 	baseDir, err := os.MkdirTemp("", "hotelier-base-*")
 	if err != nil {
 		t.Fatalf("create temp base dir: %v", err)
 	}
 	defer os.RemoveAll(baseDir)
 
+	var logBuf strings.Builder
+	logger := log.New(&logBuf, "", 0)
+
 	// Create a handler with a client that is NOT running.
-	// ExecuteTask should fail because the initial IsRunning check fails.
 	client := pi.NewClient(pi.PiClientConfig{
 		CWD: baseDir,
-		Log: log.New(io.Discard, "", 0),
+		Log: logger,
 	})
 
 	h := &PIHandler{
 		baseCWD: baseDir,
 		client:  client,
-		log:     log.New(io.Discard, "", 0),
+		log:     logger,
 	}
 
 	task := TaskAssignment{
@@ -889,14 +888,124 @@ func TestPIHandler_ExecuteTask_ClientNotRunningInitialGuard(t *testing.T) {
 		Prompt: "test prompt",
 	}
 
+	var restartWarningSent, restartSuccessSent bool
+	var mu sync.Mutex
 	_, err = h.ExecuteTask(context.Background(), task, func(entry LogEntry) error {
+		mu.Lock()
+		defer mu.Unlock()
+		if strings.Contains(entry.Line, "attempting restart") {
+			restartWarningSent = true
+		}
+		if strings.Contains(entry.Line, "restarted successfully") {
+			restartSuccessSent = true
+		}
 		return nil
 	})
 
-	if err == nil {
-		t.Fatal("expected error when client is not running")
+	// Check that restart-related logs were produced
+	logOutput := logBuf.String()
+	if !strings.Contains(logOutput, "pi client not running, attempting restart") {
+		t.Errorf("expected restart attempt log, got:\n%s", logOutput)
 	}
-	if !strings.Contains(err.Error(), "not running") {
-		t.Errorf("expected 'not running' in error, got: %v", err)
+
+	// Check that restart-related sendLog entries were sent
+	mu.Lock()
+	hadRestartWarning := restartWarningSent
+	hadRestartSuccess := restartSuccessSent
+	mu.Unlock()
+
+	if !hadRestartWarning {
+		t.Error("expected 'attempting restart' log entry via sendLog")
 	}
+
+	if _, err := exec.LookPath("pi"); err == nil {
+		// pi is installed — restart should succeed, task proceeds (may fail for other reasons)
+		if !hadRestartSuccess {
+			t.Error("expected 'restarted successfully' log entry via sendLog when pi is installed")
+		}
+		// The error (if any) should NOT be about the client not running
+		if err != nil && strings.Contains(err.Error(), "not running") {
+			t.Errorf("expected task to proceed after restart, got error: %v", err)
+		}
+		h.Stop(context.Background())
+	} else {
+		// pi not installed — restart should fail with descriptive error
+		if err == nil {
+			t.Fatal("expected error when pi is not installed and restart fails")
+		}
+		if !strings.Contains(err.Error(), "not running and restart failed") {
+			t.Errorf("expected 'not running and restart failed' in error, got: %v", err)
+		}
+	}
+}
+
+// TestPIHandler_ExecuteTask_ClientKilledExternallyRestartSucceeds verifies
+// that when the pi client is killed externally (e.g. pkill pi), ExecuteTask
+// restarts the client and the task proceeds rather than failing with
+// "not running". This simulates the exact scenario from issue #28.
+func TestPIHandler_ExecuteTask_ClientKilledExternallyRestartSucceeds(t *testing.T) {
+	// This test uses a non-existent binary by creating a client that
+	// wraps a command that can't be found. We achieve this by setting
+	// baseCWD to a valid directory but ensuring the restart path fails.
+	// Since restartClient uses exec.Command("pi", ...), if pi is not
+	// in PATH, the restart will fail.
+	//
+	// To make this test deterministic regardless of whether pi is installed,
+	// we create a handler and manually kill the client process after Start(),
+	// then verify the restart logic works.
+	if _, err := exec.LookPath("pi"); err != nil {
+		t.Skip("pi not installed — restart failure path tested via other means")
+	}
+
+	baseDir, err := os.MkdirTemp("", "hotelier-base-*")
+	if err != nil {
+		t.Fatalf("create temp base dir: %v", err)
+	}
+	defer os.RemoveAll(baseDir)
+
+	// Start a real client, then kill it to simulate the "pi client not running" scenario.
+	h := NewPIHandler(baseDir, "", "", "")
+	if err := h.Start(context.Background()); err != nil {
+		t.Fatalf("start failed: %v", err)
+	}
+
+	// Get the client and kill the process to simulate external kill
+	client := h.GetClient()
+	if client == nil || client.Cmd() == nil || client.Cmd().Process == nil {
+		t.Fatal("client process not available")
+	}
+	proc := client.Cmd().Process
+
+	// Kill the process externally (simulating pkill pi)
+	if err := proc.Kill(); err != nil {
+		t.Fatalf("kill process: %v", err)
+	}
+
+	// Wait for the process to exit so ProcessState is populated
+	time.Sleep(500 * time.Millisecond)
+
+	// Now the client should not be running
+	if h.IsRunning() {
+		t.Fatal("handler should not be running after external kill")
+	}
+
+	// ExecuteTask should attempt restart
+	task := TaskAssignment{
+		TaskID: "test-restart-after-kill",
+		Prompt: "test prompt",
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	_, err = h.ExecuteTask(ctx, task, func(entry LogEntry) error {
+		return nil
+	})
+
+	// After restart, the task should proceed (not fail with "not running")
+	if err != nil && strings.Contains(err.Error(), "not running") {
+		t.Errorf("expected task to proceed after restart, got error: %v", err)
+	}
+
+	h.Stop(context.Background())
 }
