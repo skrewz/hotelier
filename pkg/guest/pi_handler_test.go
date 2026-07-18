@@ -939,10 +939,11 @@ func TestPIHandler_ExecuteTask_ClientNotRunningAttemptsRestart(t *testing.T) {
 	}
 }
 
-// TestPIHandler_ExecuteTask_ClientNotRunningRestartFails verifies that when
-// the pi client is not running and restart fails, the error message clearly
-// indicates both conditions (not running + restart failed).
-func TestPIHandler_ExecuteTask_ClientNotRunningRestartFails(t *testing.T) {
+// TestPIHandler_ExecuteTask_ClientKilledExternallyRestartSucceeds verifies
+// that when the pi client is killed externally (e.g. pkill pi), ExecuteTask
+// restarts the client and the task proceeds rather than failing with
+// "not running". This simulates the exact scenario from issue #28.
+func TestPIHandler_ExecuteTask_ClientKilledExternallyRestartSucceeds(t *testing.T) {
 	// This test uses a non-existent binary by creating a client that
 	// wraps a command that can't be found. We achieve this by setting
 	// baseCWD to a valid directory but ensuring the restart path fails.
