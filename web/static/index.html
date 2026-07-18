@@ -252,10 +252,6 @@
                 <h3>📋 Submit Task</h3>
                 <div class="submit-form">
                     <div class="form-group">
-                        <label>Repositories (comma-separated)</label>
-                        <input type="text" id="task-repos" placeholder="https://github.com/user/repo.git, git@github.com:user/repo.git">
-                    </div>
-                    <div class="form-group">
                         <label>Prompt</label>
                         <textarea id="task-prompt" placeholder="Describe the task..."></textarea>
                     </div>
@@ -988,7 +984,6 @@
         }
 
         async function submitTask() {
-            const repos = document.getElementById('task-repos').value;
             const prompt = document.getElementById('task-prompt').value;
             const tags = document.getElementById('task-tags').value;
 
@@ -998,7 +993,6 @@
             }
 
             const task = {
-                repos: repos ? repos.split(',').map(s => s.trim()).filter(Boolean) : [],
                 prompt: prompt,
                 tags: tags ? tags.split(',').map(s => s.trim()).filter(Boolean) : []
             };
@@ -1010,7 +1004,6 @@
                     body: JSON.stringify(task)
                 });
                 if (res.ok) {
-                    document.getElementById('task-repos').value = '';
                     document.getElementById('task-prompt').value = '';
                     document.getElementById('task-tags').value = '';
                     refresh();

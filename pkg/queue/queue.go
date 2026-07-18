@@ -73,7 +73,6 @@ func (s *TaskStatus) UnmarshalJSON(data []byte) error {
 // Task represents a unit of work to be executed by a guest.
 type Task struct {
 	ID         string     `json:"id"`
-	Repos      []string   `json:"repos"`
 	Prompt     string     `json:"prompt"`
 	Tags       []string   `json:"tags"`
 	Status     TaskStatus `json:"status"`

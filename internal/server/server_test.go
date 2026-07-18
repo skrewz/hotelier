@@ -8,6 +8,7 @@ import (
 	"log"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -53,7 +54,6 @@ func TestHandleTasks_POST(t *testing.T) {
 	srv := newTestServer(t)
 
 	task := map[string]interface{}{
-		"repos":  []string{"/path/to/repo"},
 		"prompt": "Build a feature",
 		"tags":   []string{"business-default"},
 	}
@@ -110,12 +110,53 @@ func TestHandleTasks_POST_InvalidJSON(t *testing.T) {
 	}
 }
 
+func TestHandleTasks_POST_ReposRejected(t *testing.T) {
+	srv := newTestServer(t)
+
+	task := map[string]interface{}{
+		"repos":  []string{"https://github.com/user/repo"},
+		"prompt": "Build a feature",
+	}
+	body, _ := json.Marshal(task)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/tasks", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	srv.HandleTasks(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 when repos is provided, got %d", w.Code)
+	}
+	bodyStr := w.Body.String()
+	if !strings.Contains(bodyStr, "repos") {
+		t.Errorf("expected error message mentioning 'repos', got: %s", bodyStr)
+	}
+}
+
+func TestHandleTasks_POST_EmptyReposRejected(t *testing.T) {
+	srv := newTestServer(t)
+
+	task := map[string]interface{}{
+		"repos":  []string{},
+		"prompt": "Build a feature",
+	}
+	body, _ := json.Marshal(task)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/tasks", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	srv.HandleTasks(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 when empty repos is provided, got %d", w.Code)
+	}
+}
+
 func TestHandleTasks_POST_CustomID(t *testing.T) {
 	srv := newTestServer(t)
 
 	task := map[string]interface{}{
 		"id":     "my-custom-id",
-		"repos":  []string{"/repo"},
 		"prompt": "Custom ID task",
 	}
 	body, _ := json.Marshal(task)
@@ -143,7 +184,6 @@ func TestHandleTasks_POST_DuplicateID(t *testing.T) {
 	// Create first task
 	task1 := map[string]interface{}{
 		"id":     "dup-id",
-		"repos":  []string{"/repo"},
 		"prompt": "First",
 	}
 	body1, _ := json.Marshal(task1)
@@ -159,7 +199,6 @@ func TestHandleTasks_POST_DuplicateID(t *testing.T) {
 	// Try duplicate
 	task2 := map[string]interface{}{
 		"id":     "dup-id",
-		"repos":  []string{"/repo"},
 		"prompt": "Duplicate",
 	}
 	body2, _ := json.Marshal(task2)
@@ -180,7 +219,6 @@ func TestHandleTasks_GET(t *testing.T) {
 	// Create some tasks
 	for i := 0; i < 3; i++ {
 		task := map[string]interface{}{
-			"repos":  []string{"/repo"},
 			"prompt": fmt.Sprintf("Task %d", i),
 		}
 		body, _ := json.Marshal(task)
@@ -241,7 +279,6 @@ func TestHandleTasks_GET_LogCount(t *testing.T) {
 	for i := 0; i < 2; i++ {
 		task := map[string]interface{}{
 			"id":     fmt.Sprintf("task-log-%d", i),
-			"repos":  []string{""},
 			"prompt": fmt.Sprintf("Task %d", i),
 		}
 		body, _ := json.Marshal(task)
@@ -304,7 +341,6 @@ func TestHandleTaskDetail(t *testing.T) {
 
 	// Create a task
 	task := map[string]interface{}{
-		"repos":  []string{"/repo"},
 		"prompt": "Detail test",
 	}
 	body, _ := json.Marshal(task)
@@ -510,7 +546,6 @@ func TestHandleTasks_TaskAssignment(t *testing.T) {
 
 	// Create a task
 	task := map[string]interface{}{
-		"repos":  []string{"/repo"},
 		"prompt": "Assignment test",
 	}
 	body, _ := json.Marshal(task)
@@ -542,7 +577,6 @@ func TestHandleTasks_TaskCompletion(t *testing.T) {
 
 	// Create, assign, and start a task
 	task := map[string]interface{}{
-		"repos":  []string{"/repo"},
 		"prompt": "Completion test",
 	}
 	body, _ := json.Marshal(task)
@@ -571,7 +605,6 @@ func TestHandleTasks_TaskFailure(t *testing.T) {
 	srv := newTestServer(t)
 
 	task := map[string]interface{}{
-		"repos":  []string{"/repo"},
 		"prompt": "Failure test",
 	}
 	body, _ := json.Marshal(task)
@@ -880,7 +913,6 @@ func TestHandleTasks_POST_StatusIsString(t *testing.T) {
 	srv := newTestServer(t)
 
 	task := map[string]interface{}{
-		"repos":  []string{"/repo"},
 		"prompt": "Status serialization test",
 	}
 	body, _ := json.Marshal(task)
@@ -915,7 +947,6 @@ func TestHandleTasks_GET_StatusIsString(t *testing.T) {
 
 	// Create a task
 	task := map[string]interface{}{
-		"repos":  []string{"/repo"},
 		"prompt": "List status serialization test",
 	}
 	body, _ := json.Marshal(task)
@@ -1228,7 +1259,6 @@ func TestHandleGuestRegister_IdleGuestGetsTask(t *testing.T) {
 	// Create a pending task
 	task := &queue.Task{
 		ID:     "task-pending-1",
-		Repos:  []string{"/repo"},
 		Prompt: "Do something",
 		Tags:   []string{},
 	}
@@ -1382,7 +1412,6 @@ func TestIntegration_GuestRegisterAndTaskAssignment(t *testing.T) {
 
 	// Create a task
 	task := map[string]interface{}{
-		"repos":  []string{"/repo"},
 		"prompt": "Integration test task",
 	}
 	body, _ := json.Marshal(task)
@@ -1402,7 +1431,6 @@ func TestIntegration_GuestRegisterAndTaskAssignment(t *testing.T) {
 	// This is what tryAssignTask does internally
 	err = hub.SendToGuest("integration-guest", "task.assign", map[string]interface{}{
 		"id":     createdTask.ID,
-		"repos":  createdTask.Repos,
 		"prompt": createdTask.Prompt,
 		"tags":   createdTask.Tags,
 	})
@@ -1936,7 +1964,6 @@ func TestIntegration_TaskLogBroadcast(t *testing.T) {
 	time.Sleep(10 * time.Millisecond)
 
 	taskBody := map[string]interface{}{
-		"repos":  []string{"/repo"},
 		"prompt": "count words",
 		"tags":   []string{"business-default"},
 	}
@@ -2320,7 +2347,6 @@ func TestHandleGuestLog_ToolFieldsFromAccumulator(t *testing.T) {
 
 	// Create a task
 	task := map[string]interface{}{
-		"repos":  []string{"/repo"},
 		"prompt": "tool fields test",
 	}
 	body, _ := json.Marshal(task)
@@ -2441,14 +2467,13 @@ func TestHandleGuestLog_ToolFieldsFromAccumulator(t *testing.T) {
 }
 
 // TestHandleTaskRerun_Success creates a task, completes it, then re-runs it.
-// The new task should have the same prompt/repos/tags but a different ID.
+// The new task should have the same prompt and tags but a different ID.
 func TestHandleTaskRerun_Success(t *testing.T) {
 	srv := newTestServer(t)
 
 	// Create original task
 	origTask := map[string]interface{}{
 		"id":     "original-task",
-		"repos":  []string{"/repo"},
 		"prompt": "Build a feature",
 		"tags":   []string{"business-default"},
 	}
@@ -2481,12 +2506,9 @@ func TestHandleTaskRerun_Success(t *testing.T) {
 		t.Errorf("expected new task to have a different ID, got %s", newTask.ID)
 	}
 
-	// But same prompt, repos, tags
+	// But same prompt and tags
 	if newTask.Prompt != "Build a feature" {
 		t.Errorf("expected prompt 'Build a feature', got %s", newTask.Prompt)
-	}
-	if len(newTask.Repos) != 1 || newTask.Repos[0] != "/repo" {
-		t.Errorf("expected repos ['/repo'], got %v", newTask.Repos)
 	}
 	if len(newTask.Tags) != 1 || newTask.Tags[0] != "business-default" {
 		t.Errorf("expected tags ['business-default'], got %v", newTask.Tags)
@@ -2529,7 +2551,6 @@ func TestHandleTaskRerun_MethodNotAllowed(t *testing.T) {
 	// Create original task
 	origTask := map[string]interface{}{
 		"id":     "original-task",
-		"repos":  []string{"/repo"},
 		"prompt": "Build a feature",
 	}
 	body, _ := json.Marshal(origTask)
@@ -2558,7 +2579,6 @@ func TestHandleGuestLog_ToolErrorFields(t *testing.T) {
 	go hub.Run()
 
 	task := map[string]interface{}{
-		"repos":  []string{"/repo"},
 		"prompt": "tool error test",
 	}
 	body, _ := json.Marshal(task)

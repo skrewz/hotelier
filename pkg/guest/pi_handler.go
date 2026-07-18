@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"log"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -13,43 +12,6 @@ import (
 
 	"hotelier/pkg/pi"
 )
-
-// parseRepoRef splits a repo reference into URL and optional branch/ref.
-// Supported formats:
-//
-//	https://github.com/user/repo@branch-name
-//	https://github.com/user/repo@abc123def  (commit SHA)
-//	git@github.com:user/repo@branch-name    (SSH with ref)
-//	https://github.com/user/repo            (no ref — default branch)
-//	git@github.com:user/repo                (SSH, no ref)
-//
-// Returns (url, ref). If no ref is specified, ref is an empty string.
-func parseRepoRef(repo string) (url, ref string) {
-	// Handle SSH URLs first: git@host:path/repo@ref
-	if strings.HasPrefix(repo, "git@") {
-		colonIdx := strings.Index(repo, ":")
-		if colonIdx < 0 {
-			return repo, ""
-		}
-		pathPart := repo[colonIdx+1:]
-		refIdx := strings.LastIndex(pathPart, "@")
-		if refIdx >= 0 {
-			return repo[:colonIdx+1] + pathPart[:refIdx], pathPart[refIdx+1:]
-		}
-		return repo, ""
-	}
-
-	// Handle HTTPS/HTTP URLs: https://host/user/repo@ref
-	if idx := strings.LastIndex(repo, "@"); idx > 0 {
-		ref = repo[idx+1:]
-		url = repo[:idx]
-		if ref != "" {
-			return url, ref
-		}
-	}
-
-	return repo, ""
-}
 
 // PIHandler executes tasks using the pi AI guest via RPC subprocess.
 type PIHandler struct {
@@ -139,8 +101,7 @@ func (h *PIHandler) GetClient() *pi.PiClient {
 }
 
 // ExecuteTask runs a task through the pi guest and streams logs back via the callback.
-// It clones any remote repos into a per-task working directory, sets that as the
-// CWD for the pi subprocess, and logs all commands it spawns.
+// It creates a per-task working directory and sets that as the CWD for the pi subprocess.
 func (h *PIHandler) ExecuteTask(ctx context.Context, task TaskAssignment, sendLog func(LogEntry) error) (*TaskResult, error) {
 	h.mu.Lock()
 	if h.client == nil || !h.client.IsRunning() {
@@ -150,7 +111,6 @@ func (h *PIHandler) ExecuteTask(ctx context.Context, task TaskAssignment, sendLo
 	h.mu.Unlock()
 
 	h.log.Printf("[PI] executing task %s", task.TaskID)
-	h.log.Printf("[PI] repos: %v", task.Repos)
 	h.log.Printf("[PI] prompt: %s", task.Prompt)
 
 	// Send operational log that task execution is starting.
@@ -158,10 +118,10 @@ func (h *PIHandler) ExecuteTask(ctx context.Context, task TaskAssignment, sendLo
 		h.log.Printf("[PI] failed to send operational log: %v", err)
 	}
 
-	// Clone any remote repos and determine the working directory.
-	workDir, err := h.prepareRepos(ctx, task.TaskID, task.Repos, sendLog)
+	// Create a task-specific working directory.
+	workDir, err := h.prepareTaskDir(ctx, task.TaskID, sendLog)
 	if err != nil {
-		return nil, fmt.Errorf("prepare repos: %w", err)
+		return nil, fmt.Errorf("prepare task dir: %w", err)
 	}
 
 	// Clean up the task directory when the task completes (success or failure).
@@ -391,67 +351,18 @@ func (h *PIHandler) ExecuteTask(ctx context.Context, task TaskAssignment, sendLo
 	}
 }
 
-// prepareRepos clones repos into a task-specific directory and
-// returns the path to use as the working directory for the pi subprocess.
-// All repos are treated as git URLs and cloned; local paths are not supported.
-func (h *PIHandler) prepareRepos(ctx context.Context, taskID string, repos []string, sendLog func(LogEntry) error) (string, error) {
-	if len(repos) == 0 {
-		// No repos — create a task-specific directory so the guest has a
-		// clean, isolated working directory instead of the base CWD.
-		taskDir := filepath.Join(h.baseCWD, "tasks", taskID)
-		if err := os.MkdirAll(taskDir, 0o755); err != nil {
-			return "", fmt.Errorf("create task dir %s: %w", taskDir, err)
-		}
-		h.log.Printf("[WORKDIR] no repos specified, using task dir: %s", taskDir)
-		if sendLog != nil {
-			_ = sendLog(LogEntry{TaskID: taskID, Line: fmt.Sprintf("Using task directory: %s", taskDir), Level: "system"})
-		}
-		return taskDir, nil
-	}
-
-	// Create a task-specific directory under the base CWD.
+// prepareTaskDir creates a task-specific directory and returns
+// the path to use as the working directory for the pi subprocess.
+func (h *PIHandler) prepareTaskDir(ctx context.Context, taskID string, sendLog func(LogEntry) error) (string, error) {
 	taskDir := filepath.Join(h.baseCWD, "tasks", taskID)
 	if err := os.MkdirAll(taskDir, 0o755); err != nil {
 		return "", fmt.Errorf("create task dir %s: %w", taskDir, err)
 	}
-
-	var workDir string
-
-	for _, repo := range repos {
-		repoURL, repoRef := parseRepoRef(repo)
-		repoName := filepath.Base(strings.TrimSuffix(repoURL, ".git"))
-		clonePath := filepath.Join(taskDir, repoName)
-		h.log.Printf("[GIT] cloning %s -> %s", repo, clonePath)
-		if sendLog != nil {
-			_ = sendLog(LogEntry{TaskID: taskID, Line: fmt.Sprintf("Cloning %s -> %s", repo, clonePath), Level: "system"})
-		}
-		cloneArgs := []string{"clone", "--depth", "1"}
-		if repoRef != "" {
-			cloneArgs = append(cloneArgs, "--branch", repoRef)
-		}
-		cloneArgs = append(cloneArgs, repoURL, clonePath)
-		cloneCmd := exec.CommandContext(ctx, "git", cloneArgs...)
-		out, err := cloneCmd.CombinedOutput()
-		if err != nil {
-			return "", fmt.Errorf("git clone %s: %w (output: %s)", repo, err, string(out))
-		}
-		h.log.Printf("[GIT] cloned %s", repo)
-		if sendLog != nil {
-			_ = sendLog(LogEntry{TaskID: taskID, Line: fmt.Sprintf("Cloned %s", repo), Level: "system"})
-		}
-		if workDir == "" {
-			// Use the cloned repo as the working directory.
-			// If multiple repos are specified, pick the first one.
-			workDir = clonePath
-		}
+	h.log.Printf("[WORKDIR] using task dir: %s", taskDir)
+	if sendLog != nil {
+		_ = sendLog(LogEntry{TaskID: taskID, Line: fmt.Sprintf("Using task directory: %s", taskDir), Level: "system"})
 	}
-
-	// If no repos were cloned, use taskDir as the working directory.
-	if workDir == "" {
-		workDir = taskDir
-	}
-
-	return workDir, nil
+	return taskDir, nil
 }
 
 // resetClient restarts the pi subprocess with a new working directory.
@@ -507,7 +418,7 @@ func (h *PIHandler) cleanupTaskDir(taskID string) error {
 	return nil
 }
 
-// buildPrompt constructs the prompt for pi with repo context.
+// buildPrompt constructs the prompt for pi with context.
 // The user's prompt is always placed first so that template commands
 // (e.g. /repo-ideation) start at the top of the message and are
 // expanded by pi.  Context tidbits are appended after.
@@ -516,9 +427,6 @@ func (h *PIHandler) buildPrompt(task TaskAssignment) string {
 
 	parts = append(parts, task.Prompt)
 
-	if len(task.Repos) > 0 {
-		parts = append(parts, fmt.Sprintf("Working repositories: %s", strings.Join(task.Repos, ", ")))
-	}
 	if len(task.Tags) > 0 {
 		parts = append(parts, fmt.Sprintf("Required tags: %s", strings.Join(task.Tags, ", ")))
 	}

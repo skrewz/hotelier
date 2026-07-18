@@ -368,7 +368,6 @@ func TestValidateToolUI(t *testing.T) {
 	taskID := fmt.Sprintf("ui-test-task-%d", time.Now().UnixNano())
 	taskObj := &queue.Task{
 		ID:     taskID,
-		Repos:  []string{"/tmp/test-repo"},
 		Prompt: "Simulate tool calls and validate UI rendering",
 		Tags:   []string{"business-default"},
 	}
@@ -386,7 +385,6 @@ func TestValidateToolUI(t *testing.T) {
 	}
 	assignParams, _ := json.Marshal(map[string]interface{}{
 		"id":          taskID,
-		"repos":       []string{"/tmp/test-repo"},
 		"prompt":      "Simulate tool calls and validate UI rendering",
 		"tags":        []string{"business-default"},
 		"assigned_to": "ui-test-guest",
@@ -411,7 +409,6 @@ func TestValidateToolUI(t *testing.T) {
 	failedTaskID := fmt.Sprintf("ui-test-failed-task-%d", time.Now().UnixNano())
 	failedTask := &queue.Task{
 		ID:     failedTaskID,
-		Repos:  []string{"/tmp/test-repo"},
 		Prompt: "Run a long computation that will be interrupted",
 		Tags:   []string{"business-default"},
 	}
@@ -437,7 +434,6 @@ func TestValidateToolUI(t *testing.T) {
 	completedTaskID := fmt.Sprintf("ui-test-completed-task-%d", time.Now().UnixNano())
 	completedTask := &queue.Task{
 		ID:     completedTaskID,
-		Repos:  []string{"/tmp/test-repo"},
 		Prompt: "Reply with just the word done",
 		Tags:   []string{"business-default"},
 	}
@@ -462,7 +458,6 @@ func TestValidateToolUI(t *testing.T) {
 	pendingTaskID := fmt.Sprintf("ui-test-pending-task-%d", time.Now().UnixNano())
 	pendingTask := &queue.Task{
 		ID:     pendingTaskID,
-		Repos:  []string{"/tmp/test-repo"},
 		Prompt: "A task that remains pending waiting for a matching guest",
 		Tags:   []string{"business-special"},
 	}

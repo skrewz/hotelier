@@ -28,7 +28,6 @@ func TestAddTask(t *testing.T) {
 
 	task := &Task{
 		ID:     "task-1",
-		Repos:  []string{"/path/to/repo"},
 		Prompt: "Build a feature",
 		Tags:   []string{"business-default"},
 	}

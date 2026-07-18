@@ -59,7 +59,6 @@ func TestFullLifecycle_SubmitAndRetrieveTask(t *testing.T) {
 
 	// Submit a task via REST API
 	task := map[string]interface{}{
-		"repos":  []string{"/path/to/repo"},
 		"prompt": "Build a feature",
 		"tags":   []string{"business-default"},
 	}
@@ -127,7 +126,6 @@ func TestFullLifecycle_ListTasks(t *testing.T) {
 	// Add multiple tasks
 	for i := 0; i < 3; i++ {
 		task := map[string]interface{}{
-			"repos":  []string{"/repo"},
 			"prompt": fmt.Sprintf("Task %d", i),
 		}
 		body, _ := json.Marshal(task)
@@ -167,7 +165,6 @@ func TestFullLifecycle_TaskStatusTransitions(t *testing.T) {
 
 	// Create a task
 	task := map[string]interface{}{
-		"repos":  []string{"/repo"},
 		"prompt": "Test task",
 	}
 	body, _ := json.Marshal(task)
@@ -227,7 +224,6 @@ func TestFullLifecycle_TaskFailure(t *testing.T) {
 
 	// Create and start a task
 	task := map[string]interface{}{
-		"repos":  []string{"/repo"},
 		"prompt": "Failing task",
 	}
 	body, _ := json.Marshal(task)
@@ -262,7 +258,6 @@ func TestFullLifecycle_CancelTask(t *testing.T) {
 
 	// Create a pending task
 	task := map[string]interface{}{
-		"repos":  []string{"/repo"},
 		"prompt": "To be cancelled",
 	}
 	body, _ := json.Marshal(task)
@@ -387,7 +382,6 @@ func TestFullLifecycle_TagBasedScheduling(t *testing.T) {
 
 	// Submit a task with no tag requirements
 	task := map[string]interface{}{
-		"repos":  []string{"/repo"},
 		"prompt": "Generic task",
 	}
 	body, _ := json.Marshal(task)
@@ -416,7 +410,6 @@ func TestFullLifecycle_ConcurrentTaskSubmission(t *testing.T) {
 		go func(id int) {
 			defer wg.Done()
 			task := map[string]interface{}{
-				"repos":  []string{"/repo"},
 				"prompt": fmt.Sprintf("Concurrent task %d", id),
 			}
 			body, _ := json.Marshal(task)
@@ -454,7 +447,6 @@ func TestFullLifecycle_DuplicateTaskID(t *testing.T) {
 	// Create first task
 	task1 := map[string]interface{}{
 		"id":     "unique-task-1",
-		"repos":  []string{"/repo"},
 		"prompt": "First task",
 	}
 	body1, _ := json.Marshal(task1)
@@ -470,7 +462,6 @@ func TestFullLifecycle_DuplicateTaskID(t *testing.T) {
 	// Try to create task with same ID
 	task2 := map[string]interface{}{
 		"id":     "unique-task-1",
-		"repos":  []string{"/repo"},
 		"prompt": "Duplicate task",
 	}
 	body2, _ := json.Marshal(task2)
@@ -615,7 +606,6 @@ func TestFullLifecycle_TaskQueueConcurrency(t *testing.T) {
 		go func(id int) {
 			defer wg.Done()
 			task := map[string]interface{}{
-				"repos":  []string{"/repo"},
 				"prompt": fmt.Sprintf("Concurrent task %d", id),
 			}
 			body, _ := json.Marshal(task)
@@ -819,7 +809,6 @@ func TestFullLifecycle_SubmitTaskThenList(t *testing.T) {
 
 	// Submit a task via REST API
 	task := map[string]interface{}{
-		"repos":  []string{"/path/to/repo"},
 		"prompt": "Submit then list test",
 		"tags":   []string{"business-default"},
 	}
@@ -896,7 +885,6 @@ func TestFullLifecycle_GuestResult(t *testing.T) {
 
 	// Create a task first
 	task := map[string]interface{}{
-		"repos":  []string{"/repo"},
 		"prompt": "Test result submission",
 	}
 	body, _ := json.Marshal(task)

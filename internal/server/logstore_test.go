@@ -38,7 +38,6 @@ func TestLogPersistence_Integration(t *testing.T) {
 
 	// Create a task
 	task := map[string]interface{}{
-		"repos":  []string{"/repo"},
 		"prompt": "Persistence test",
 	}
 	body, _ := json.Marshal(task)

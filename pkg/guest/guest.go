@@ -44,7 +44,6 @@ type TaskResult struct {
 // TaskAssignment represents a task assigned to a guest.
 type TaskAssignment struct {
 	TaskID string   `json:"id"`
-	Repos  []string `json:"repos"`
 	Prompt string   `json:"prompt"`
 	Tags   []string `json:"tags"`
 }
@@ -548,7 +547,6 @@ func (g *Guest) ExecuteTask(task TaskAssignment) (*TaskResult, error) {
 	}
 
 	g.log.Printf("[TASK] executing task %s", task.TaskID)
-	g.log.Printf("[TASK] repos: %v", task.Repos)
 	g.log.Printf("[TASK] prompt: %s", task.Prompt)
 	g.log.Printf("[TASK] tags: %v", task.Tags)
 

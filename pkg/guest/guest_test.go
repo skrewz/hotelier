@@ -59,7 +59,7 @@ func TestGuestConfig(t *testing.T) {
 }
 
 func TestTaskAssignmentMarshal(t *testing.T) {
-	task := TaskAssignment{TaskID: "t1", Repos: []string{"/repo1"}, Prompt: "Build", Tags: []string{"tag"}}
+	task := TaskAssignment{TaskID: "t1", Prompt: "Build", Tags: []string{"tag"}}
 	data, err := json.Marshal(task)
 	if err != nil {
 		t.Fatalf("marshal failed: %v", err)
@@ -170,29 +170,6 @@ func TestNewGuestWithEmptyTags(t *testing.T) {
 	}
 }
 
-func TestTaskAssignmentWithMultipleRepos(t *testing.T) {
-	task := TaskAssignment{
-		TaskID: "t1",
-		Repos:  []string{"/repo1", "/repo2", "/repo3"},
-		Prompt: "Build feature",
-		Tags:   []string{"business-default", "frontend"},
-	}
-	data, err := json.Marshal(task)
-	if err != nil {
-		t.Fatalf("marshal failed: %v", err)
-	}
-	var parsed TaskAssignment
-	if err := json.Unmarshal(data, &parsed); err != nil {
-		t.Fatalf("unmarshal failed: %v", err)
-	}
-	if len(parsed.Repos) != 3 {
-		t.Errorf("expected 3 repos, got %d", len(parsed.Repos))
-	}
-	if len(parsed.Tags) != 2 {
-		t.Errorf("expected 2 tags, got %d", len(parsed.Tags))
-	}
-}
-
 func TestTaskResultWithEmptyOutput(t *testing.T) {
 	result := TaskResult{TaskID: "t1", Success: true, Output: ""}
 	data, err := json.Marshal(result)
@@ -254,7 +231,7 @@ func TestTaskCancelWithoutReason(t *testing.T) {
 }
 
 func TestTaskAssignmentWithEmptyPrompt(t *testing.T) {
-	task := TaskAssignment{TaskID: "t1", Repos: []string{"/repo1"}, Prompt: "", Tags: []string{}}
+	task := TaskAssignment{TaskID: "t1", Prompt: "", Tags: []string{}}
 	data, err := json.Marshal(task)
 	if err != nil {
 		t.Fatalf("marshal failed: %v", err)

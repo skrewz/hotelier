@@ -178,46 +178,6 @@ func TestPIHandler_FullDeltaSentAsOneEntry(t *testing.T) {
 	}
 }
 
-// TestParseRepoRef verifies the parseRepoRef helper correctly splits
-// repo references into URL and optional branch/ref.
-func TestParseRepoRef(t *testing.T) {
-	tests := []struct {
-		input   string
-		wantURL string
-		wantRef string
-	}{
-		// HTTPS URLs without ref
-		{"https://github.com/user/repo", "https://github.com/user/repo", ""},
-		// HTTPS URLs with branch ref
-		{"https://github.com/user/repo@main", "https://github.com/user/repo", "main"},
-		// HTTPS URLs with feature branch
-		{"https://github.com/skrewz/hotelier@speculative-feature", "https://github.com/skrewz/hotelier", "speculative-feature"},
-		// HTTPS URLs with commit SHA
-		{"https://github.com/user/repo@abc123def", "https://github.com/user/repo", "abc123def"},
-		// HTTPS URLs with tag
-		{"https://github.com/user/repo@v1.2.0", "https://github.com/user/repo", "v1.2.0"},
-		// HTTPS URLs with .git suffix and ref
-		{"https://github.com/user/repo.git@develop", "https://github.com/user/repo.git", "develop"},
-		// SSH URLs without ref
-		{"git@github.com:user/repo", "git@github.com:user/repo", ""},
-		// SSH URLs with ref
-		{"git@github.com:user/repo@feature", "git@github.com:user/repo", "feature"},
-		// SSH URLs with .git and ref
-		{"git@github.com:user/repo.git@main", "git@github.com:user/repo.git", "main"},
-		{"", "", ""},
-	}
-
-	for _, tc := range tests {
-		url, ref := parseRepoRef(tc.input)
-		if url != tc.wantURL {
-			t.Errorf("parseRepoRef(%q) url = %q, want %q", tc.input, url, tc.wantURL)
-		}
-		if ref != tc.wantRef {
-			t.Errorf("parseRepoRef(%q) ref = %q, want %q", tc.input, ref, tc.wantRef)
-		}
-	}
-}
-
 // TestPIHandler_OperationalLogsSentViaCallback verifies that operational
 // messages (repo preparation, subprocess spawning) are sent via the sendLog
 // callback so they appear in the server's log store. This is a regression
@@ -250,9 +210,9 @@ func TestPIHandler_OperationalLogsSentViaCallback(t *testing.T) {
 		return nil
 	}
 
-	_, err = h.prepareRepos(context.Background(), "task-1", []string{}, sendLog)
+	_, err = h.prepareTaskDir(context.Background(), "task-1", sendLog)
 	if err != nil {
-		t.Fatalf("prepareRepos failed: %v", err)
+		t.Fatalf("prepareTaskDir failed: %v", err)
 	}
 
 	mu.Lock()
@@ -260,7 +220,7 @@ func TestPIHandler_OperationalLogsSentViaCallback(t *testing.T) {
 
 	// Should have received at least one operational log entry.
 	if len(logEntries) == 0 {
-		t.Fatal("expected operational log entries from prepareRepos, got none")
+		t.Fatal("expected operational log entries from prepareTaskDir, got none")
 	}
 
 	// Verify the entries have the expected properties.
@@ -277,9 +237,9 @@ func TestPIHandler_OperationalLogsSentViaCallback(t *testing.T) {
 	}
 }
 
-// TestPIHandler_PrepareReposNoRepos verifies that when no repos are specified,
-// the handler creates and returns a task-specific directory.
-func TestPIHandler_PrepareReposNoRepos(t *testing.T) {
+// TestPIHandler_PrepareTaskDir verifies that the handler creates and returns
+// a task-specific directory.
+func TestPIHandler_PrepareTaskDir(t *testing.T) {
 	baseDir, err := os.MkdirTemp("", "hotelier-base-*")
 	if err != nil {
 		t.Fatalf("create temp base dir: %v", err)
@@ -297,9 +257,9 @@ func TestPIHandler_PrepareReposNoRepos(t *testing.T) {
 		log:     log.New(io.Discard, "", 0),
 	}
 
-	taskDir, err := h.prepareRepos(context.Background(), "task-1", []string{}, nil)
+	taskDir, err := h.prepareTaskDir(context.Background(), "task-1", nil)
 	if err != nil {
-		t.Fatalf("prepareRepos failed: %v", err)
+		t.Fatalf("prepareTaskDir failed: %v", err)
 	}
 
 	// Should return a task-specific directory, not the base CWD.
@@ -314,7 +274,7 @@ func TestPIHandler_PrepareReposNoRepos(t *testing.T) {
 	}
 }
 
-// TestPIHandler_PrepareReposAfterResetClient verifies that prepareRepos uses
+// TestPIHandler_PrepareTaskDirAfterResetClient verifies that prepareTaskDir uses
 // the original base CWD even after resetClient replaces the pi client with
 // a task-specific working directory. This is a regression test for the bug
 // where nested tasks produced paths like:
@@ -324,7 +284,7 @@ func TestPIHandler_PrepareReposNoRepos(t *testing.T) {
 // instead of:
 //
 //	/base/tasks/task-2/repo
-func TestPIHandler_PrepareReposAfterResetClient(t *testing.T) {
+func TestPIHandler_PrepareTaskDirAfterResetClient(t *testing.T) {
 	baseDir, err := os.MkdirTemp("", "hotelier-base-*")
 	if err != nil {
 		t.Fatalf("create temp base dir: %v", err)
@@ -343,9 +303,9 @@ func TestPIHandler_PrepareReposAfterResetClient(t *testing.T) {
 	}
 
 	// First task — no repos, creates a task directory
-	taskDir1, err := h.prepareRepos(context.Background(), "task-1", []string{}, nil)
+	taskDir1, err := h.prepareTaskDir(context.Background(), "task-1", nil)
 	if err != nil {
-		t.Fatalf("first prepareRepos failed: %v", err)
+		t.Fatalf("first prepareTaskDir failed: %v", err)
 	}
 
 	// Verify first task dir is under baseDir
@@ -363,9 +323,9 @@ func TestPIHandler_PrepareReposAfterResetClient(t *testing.T) {
 	h.client = newClient
 
 	// Second task — should still use baseDir, NOT taskDir1
-	taskDir2, err := h.prepareRepos(context.Background(), "task-2", []string{}, nil)
+	taskDir2, err := h.prepareTaskDir(context.Background(), "task-2", nil)
 	if err != nil {
-		t.Fatalf("second prepareRepos failed: %v", err)
+		t.Fatalf("second prepareTaskDir failed: %v", err)
 	}
 
 	// The second task dir should be under baseDir, NOT nested under taskDir1.
@@ -378,47 +338,6 @@ func TestPIHandler_PrepareReposAfterResetClient(t *testing.T) {
 	// Verify the directory was actually created at the correct path
 	if _, err := os.Stat(expectedDir2); os.IsNotExist(err) {
 		t.Errorf("expected task dir %s to exist", expectedDir2)
-	}
-}
-
-// TestPIHandler_PrepareReposCloning verifies that remote URLs trigger git clone.
-func TestPIHandler_PrepareReposCloning(t *testing.T) {
-	if _, err := exec.LookPath("git"); err != nil {
-		t.Skip("git not installed")
-	}
-
-	baseDir, err := os.MkdirTemp("", "hotelier-base-*")
-	if err != nil {
-		t.Fatalf("create temp base dir: %v", err)
-	}
-	defer os.RemoveAll(baseDir)
-
-	client := pi.NewClient(pi.PiClientConfig{
-		CWD: baseDir,
-		Log: log.New(io.Discard, "", 0),
-	})
-
-	h := &PIHandler{
-		baseCWD: baseDir,
-		client:  client,
-		log:     log.New(io.Discard, "", 0),
-	}
-
-	// Use a small public repo for testing
-	taskDir, err := h.prepareRepos(context.Background(), "task-1", []string{"https://github.com/hashicorp/vault.git"}, nil)
-	if err != nil {
-		t.Fatalf("prepareRepos failed: %v", err)
-	}
-
-	// Verify the task directory was created
-	if _, err := os.Stat(taskDir); os.IsNotExist(err) {
-		t.Errorf("task dir %s should exist", taskDir)
-	}
-
-	// Verify the cloned repo directory exists
-	repoPath := filepath.Join(taskDir, "vault")
-	if _, err := os.Stat(repoPath); os.IsNotExist(err) {
-		t.Errorf("cloned repo %s should exist", repoPath)
 	}
 }
 
@@ -443,10 +362,10 @@ func TestPIHandler_CleanupTaskDir_RemovesDirectory(t *testing.T) {
 		log:     log.New(io.Discard, "", 0),
 	}
 
-	// Create a task directory via prepareRepos
-	taskDir, err := h.prepareRepos(context.Background(), "task-1", []string{}, nil)
+	// Create a task directory via prepareTaskDir
+	taskDir, err := h.prepareTaskDir(context.Background(), "task-1", nil)
 	if err != nil {
-		t.Fatalf("prepareRepos failed: %v", err)
+		t.Fatalf("prepareTaskDir failed: %v", err)
 	}
 
 	// Verify the directory exists before cleanup
@@ -514,9 +433,9 @@ func TestPIHandler_CleanupTaskDir_WithContents(t *testing.T) {
 	}
 
 	// Create a task directory
-	taskDir, err := h.prepareRepos(context.Background(), "task-1", []string{}, nil)
+	taskDir, err := h.prepareTaskDir(context.Background(), "task-1", nil)
 	if err != nil {
-		t.Fatalf("prepareRepos failed: %v", err)
+		t.Fatalf("prepareTaskDir failed: %v", err)
 	}
 
 	// Create some files inside the task directory (simulating work artefacts)

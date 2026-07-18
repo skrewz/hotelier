@@ -992,7 +992,6 @@ func (s *Server) tryAssignTaskToEligible(taskID, skipGuestID string) {
 
 		taskData := map[string]interface{}{
 			"id":     task.ID,
-			"repos":  task.Repos,
 			"prompt": task.Prompt,
 			"tags":   task.Tags,
 		}
@@ -1053,7 +1052,6 @@ func (s *Server) tryAssignTask(guestID string) {
 	// Push task to guest
 	taskData := map[string]interface{}{
 		"id":     matchedTask.ID,
-		"repos":  matchedTask.Repos,
 		"prompt": matchedTask.Prompt,
 		"tags":   matchedTask.Tags,
 	}
@@ -1251,7 +1249,6 @@ func (s *Server) handleGetTasks(w http.ResponseWriter, r *http.Request) {
 	for i, t := range tasks {
 		taskMap := map[string]interface{}{
 			"id":          t.ID,
-			"repos":       t.Repos,
 			"prompt":      t.Prompt,
 			"tags":        t.Tags,
 			"status":      t.Status.String(),
@@ -1272,8 +1269,28 @@ func (s *Server) handleGetTasks(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleCreateTask(w http.ResponseWriter, r *http.Request) {
+	// Read raw body to check for disallowed fields before decoding
+	var raw map[string]interface{}
+	if err := json.NewDecoder(r.Body).Decode(&raw); err != nil {
+		http.Error(w, "invalid request body", http.StatusBadRequest)
+		return
+	}
+
+	// Hard-fail if repos field is present
+	if repos, ok := raw["repos"]; ok {
+		if reposList, ok := repos.([]interface{}); ok && len(reposList) > 0 {
+			http.Error(w, "repos field is not supported: tasks are credentialed to access their own resources", http.StatusBadRequest)
+			return
+		}
+		// Also reject empty repos array to be strict
+		http.Error(w, "repos field is not supported: tasks are credentialed to access their own resources", http.StatusBadRequest)
+		return
+	}
+
+	// Reconstruct JSON without repos for task decoding
+	bodyBytes, _ := json.Marshal(raw)
 	var task queue.Task
-	if err := json.NewDecoder(r.Body).Decode(&task); err != nil {
+	if err := json.Unmarshal(bodyBytes, &task); err != nil {
 		http.Error(w, "invalid request body", http.StatusBadRequest)
 		return
 	}
@@ -1340,7 +1357,7 @@ func (s *Server) HandleTaskDetail(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleTaskRerun creates a new task from an existing one.
-// POST /api/tasks/:id/rerun — clones the task's prompt, repos, and tags
+// POST /api/tasks/:id/rerun — clones the task's prompt and tags
 // into a fresh task with a new ID.
 func (s *Server) handleTaskRerun(w http.ResponseWriter, r *http.Request, taskID string) {
 	if r.Method != http.MethodPost {
@@ -1362,7 +1379,6 @@ func (s *Server) handleTaskRerun(w http.ResponseWriter, r *http.Request, taskID 
 	// Clone the task with a new ID
 	newTask := &queue.Task{
 		ID:     fmt.Sprintf("task-%d", time.Now().UnixNano()),
-		Repos:  orig.Repos,
 		Prompt: orig.Prompt,
 		Tags:   orig.Tags,
 	}
