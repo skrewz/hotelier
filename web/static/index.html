@@ -1203,12 +1203,19 @@
         let _lastAppendedLevel = '';
 
         // _appendThinkingToDetail appends a thinking delta to the last
-        // thinking block (streaming). If no thinking block exists, creates
-        // a new one that starts open so the user can see content arriving.
+        // thinking block (streaming). If no thinking block exists, or if the
+        // last thinking block is NOT the last child of the body (meaning a
+        // tool block or other content was rendered after it), creates a new
+        // block. This ensures thinking tokens after tool calls appear in a
+        // new block rather than accumulating in a stale one.
         function _appendThinkingToDetail(body, line, wasAtBottom) {
             const blocks = body.querySelectorAll('.thinking-block');
             const lastBlock = blocks.length > 0 ? blocks[blocks.length - 1] : null;
-            if (lastBlock) {
+            // Only append to an existing block if it is the last child of
+            // the body.  If a tool block or other element follows it, the
+            // thinking has resumed after an interruption and needs a new block.
+            const canAppend = lastBlock && lastBlock === body.lastElementChild;
+            if (canAppend) {
                 // Append to existing block's thinking-content div
                 const contentEl = lastBlock.querySelector('.thinking-content');
                 if (contentEl) {
@@ -1532,11 +1539,25 @@
                 let currentToolBlock = null;
                 let entriesHtml = '';
 
+                // Accumulator for merging consecutive thinking entries into
+                // a single block — matches renderTaskDetail's behaviour.
+                let pendingThinkingLines = '';
+
+                function flushPendingThinking() {
+                    if (pendingThinkingLines) {
+                        entriesHtml += buildThinkingBlockHTML(pendingThinkingLines);
+                        pendingThinkingLines = '';
+                    }
+                }
+
                 entries.forEach((log) => {
                     const level = log.level || '';
 
                     // Use structured fields to determine event type.
                     if (level === 'tool' && log.tool_type) {
+                        // Flush pending thinking before tool processing
+                        flushPendingThinking();
+
                         if (log.tool_type === 'start') {
                             if (currentToolBlock) {
                                 // Flush previous incomplete block
@@ -1585,18 +1606,23 @@
                         currentToolBlock = null;
                     }
 
-                    let msgHtml;
                     if (level === 'thinking') {
-                        msgHtml = buildThinkingBlockHTML(log.line);
+                        // Accumulate consecutive thinking entries
+                        pendingThinkingLines += log.line;
                     } else if (level === 'system') {
-                        msgHtml = `<div class="log-msg system">${escapeHtml(log.line)}</div>`;
+                        flushPendingThinking();
+                        entriesHtml += `<div class="log-msg system">${escapeHtml(log.line)}</div>`;
                     } else if (level === 'error') {
-                        msgHtml = `<div class="log-msg error">${escapeHtml(log.line)}</div>`;
+                        flushPendingThinking();
+                        entriesHtml += `<div class="log-msg error">${escapeHtml(log.line)}</div>`;
                     } else {
-                        msgHtml = `<div class="log-msg guest"><div class="md-rendered">${renderMarkdown(log.line)}</div></div>`;
+                        flushPendingThinking();
+                        entriesHtml += `<div class="log-msg guest"><div class="md-rendered">${renderMarkdown(log.line)}</div></div>`;
                     }
-                    entriesHtml += msgHtml;
                 });
+
+                // Flush any remaining accumulated thinking
+                flushPendingThinking();
 
                 // Close any remaining open tool block
                 if (currentToolBlock) {
