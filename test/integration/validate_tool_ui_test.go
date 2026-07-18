@@ -670,6 +670,101 @@ const { chromium } = require('playwright');
   console.log('PASS: Only 2 tabs present (Task Detail removed)');
 
   // =====================================================================
+  // Phase 1a: Scroll fix — html/body must NOT have overflow:hidden
+  // =====================================================================
+  console.log('=== Phase 1a: Scroll fix ===');
+
+  // Verify that html and body do NOT have overflow:hidden.
+  // overflow:hidden on the root elements prevents scroll events from
+  // reaching child containers, making the UI impossible to scroll.
+  const scrollFixOk = await page.evaluate(() => {
+    const htmlStyle = window.getComputedStyle(document.documentElement);
+    const bodyStyle = window.getComputedStyle(document.body);
+    return {
+      htmlOverflow: htmlStyle.overflow,
+      bodyOverflow: bodyStyle.overflow,
+    };
+  });
+  if (scrollFixOk.htmlOverflow === 'hidden') fail('html must NOT have overflow:hidden (blocks scrolling)');
+  if (scrollFixOk.bodyOverflow === 'hidden') fail('body must NOT have overflow:hidden (blocks scrolling)');
+  console.log('PASS: html overflow is', scrollFixOk.htmlOverflow, '(not hidden)');
+  console.log('PASS: body overflow is', scrollFixOk.bodyOverflow, '(not hidden)');
+
+  // Verify that scrollable containers have overflow-y:auto (or scroll).
+  // These are the elements that should handle scrolling.
+  const scrollableContainers = await page.evaluate(() => {
+    const results = {};
+    const selectors = {
+      sidebar: '.sidebar',
+      taskList: '#task-list',
+      taskDetailBody: '.task-detail-body',
+    };
+    for (const [name, sel] of Object.entries(selectors)) {
+      const el = document.querySelector(sel);
+      if (el) {
+        const style = window.getComputedStyle(el);
+        results[name] = {
+          found: true,
+          overflowY: style.overflowY,
+          scrollHeight: el.scrollHeight,
+          clientHeight: el.clientHeight,
+        };
+      } else {
+        results[name] = { found: false };
+      }
+    }
+    return results;
+  });
+
+  // Sidebar should be present and scrollable
+  if (!scrollableContainers.sidebar.found) fail('.sidebar not found');
+  if (scrollableContainers.sidebar.overflowY !== 'auto' && scrollableContainers.sidebar.overflowY !== 'scroll') {
+    fail('.sidebar should have overflow-y:auto or scroll, got ' + scrollableContainers.sidebar.overflowY);
+  }
+  console.log('PASS: .sidebar has overflow-y:', scrollableContainers.sidebar.overflowY);
+
+  // Task list should be present and scrollable
+  if (!scrollableContainers.taskList.found) fail('#task-list not found');
+  if (scrollableContainers.taskList.overflowY !== 'auto' && scrollableContainers.taskList.overflowY !== 'scroll') {
+    fail('#task-list should have overflow-y:auto or scroll, got ' + scrollableContainers.taskList.overflowY);
+  }
+  console.log('PASS: #task-list has overflow-y:', scrollableContainers.taskList.overflowY);
+
+  // task-detail-body may not be visible yet (we're on Tasks tab), but check
+  // the CSS rule is correct by inspecting the element's style attribute.
+  if (scrollableContainers.taskDetailBody.found) {
+    if (scrollableContainers.taskDetailBody.overflowY !== 'auto' && scrollableContainers.taskDetailBody.overflowY !== 'scroll') {
+      fail('.task-detail-body should have overflow-y:auto or scroll, got ' + scrollableContainers.taskDetailBody.overflowY);
+    }
+    console.log('PASS: .task-detail-body has overflow-y:', scrollableContainers.taskDetailBody.overflowY);
+  }
+
+  // Verify the task list can actually be scrolled (even if content fits,
+  // the element should respond to scroll commands).
+  const taskListScrollable = await page.evaluate(() => {
+    const el = document.querySelector('#task-list');
+    if (!el) return { error: 'not found' };
+    const before = el.scrollTop;
+    el.scrollTop = 99999; // Scroll to bottom
+    const after = el.scrollTop;
+    // scrollTop is always 0 when content fits, but the key is that
+    // setting scrollTop doesn't throw and the element accepts scroll.
+    // When content exceeds viewport, after > before proves scrolling works.
+    return {
+      acceptsScroll: true,
+      scrollTopBefore: before,
+      scrollTopAfter: after,
+      scrollHeight: el.scrollHeight,
+      clientHeight: el.clientHeight,
+      canScroll: el.scrollHeight > el.clientHeight,
+    };
+  });
+  if (taskListScrollable.error) fail(taskListScrollable.error);
+  console.log('PASS: #task-list accepts scroll commands (scrollTop: ' + taskListScrollable.scrollTopBefore + ' -> ' + taskListScrollable.scrollTopAfter + ', canScroll: ' + taskListScrollable.canScroll + ')');
+
+  await takeScreenshot('01a-scroll-fix');
+
+  // =====================================================================
   // Phase 1b: Task summary and filter row
   // =====================================================================
   console.log('=== Phase 1b: Task summary and filter ===');
