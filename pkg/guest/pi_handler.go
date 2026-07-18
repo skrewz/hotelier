@@ -102,13 +102,27 @@ func (h *PIHandler) GetClient() *pi.PiClient {
 
 // ExecuteTask runs a task through the pi guest and streams logs back via the callback.
 // It creates a per-task working directory and sets that as the CWD for the pi subprocess.
+// If the pi client is not running when ExecuteTask is called, it attempts to restart
+// the client before proceeding. This handles the case where the subprocess was killed
+// externally (e.g. pkill pi) or crashed between tasks.
 func (h *PIHandler) ExecuteTask(ctx context.Context, task TaskAssignment, sendLog func(LogEntry) error) (*TaskResult, error) {
 	h.mu.Lock()
-	if h.client == nil || !h.client.IsRunning() {
-		h.mu.Unlock()
-		return nil, fmt.Errorf("pi client not running")
-	}
+	clientRunning := h.client != nil && h.client.IsRunning()
 	h.mu.Unlock()
+
+	if !clientRunning {
+		h.log.Printf("[PI] pi client not running, attempting restart")
+		if err := sendLog(LogEntry{TaskID: task.TaskID, Line: "Pi client not running, attempting restart", Level: "warning"}); err != nil {
+			h.log.Printf("[PI] failed to send restart warning log: %v", err)
+		}
+		if err := h.restartClient(ctx); err != nil {
+			return nil, fmt.Errorf("pi client not running and restart failed: %w", err)
+		}
+		h.log.Printf("[PI] pi client restarted successfully")
+		if err := sendLog(LogEntry{TaskID: task.TaskID, Line: "Pi client restarted successfully", Level: "system"}); err != nil {
+			h.log.Printf("[PI] failed to send restart success log: %v", err)
+		}
+	}
 
 	h.log.Printf("[PI] executing task %s", task.TaskID)
 	h.log.Printf("[PI] prompt: %s", task.Prompt)
@@ -363,6 +377,41 @@ func (h *PIHandler) prepareTaskDir(ctx context.Context, taskID string, sendLog f
 		_ = sendLog(LogEntry{TaskID: taskID, Line: fmt.Sprintf("Using task directory: %s", taskDir), Level: "system"})
 	}
 	return taskDir, nil
+}
+
+// restartClient restarts the pi subprocess using the handler's base CWD.
+// It is called when ExecuteTask detects that the client is not running,
+// e.g. because the subprocess was killed externally or crashed.
+// The restarted client is a temporary one — resetClient will replace it
+// with a task-specific client later in ExecuteTask.
+func (h *PIHandler) restartClient(ctx context.Context) error {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+
+	// Stop the dead client if it's still around
+	if h.client != nil && h.client.IsRunning() {
+		// Should not happen — we only call restartClient when IsRunning is false.
+		// But handle it gracefully just in case.
+		if err := h.client.Stop(ctx); err != nil {
+			h.log.Printf("[PI] stopping dead client: %v", err)
+		}
+	}
+
+	// Create a new client with the base working directory
+	h.log.Printf("[PI] restarting pi client in base dir: %s", h.baseCWD)
+	cfg := pi.PiClientConfig{
+		CWD: h.baseCWD,
+		Log: h.log,
+	}
+	h.client = pi.NewClient(cfg)
+	if err := h.client.Start(ctx); err != nil {
+		return fmt.Errorf("start pi client: %w", err)
+	}
+	if !h.client.IsRunning() {
+		return fmt.Errorf("pi client started but not running")
+	}
+	h.log.Printf("[PI] pi client restarted (pid %d)", h.client.Cmd().Process.Pid)
+	return nil
 }
 
 // resetClient restarts the pi subprocess with a new working directory.
