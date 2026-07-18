@@ -400,8 +400,9 @@ func (h *PIHandler) restartClient(ctx context.Context) error {
 	// Create a new client with the base working directory
 	h.log.Printf("[PI] restarting pi client in base dir: %s", h.baseCWD)
 	cfg := pi.PiClientConfig{
-		CWD: h.baseCWD,
-		Log: h.log,
+		CWD:   h.baseCWD,
+		Log:   h.log,
+		Debug: h.debug,
 	}
 	h.client = pi.NewClient(cfg)
 	if err := h.client.Start(ctx); err != nil {
@@ -410,7 +411,9 @@ func (h *PIHandler) restartClient(ctx context.Context) error {
 	if !h.client.IsRunning() {
 		return fmt.Errorf("pi client started but not running")
 	}
-	h.log.Printf("[PI] pi client restarted (pid %d)", h.client.Cmd().Process.Pid)
+	if h.client.Cmd() != nil && h.client.Cmd().Process != nil {
+		h.log.Printf("[PI] pi client restarted (pid %d)", h.client.Cmd().Process.Pid)
+	}
 	return nil
 }
 
