@@ -997,6 +997,84 @@ const { chromium } = require('playwright');
   }
 
   // =====================================================================
+  // Phase 3a: Prompt section — markdown rendering and collapsible
+  // =====================================================================
+  console.log('=== Phase 3a: Prompt section ===');
+
+  const promptResult = await page.evaluate(() => {
+    const promptContainer = document.querySelector('.task-detail-prompt');
+    if (!promptContainer) return { error: 'no .task-detail-prompt found' };
+
+    const header = promptContainer.querySelector('.task-detail-prompt-header');
+    const body = promptContainer.querySelector('.task-detail-prompt-body');
+    const mdRendered = promptContainer.querySelector('.md-rendered');
+    const label = header?.querySelector('.prompt-label')?.textContent?.trim();
+    const chevron = header?.querySelector('.prompt-chevron');
+    const bodyIsOpen = body?.classList.contains('open');
+    const chevronIsOpen = chevron?.classList.contains('open');
+    const promptTextContent = mdRendered ? mdRendered.textContent.trim() : '';
+
+    return {
+      hasHeader: header !== null,
+      hasBody: body !== null,
+      hasMdRendered: mdRendered !== null,
+      label,
+      bodyIsOpen,
+      chevronIsOpen,
+      promptTextContent,
+    };
+  });
+
+  if (promptResult.error) {
+    fail('Prompt validation error: ' + promptResult.error);
+    await takeScreenshot('03a-prompt-error');
+    process.exit(1);
+  }
+
+  const promptChecks = [
+    { name: 'prompt has header element', pass: promptResult.hasHeader },
+    { name: 'prompt has body element', pass: promptResult.hasBody },
+    { name: 'prompt has md-rendered element', pass: promptResult.hasMdRendered },
+    { name: 'prompt label is "📝 Prompt"', pass: promptResult.label === '📝 Prompt' },
+    { name: 'prompt body is open by default', pass: promptResult.bodyIsOpen === true },
+    { name: 'prompt chevron is open by default', pass: promptResult.chevronIsOpen === true },
+    { name: 'prompt text content rendered', pass: promptResult.promptTextContent.length > 0 },
+    { name: 'prompt contains expected text', pass: promptResult.promptTextContent.includes('Simulate tool calls') },
+  ];
+
+  let promptFailed = false;
+  for (const check of promptChecks) {
+    if (!check.pass) { console.error('FAIL:', check.name); promptFailed = true; }
+    else { console.log('PASS:', check.name); }
+  }
+  if (promptFailed) {
+    await takeScreenshot('03a-prompt-validation-failed');
+    process.exit(1);
+  }
+
+  // Verify prompt can be toggled closed
+  await clickEl('.task-detail-prompt-header');
+  const promptClosed = await page.evaluate(() => {
+    const body = document.querySelector('.task-detail-prompt-body');
+    const chevron = document.querySelector('.prompt-chevron');
+    return !body?.classList.contains('open') && !chevron?.classList.contains('open');
+  });
+  if (!promptClosed) fail('Prompt should be closed after clicking header');
+  console.log('PASS: Prompt closed after toggle');
+
+  // Verify prompt can be toggled open again
+  await clickEl('.task-detail-prompt-header');
+  const promptReopened = await page.evaluate(() => {
+    const body = document.querySelector('.task-detail-prompt-body');
+    const chevron = document.querySelector('.prompt-chevron');
+    return body?.classList.contains('open') && chevron?.classList.contains('open');
+  });
+  if (!promptReopened) fail('Prompt should be open after clicking header again');
+  console.log('PASS: Prompt reopened after toggle');
+
+  await takeScreenshot('03a-prompt-collapsible');
+
+  // =====================================================================
   // Phase 3b: Scroll behaviour — auto-scroll to bottom on new messages
   // =====================================================================
   console.log('=== Phase 3b: Scroll behaviour ===');
