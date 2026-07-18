@@ -361,3 +361,91 @@ func TestSpawnOutputCallback_NilDoesNotCrash(t *testing.T) {
 	// Give the goroutines time to run
 	time.Sleep(500 * time.Millisecond)
 }
+
+// TestPiClient_IsRunning_NotStarted verifies that IsRunning returns false
+// when the client has not been started.
+func TestPiClient_IsRunning_NotStarted(t *testing.T) {
+	c := NewClient(PiClientConfig{CWD: "/tmp"})
+
+	if c.IsRunning() {
+		t.Error("IsRunning() should be false before Start()")
+	}
+}
+
+// TestPiClient_IsRunning_AfterStart verifies that IsRunning returns true
+// after a successful Start().
+func TestPiClient_IsRunning_AfterStart(t *testing.T) {
+	if _, err := exec.LookPath("pi"); err != nil {
+		t.Skip("pi not installed")
+	}
+
+	c := NewClient(PiClientConfig{CWD: "/tmp"})
+
+	ctx := context.Background()
+	if err := c.Start(ctx); err != nil {
+		t.Fatalf("start failed: %v", err)
+	}
+	defer c.Stop(ctx)
+
+	if !c.IsRunning() {
+		t.Error("IsRunning() should be true after Start()")
+	}
+}
+
+// TestPiClient_IsRunning_AfterStop verifies that IsRunning returns false
+// after Stop() is called.
+func TestPiClient_IsRunning_AfterStop(t *testing.T) {
+	if _, err := exec.LookPath("pi"); err != nil {
+		t.Skip("pi not installed")
+	}
+
+	c := NewClient(PiClientConfig{CWD: "/tmp"})
+
+	ctx := context.Background()
+	if err := c.Start(ctx); err != nil {
+		t.Fatalf("start failed: %v", err)
+	}
+
+	if err := c.Stop(ctx); err != nil {
+		t.Fatalf("stop failed: %v", err)
+	}
+
+	if c.IsRunning() {
+		t.Error("IsRunning() should be false after Stop()")
+	}
+}
+
+// TestPiClient_IsRunning_DetectsCrashedProcess verifies that IsRunning
+// detects a process that has crashed on its own (ProcessState is non-nil
+// but Stop() was not called). This is a regression test for issue #24
+// where IsRunning() only checked the `started` flag and did not detect
+// a crashed subprocess.
+func TestPiClient_IsRunning_DetectsCrashedProcess(t *testing.T) {
+	// We simulate a crashed process by creating a client, starting a
+	// short-lived command (not pi), and then checking IsRunning after
+	// the command exits.
+	c := NewClient(PiClientConfig{CWD: "/tmp"})
+
+	// Manually set up the internal state to simulate a crashed process.
+	// We use a command that exits immediately.
+	c.cmd = exec.Command("true") // exits immediately with 0
+	c.started = true
+
+	// Start the command so ProcessState gets populated
+	_ = c.cmd.Run() // blocks until "true" exits
+
+	// Now ProcessState should be non-nil (process exited)
+	if c.cmd.ProcessState == nil {
+		t.Fatal("expected ProcessState to be set after cmd.Run()")
+	}
+
+	// IsRunning should detect the dead process
+	if c.IsRunning() {
+		t.Error("IsRunning() should be false when process has exited")
+	}
+
+	// After IsRunning detects the crash, started should be cleared
+	if c.started {
+		t.Error("started should be cleared after IsRunning detects dead process")
+	}
+}

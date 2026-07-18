@@ -503,7 +503,7 @@ func (g *Guest) ExecuteTask(task TaskAssignment) (*TaskResult, error) {
 	// prevents the server from reassigning the task to this guest if
 	// ExecuteTask fails and the guest declines — FindAvailableGuests
 	// will not return a guest whose registry state is RUNNING.
-	_, err := g.client.Call("guest.acknowledge", map[string]interface{}{
+	_, err := g.client.Call("task.acknowledge", map[string]interface{}{
 		"task_id":  task.TaskID,
 		"guest_id": g.id,
 	})
