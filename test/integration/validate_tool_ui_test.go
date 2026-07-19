@@ -698,6 +698,7 @@ const { chromium } = require('playwright');
       sidebar: '.sidebar',
       taskList: '#task-list',
       taskDetailBody: '.task-detail-body',
+      tabTasks: '#tab-tasks',
     };
     for (const [name, sel] of Object.entries(selectors)) {
       const el = document.querySelector(sel);
@@ -730,6 +731,18 @@ const { chromium } = require('playwright');
   }
   console.log('PASS: #task-list has overflow-y:', scrollableContainers.taskList.overflowY);
 
+  // tab-tasks container should be present and scrollable (Issue #42 fix).
+  // The parent tab container must NOT have overflow:hidden as that clips
+  // the scrollable child elements and prevents scrolling.
+  if (!scrollableContainers.tabTasks.found) fail('#tab-tasks not found');
+  if (scrollableContainers.tabTasks.overflowY === 'hidden') {
+    fail('#tab-tasks must NOT have overflow:hidden (clips scrollable children), got overflow-y: hidden');
+  }
+  if (scrollableContainers.tabTasks.overflowY !== 'auto' && scrollableContainers.tabTasks.overflowY !== 'scroll') {
+    fail('#tab-tasks should have overflow-y:auto or scroll, got ' + scrollableContainers.tabTasks.overflowY);
+  }
+  console.log('PASS: #tab-tasks has overflow-y:', scrollableContainers.tabTasks.overflowY);
+
   // task-detail-body may not be visible yet (we're on Tasks tab), but check
   // the CSS rule is correct by inspecting the element's style attribute.
   if (scrollableContainers.taskDetailBody.found) {
@@ -738,6 +751,26 @@ const { chromium } = require('playwright');
     }
     console.log('PASS: .task-detail-body has overflow-y:', scrollableContainers.taskDetailBody.overflowY);
   }
+
+  // Verify the tab-tasks container can actually be scrolled (even if content fits,
+  // the element should respond to scroll commands).
+  const tabTasksScrollable = await page.evaluate(() => {
+    const el = document.querySelector('#tab-tasks');
+    if (!el) return { error: 'not found' };
+    const before = el.scrollTop;
+    el.scrollTop = 99999; // Scroll to bottom
+    const after = el.scrollTop;
+    return {
+      acceptsScroll: true,
+      scrollTopBefore: before,
+      scrollTopAfter: after,
+      scrollHeight: el.scrollHeight,
+      clientHeight: el.clientHeight,
+      canScroll: el.scrollHeight > el.clientHeight,
+    };
+  });
+  if (tabTasksScrollable.error) fail(tabTasksScrollable.error);
+  console.log('PASS: #tab-tasks accepts scroll commands (scrollTop: ' + tabTasksScrollable.scrollTopBefore + ' -> ' + tabTasksScrollable.scrollTopAfter + ', canScroll: ' + tabTasksScrollable.canScroll + ')');
 
   // Verify the task list can actually be scrolled (even if content fits,
   // the element should respond to scroll commands).
@@ -1411,6 +1444,29 @@ const { chromium } = require('playwright');
   const logsUrl = await page.evaluate(() => window.location.pathname);
   if (logsUrl !== '/logs') fail('URL should be /logs, got: ' + logsUrl);
   console.log('PASS: URL is /logs');
+
+  // Verify #tab-logs has correct overflow (Issue #42 fix).
+  // The tab container must NOT have overflow:hidden as that clips
+  // the scrollable child elements and prevents scrolling.
+  const tabLogsOverflow = await page.evaluate(() => {
+    const el = document.getElementById('tab-logs');
+    if (!el) return { error: 'not found' };
+    const style = window.getComputedStyle(el);
+    return {
+      overflowY: style.overflowY,
+      scrollHeight: el.scrollHeight,
+      clientHeight: el.clientHeight,
+      canScroll: el.scrollHeight > el.clientHeight,
+    };
+  });
+  if (tabLogsOverflow.error) fail(tabLogsOverflow.error);
+  if (tabLogsOverflow.overflowY === 'hidden') {
+    fail('#tab-logs must NOT have overflow:hidden (clips scrollable children), got overflow-y: hidden');
+  }
+  if (tabLogsOverflow.overflowY !== 'auto' && tabLogsOverflow.overflowY !== 'scroll') {
+    fail('#tab-logs should have overflow-y:auto or scroll, got ' + tabLogsOverflow.overflowY);
+  }
+  console.log('PASS: #tab-logs has overflow-y:', tabLogsOverflow.overflowY, '(canScroll:', tabLogsOverflow.canScroll + ')');
 
   // Verify log dates are present
   const logDatesOk = await page.evaluate(() => {
