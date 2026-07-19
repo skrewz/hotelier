@@ -711,7 +711,11 @@
             const cmdLine = renderCommandLineHeader(block.toolName, block.args);
             const ts = formatTimestamp();
 
-            // Count entries in this block (args + output lines)
+            // Count entries in this block (args + output lines).
+            // NOTE: This path (renderToolBlockEnd) counts output lines, while
+            // the streaming SSE path (handleLogEntry) increments by 1 per event.
+            // The values may differ if a single SSE event delivers multi-line
+            // output, but exact counter semantics are not guaranteed (Issue #46).
             let entryCount = 1; // start event
             if (block.output) {
                 entryCount += block.output.split('\n').length;
@@ -764,6 +768,10 @@
         }
 
         // Thinking block helpers
+        // Preview truncation limits (Issue #46: named constants per reviewer feedback)
+        const THINKING_PREVIEW_MAX_LEN = 60;
+        const PROMPT_PREVIEW_MAX_LEN = 80;
+
         let _thinkingBlockCounter = 0;
 
         function nextThinkingBlockId() {
@@ -827,7 +835,7 @@
         // getFirstLine extracts the first line of text, truncated to maxLen chars.
         function getFirstLine(text, maxLen) {
             if (!text) return '';
-            maxLen = maxLen || 60;
+            maxLen = maxLen || THINKING_PREVIEW_MAX_LEN;
             const line = text.split('\n')[0] || text;
             if (line.length > maxLen) return line.substring(0, maxLen) + '…';
             return line;
@@ -914,7 +922,7 @@
             const badgeClass = `badge-${task.status.toLowerCase()}`;
             const promptMarkdown = renderMarkdown(task.prompt);
             // Extract first line of prompt for collapsed preview
-            const promptPreview = getFirstLine(task.prompt, 80);
+            const promptPreview = getFirstLine(task.prompt, PROMPT_PREVIEW_MAX_LEN);
 
             let logsHtml = '';
             if (logs.length === 0) {
