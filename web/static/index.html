@@ -297,12 +297,12 @@
                 <div class="tab active" onclick="showTab('tasks')">Tasks</div>
                 <div class="tab" onclick="showTab('logs')">Logs</div>
             </div>
-            <div id="tab-tasks" style="display:flex;flex-direction:column;flex:1;overflow:hidden;min-height:0;">
+            <div id="tab-tasks" style="display:flex;flex-direction:column;flex:1;overflow-y:auto;min-height:0;">
                 <div id="task-summary" class="task-summary"></div>
                 <div id="task-filter-row" class="task-filter-row"></div>
                 <div id="task-list" style="flex:1;overflow-y:auto;min-height:0;"></div>
             </div>
-            <div id="tab-logs" style="display:none;flex:1;overflow:hidden;min-height:0;position:relative;">
+            <div id="tab-logs" style="display:none;flex:1;overflow-y:auto;min-height:0;position:relative;">
                 <div id="log-view" style="position:absolute;top:0;left:0;right:0;bottom:0;display:flex;flex-direction:column;">
                     <div class="empty-state"><span>📋</span>No logs configured</div>
                 </div>
