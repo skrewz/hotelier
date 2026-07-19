@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"hotelier/pkg/config"
+	"hotelier/pkg/fatalwriter"
 	"hotelier/pkg/logstore"
 	"hotelier/pkg/orchestrator"
 	"hotelier/pkg/queue"
@@ -294,7 +295,8 @@ func (s *Server) Reload(cfg config.ServerConfig) {
 // New creates a new Server instance.
 func New(cfg config.ServerConfig) *Server {
 	logPrefix := "[hotelier]"
-	logger := log.New(os.Stdout, logPrefix+" ", log.LstdFlags)
+	// Use fatalwriter so the process exits if log writes fail (e.g. disk full).
+	logger := log.New(fatalwriter.New(os.Stdout), logPrefix+" ", log.LstdFlags)
 
 	s := &Server{
 		cfg:            cfg,
@@ -685,9 +687,10 @@ func (s *Server) handleGuestLog(ctx context.Context, params json.RawMessage) (in
 				e.ToolType, e.ToolName, e.ToolID, e.ToolArgs, e.ToolOutput, e.ToolError, _ = parseToolLine(e.Line)
 			}
 			s.logStore.Add(e)
-			// Persist to disk if configured
+			// Persist to disk if configured. Failure to write logs is fatal:
+			// the system should not continue processing tasks if it cannot log.
 			if s.diskLogStore != nil {
-				_ = s.diskLogStore.Append(logstore.Entry{
+				if err := s.diskLogStore.Append(logstore.Entry{
 					TaskID:     e.TaskID,
 					Line:       e.Line,
 					Level:      e.Level,
@@ -698,7 +701,10 @@ func (s *Server) handleGuestLog(ctx context.Context, params json.RawMessage) (in
 					ToolArgs:   e.ToolArgs,
 					ToolOutput: e.ToolOutput,
 					ToolError:  e.ToolError,
-				})
+				}); err != nil {
+					fmt.Fprintf(os.Stderr, fatalwriter.FatalMsgFormat, err)
+					os.Exit(1)
+				}
 			}
 			s.hub.SendNotification("", rpc.ConnectionRoleBrowser, "task.log", map[string]interface{}{
 				"task_id":     e.TaskID,

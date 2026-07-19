@@ -11,6 +11,7 @@ import (
 
 	"hotelier/internal/server"
 	"hotelier/pkg/config"
+	"hotelier/pkg/fatalwriter"
 )
 
 // reloadableConfig wraps LoadServerConfig so it can be passed to config.NewConfigWatcher.
@@ -21,6 +22,9 @@ func reloadableConfig(path string) (interface{}, error) {
 func main() {
 	configPath := flag.String("config", "config/server.yaml", "path to configuration file")
 	flag.Parse()
+
+	// Set up logger that exits on write failure (e.g. disk full).
+	log.SetOutput(fatalwriter.New(os.Stdout))
 
 	// Load configuration
 	cfg, err := config.LoadServerConfig(*configPath)
