@@ -158,24 +158,13 @@ func (h *PIHandler) ExecuteTask(ctx context.Context, task TaskAssignment, sendLo
 			h.log.Printf("[PERSONA] failed to send persona log: %v", err)
 		}
 
-		// Build persona struct for ApplyPersona
-		files := make([]persona.FileCopy, len(task.Persona.Files))
-		for i, f := range task.Persona.Files {
-			files[i] = persona.FileCopy{From: f.From, To: f.To}
-		}
-		p := &persona.Persona{
-			Name:  task.Persona.Name,
-			Env:   task.Persona.Env,
-			Files: files,
-		}
-
-		personaEnv, err = persona.ApplyPersona(p, workDir)
+		personaEnv, err = persona.ApplyPersona(task.Persona, workDir)
 		if err != nil {
 			return nil, fmt.Errorf("apply persona %q: %w", task.Persona.Name, err)
 		}
 
-		h.log.Printf("[PERSONA] applied persona %q: %d env vars, %d file copies", task.Persona.Name, len(personaEnv), len(files))
-		if err := sendLog(LogEntry{TaskID: task.TaskID, Line: fmt.Sprintf("Persona %q applied: %d env vars, %d file copies", task.Persona.Name, len(personaEnv), len(files)), Level: "system"}); err != nil {
+		h.log.Printf("[PERSONA] applied persona %q: %d env vars, %d file copies", task.Persona.Name, len(personaEnv), len(task.Persona.Files))
+		if err := sendLog(LogEntry{TaskID: task.TaskID, Line: fmt.Sprintf("Persona %q applied: %d env vars, %d file copies", task.Persona.Name, len(personaEnv), len(task.Persona.Files)), Level: "system"}); err != nil {
 			h.log.Printf("[PERSONA] failed to send apply log: %v", err)
 		}
 	}

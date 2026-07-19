@@ -11,8 +11,8 @@ import (
 // Source is an absolute path on the guest machine.
 // Destination is relative to the task's working directory.
 type FileCopy struct {
-	From string `yaml:"from"` // absolute source path
-	To   string `yaml:"to"`   // relative destination path (within workdir)
+	From string `yaml:"from" json:"from"` // absolute source path
+	To   string `yaml:"to" json:"to"`     // relative destination path (within workdir)
 }
 
 // Persona defines a named set of environment variables and file copies
@@ -22,14 +22,14 @@ type FileCopy struct {
 // which is substituted with the actual task working directory at runtime.
 type Persona struct {
 	// Name is the unique identifier for this persona.
-	Name string `yaml:"name"`
+	Name string `yaml:"name" json:"name"`
 	// Env is a map of environment variable names to values.
 	// Values may contain <workpath> as a placeholder for the task's
 	// working directory.
-	Env map[string]string `yaml:"env"`
+	Env map[string]string `yaml:"env" json:"env"`
 	// Files is a list of file copy mappings. Files are copied from
 	// their source paths into the task's working directory.
-	Files []FileCopy `yaml:"files"`
+	Files []FileCopy `yaml:"files" json:"files"`
 }
 
 // ResolvedEnv returns the environment variables with <workpath> substituted

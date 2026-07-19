@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"reflect"
 	"sort"
 	"strings"
 	"sync"
@@ -262,11 +263,16 @@ func (s *Server) Reload(cfg config.ServerConfig) {
 		s.log.Printf("max_guests updated: %d", cfg.MaxGuests)
 	}
 
-	// Recreate persona store if personas changed
-	if len(cfg.Personas) != len(old.Personas) {
-		s.personaStore = persona.NewStore(cfg.Personas)
-		if len(cfg.Personas) > 0 {
-			s.log.Printf("personas updated: %v", s.personaStore.List())
+	// Recreate persona store if personas changed (deep comparison catches
+	// edits to existing personas, not just additions/removals).
+	if !reflect.DeepEqual(cfg.Personas, old.Personas) {
+		if err := persona.Validate(cfg.Personas); err != nil {
+			s.log.Printf("invalid persona configuration after reload: %v (keeping old store)", err)
+		} else {
+			s.personaStore = persona.NewStore(cfg.Personas)
+			if len(cfg.Personas) > 0 {
+				s.log.Printf("personas updated: %v", s.personaStore.List())
+			}
 		}
 	}
 
@@ -323,6 +329,11 @@ func New(cfg config.ServerConfig) *Server {
 
 	// Set max guests on orchestrator
 	s.orchestrator.SetMaxGuests(cfg.MaxGuests)
+
+	// Validate persona configuration at startup
+	if err := persona.Validate(cfg.Personas); err != nil {
+		logger.Printf("invalid persona configuration: %v", err)
+	}
 
 	// Initialize persona store
 	s.personaStore = persona.NewStore(cfg.Personas)
