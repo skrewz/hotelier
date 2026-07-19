@@ -1886,6 +1886,115 @@ const { chromium } = require('playwright');
 
   await takeScreenshot('13-failed-task-detail');
 
+  // =====================================================================
+  // Phase 12: "Bring to top" button for PENDING tasks
+  // =====================================================================
+  console.log('=== Phase 12: Bring to top button ===');
+
+  // Navigate to Tasks tab
+  await page.locator('.tab').filter({ hasText: 'Tasks' }).click();
+  await page.waitForFunction(() => {
+    return document.getElementById('tab-tasks').style.display === 'block';
+  }, { timeout: 5000 });
+
+  // Ensure PENDING filter is active so the pending task is visible
+  const pendingFilterBtn = await page.evaluate(() => {
+    return document.querySelector('button[data-status="PENDING"]');
+  });
+  if (pendingFilterBtn && pendingFilterBtn.classList.contains('inactive')) {
+    await clickEl('button[data-status="PENDING"]');
+    await page.waitForTimeout(500);
+  }
+
+  // Verify the pending task is visible in the list
+  const pendingTaskVisible = await page.evaluate((pid) => {
+    const items = document.querySelectorAll('.task-item');
+    for (const item of items) {
+      if (item.textContent.includes(pid)) return true;
+    }
+    return false;
+  }, pendingTaskId);
+  if (!pendingTaskVisible) fail('Pending task should be visible in task list');
+  console.log('PASS: Pending task visible in list');
+
+  // Verify the "bring to top" button (🔝) is present on the pending task
+  // The button is inside .task-btn-row and has onclick containing "bringToTop"
+  const bringToTopBtnInList = await page.evaluate((pid) => {
+    const items = document.querySelectorAll('.task-item');
+    for (const item of items) {
+      if (item.textContent.includes(pid)) {
+        const btn = item.querySelector('button[onclick*="bringToTop"]');
+        if (btn) return { found: true, text: btn.textContent.trim() };
+      }
+    }
+    return { found: false };
+  }, pendingTaskId);
+  if (!bringToTopBtnInList.found) fail('Bring to top button should be visible on pending task in list');
+  console.log('PASS: Bring to top button visible on pending task in list:', bringToTopBtnInList.text);
+
+  // Verify the bring to top button is NOT present on non-pending tasks
+  const noBtnOnRunningTask = await page.evaluate((tid) => {
+    const items = document.querySelectorAll('.task-item');
+    for (const item of items) {
+      if (item.textContent.includes(tid)) {
+        const btn = item.querySelector('button[onclick*="bringToTop"]');
+        return btn === null;
+      }
+    }
+    return true; // task not found, pass
+  }, taskId);
+  if (!noBtnOnRunningTask) fail('Bring to top button should NOT be on non-pending tasks');
+  console.log('PASS: Bring to top button not present on running task');
+
+  // Click into the pending task to see detail view
+  await page.evaluate((pid) => {
+    const items = document.querySelectorAll('.task-item');
+    for (const item of items) {
+      if (item.textContent.includes(pid)) {
+        item.click();
+        break;
+      }
+    }
+  }, pendingTaskId);
+  await page.waitForSelector('.task-detail-header', { timeout: 5000 });
+
+  // Verify the "bring to top" button is also present in the task detail header
+  const bringToTopBtnInDetail = await page.evaluate(() => {
+    const header = document.querySelector('.task-detail-header');
+    if (!header) return { found: false };
+    const buttons = header.querySelectorAll('button');
+    for (const btn of buttons) {
+      if (btn.textContent.includes('Top')) {
+        return { found: true, text: btn.textContent.trim() };
+      }
+    }
+    return { found: false };
+  });
+  if (!bringToTopBtnInDetail.found) fail('Bring to top button should be present in task detail header for pending task');
+  console.log('PASS: Bring to top button in detail header:', bringToTopBtnInDetail.text);
+
+  // Click the "bring to top" button in detail view
+  await clickEl('button[onclick*="bringToTop"]');
+  await page.waitForTimeout(1000);
+
+  // Navigate back to task list to verify the task is now at the top
+  await page.locator('.tab').filter({ hasText: 'Tasks' }).click();
+  await page.waitForFunction(() => {
+    return document.getElementById('tab-tasks').style.display === 'block';
+  }, { timeout: 5000 });
+  await page.waitForTimeout(500);
+
+  // Verify the pending task is now the first visible task item
+  const pendingTaskIsFirst = await page.evaluate((pid) => {
+    const items = document.querySelectorAll('.task-item');
+    if (items.length === 0) return false;
+    return items[0].textContent.includes(pid);
+  }, pendingTaskId);
+  if (!pendingTaskIsFirst) fail('Pending task should be first in list after bring-to-top');
+  console.log('PASS: Pending task moved to top of queue');
+
+  await takeScreenshot('14-bring-to-top');
+
   console.log('All UI validation checks passed!');
   await browser.close();
 })().catch(e => { console.error('Test failed:', e); process.exit(1); });
