@@ -561,7 +561,9 @@
                 const cancelBtn = isCancellable ? `<button class="btn btn-sm btn-danger" onclick="event.stopPropagation(); cancelTask('${t.id}')">✖</button>` : '';
                 const isPending = t.status === 'PENDING';
                 const topBtn = isPending ? `<button class="btn btn-sm btn-ghost" onclick="event.stopPropagation(); bringToTop('${t.id}')">🔝</button>` : '';
-                const btnRow = (topBtn || cancelBtn) ? `<div class="task-btn-row">${topBtn}${cancelBtn}</div>` : '';
+                const isRerunnable = t.status === 'FAILED' || t.status === 'CANCELLED';
+                const rerunBtn = isRerunnable ? `<button class="btn btn-sm btn-ghost" onclick="event.stopPropagation(); rerunTask('${t.id}')">🔄</button>` : '';
+                const btnRow = (rerunBtn || topBtn || cancelBtn) ? `<div class="task-btn-row">${rerunBtn}${topBtn}${cancelBtn}</div>` : '';
                 const logCount = t.log_count != null ? ` · ${t.log_count} log${t.log_count === 1 ? '' : 's'}` : '';
                 return `<div class="task-item ${itemClass}${isActive}" onclick="selectTask('${t.id}')">
                     <div class="task-id">${t.id} <span class="badge ${badgeClass}">${t.status}</span></div>
