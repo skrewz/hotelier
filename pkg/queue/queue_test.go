@@ -802,3 +802,106 @@ func TestTaskStatusTransition_RunningToPending(t *testing.T) {
 		t.Errorf("expected PENDING after re-queue, got %s", task.Status)
 	}
 }
+
+// TestMoveToTop verifies that a pending task can be moved to the front
+// of the queue and that NextPendingTask returns it first.
+func TestMoveToTop(t *testing.T) {
+	q := newTestQueue(t)
+
+	q.Add(&Task{ID: "task-1", Prompt: "Task 1"})
+	q.Add(&Task{ID: "task-2", Prompt: "Task 2"})
+	q.Add(&Task{ID: "task-3", Prompt: "Task 3"})
+
+	// Initially, task-1 is first
+	task := q.NextPendingTask()
+	if task == nil || task.ID != "task-1" {
+		t.Fatalf("expected task-1 first, got %v", task)
+	}
+
+	// Move task-3 to top
+	err := q.MoveToTop("task-3")
+	if err != nil {
+		t.Fatalf("MoveToTop failed: %v", err)
+	}
+
+	// task-3 should now be first
+	task = q.NextPendingTask()
+	if task == nil || task.ID != "task-3" {
+		t.Fatalf("expected task-3 after MoveToTop, got %v", task)
+	}
+
+	// Verify full order: task-3, task-1, task-2
+	allTasks := q.GetAllTasks()
+	if len(allTasks) != 3 {
+		t.Fatalf("expected 3 tasks, got %d", len(allTasks))
+	}
+	if allTasks[0].ID != "task-3" {
+		t.Errorf("expected task-3 first, got %s", allTasks[0].ID)
+	}
+	if allTasks[1].ID != "task-1" {
+		t.Errorf("expected task-1 second, got %s", allTasks[1].ID)
+	}
+	if allTasks[2].ID != "task-2" {
+		t.Errorf("expected task-2 third, got %s", allTasks[2].ID)
+	}
+}
+
+// TestMoveToTop_NonPending verifies that non-pending tasks cannot be moved.
+func TestMoveToTop_NonPending(t *testing.T) {
+	q := newTestQueue(t)
+
+	q.Add(&Task{ID: "task-1", Prompt: "Task 1"})
+	q.Add(&Task{ID: "task-2", Prompt: "Task 2"})
+
+	// Assign task-1 so it's no longer pending
+	q.Assign("task-1", "guest-1")
+
+	err := q.MoveToTop("task-1")
+	if err == nil {
+		t.Error("expected error for moving non-pending task, got nil")
+	}
+
+	// Verify order unchanged
+	task := q.NextPendingTask()
+	if task == nil || task.ID != "task-2" {
+		t.Errorf("expected task-2 (unchanged), got %v", task)
+	}
+}
+
+// TestMoveToTop_NonExistent verifies that moving a nonexistent task fails.
+func TestMoveToTop_NonExistent(t *testing.T) {
+	q := newTestQueue(t)
+
+	q.Add(&Task{ID: "task-1", Prompt: "Task 1"})
+
+	err := q.MoveToTop("nonexistent")
+	if err == nil {
+		t.Error("expected error for nonexistent task, got nil")
+	}
+}
+
+// TestMoveToTop_AlreadyFirst verifies that moving the first task to top
+// is a no-op (no error, order unchanged).
+func TestMoveToTop_AlreadyFirst(t *testing.T) {
+	q := newTestQueue(t)
+
+	q.Add(&Task{ID: "task-1", Prompt: "Task 1"})
+	q.Add(&Task{ID: "task-2", Prompt: "Task 2"})
+
+	err := q.MoveToTop("task-1")
+	if err != nil {
+		t.Fatalf("MoveToTop failed: %v", err)
+	}
+
+	// Order should still be task-1, task-2
+	allTasks := q.GetAllTasks()
+	if len(allTasks) != 2 {
+		t.Fatalf("expected 2 tasks, got %d", len(allTasks))
+	}
+	if allTasks[0].ID != "task-1" {
+		t.Errorf("expected task-1 first, got %s", allTasks[0].ID)
+	}
+	if allTasks[1].ID != "task-2" {
+		t.Errorf("expected task-2 second, got %s", allTasks[1].ID)
+	}
+}

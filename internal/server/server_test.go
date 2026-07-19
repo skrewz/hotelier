@@ -2571,6 +2571,136 @@ func TestHandleTaskRerun_MethodNotAllowed(t *testing.T) {
 	}
 }
 
+// TestHandleTaskTop_Success verifies that a PENDING task can be moved to
+// the top of the queue.
+func TestHandleTaskTop_Success(t *testing.T) {
+	srv := newTestServer(t)
+
+	// Create three tasks in order
+	for _, id := range []string{"task-1", "task-2", "task-3"} {
+		task := map[string]interface{}{
+			"id":     id,
+			"prompt": "Task " + id,
+		}
+		body, _ := json.Marshal(task)
+		req := httptest.NewRequest(http.MethodPost, "/api/tasks", bytes.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		w := httptest.NewRecorder()
+		srv.HandleTasks(w, req)
+	}
+
+	// Move task-3 to top
+	topReq := httptest.NewRequest(http.MethodPost, "/api/tasks/task-3/top", nil)
+	topW := httptest.NewRecorder()
+	srv.HandleTaskDetail(topW, topReq)
+
+	if topW.Code != http.StatusOK {
+		t.Fatalf("expected 200 for top, got %d body: %s", topW.Code, topW.Body.String())
+	}
+
+	var result map[string]interface{}
+	if err := json.Unmarshal(topW.Body.Bytes(), &result); err != nil {
+		t.Fatalf("failed to unmarshal top response: %v", err)
+	}
+	if result["task_id"] != "task-3" {
+		t.Errorf("expected task_id task-3, got %v", result["task_id"])
+	}
+
+	// Verify task-3 is now first in the queue
+	tasksRes := httptest.NewRequest(http.MethodGet, "/api/tasks", nil)
+	tasksW := httptest.NewRecorder()
+	srv.HandleTasks(tasksW, tasksRes)
+
+	var tasksData map[string]interface{}
+	if err := json.Unmarshal(tasksW.Body.Bytes(), &tasksData); err != nil {
+		t.Fatalf("failed to unmarshal tasks: %v", err)
+	}
+	taskList := tasksData["tasks"].([]interface{})
+	if taskList[0].(map[string]interface{})["id"] != "task-3" {
+		t.Errorf("expected task-3 first, got %v", taskList[0].(map[string]interface{})["id"])
+	}
+}
+
+// TestHandleTaskTop_NotPending verifies that non-pending tasks cannot be moved.
+func TestHandleTaskTop_NotPending(t *testing.T) {
+	srv := newTestServer(t)
+
+	task := map[string]interface{}{
+		"id":     "task-1",
+		"prompt": "Build a feature",
+	}
+	body, _ := json.Marshal(task)
+	req := httptest.NewRequest(http.MethodPost, "/api/tasks", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	srv.HandleTasks(w, req)
+
+	// Assign the task so it's no longer pending
+	err := srv.TaskQueue().Assign("task-1", "guest-1")
+	if err != nil {
+		t.Fatalf("failed to assign task: %v", err)
+	}
+
+	// Try to move assigned task to top
+	topReq := httptest.NewRequest(http.MethodPost, "/api/tasks/task-1/top", nil)
+	topW := httptest.NewRecorder()
+	srv.HandleTaskDetail(topW, topReq)
+
+	if topW.Code != http.StatusConflict {
+		t.Errorf("expected 409 for non-pending task, got %d body: %s", topW.Code, topW.Body.String())
+	}
+}
+
+// TestHandleTaskTop_NotFound verifies that moving a nonexistent task fails.
+func TestHandleTaskTop_NotFound(t *testing.T) {
+	srv := newTestServer(t)
+
+	topReq := httptest.NewRequest(http.MethodPost, "/api/tasks/nonexistent/top", nil)
+	topW := httptest.NewRecorder()
+	srv.HandleTaskDetail(topW, topReq)
+
+	if topW.Code != http.StatusNotFound {
+		t.Errorf("expected 404, got %d", topW.Code)
+	}
+}
+
+// TestHandleTaskTop_EmptyID verifies that empty task ID is rejected.
+func TestHandleTaskTop_EmptyID(t *testing.T) {
+	srv := newTestServer(t)
+
+	topReq := httptest.NewRequest(http.MethodPost, "/api/tasks//top", nil)
+	topW := httptest.NewRecorder()
+	srv.HandleTaskDetail(topW, topReq)
+
+	if topW.Code != http.StatusBadRequest {
+		t.Errorf("expected 400, got %d", topW.Code)
+	}
+}
+
+// TestHandleTaskTop_MethodNotAllowed verifies that GET is rejected.
+func TestHandleTaskTop_MethodNotAllowed(t *testing.T) {
+	srv := newTestServer(t)
+
+	task := map[string]interface{}{
+		"id":     "task-1",
+		"prompt": "Build a feature",
+	}
+	body, _ := json.Marshal(task)
+	req := httptest.NewRequest(http.MethodPost, "/api/tasks", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	srv.HandleTasks(w, req)
+
+	// GET should be rejected
+	topReq := httptest.NewRequest(http.MethodGet, "/api/tasks/task-1/top", nil)
+	topW := httptest.NewRecorder()
+	srv.HandleTaskDetail(topW, topReq)
+
+	if topW.Code != http.StatusMethodNotAllowed {
+		t.Errorf("expected 405, got %d", topW.Code)
+	}
+}
+
 // TestHandleGuestLog_ToolErrorFields verifies that [TOOL_END] with [ERROR]
 // is correctly parsed and the tool_error flag is set.
 func TestHandleGuestLog_ToolErrorFields(t *testing.T) {

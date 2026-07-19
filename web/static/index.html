@@ -37,6 +37,7 @@
         .task-item.failed { border-left-color: #ef4444; }
         .task-item.cancelled { border-left-color: #94a3b8; }
         .task-cancel-btn { position: absolute; top: 0.5rem; right: 0.5rem; }
+        .task-top-btn { position: absolute; top: 0.5rem; right: 2.8rem; }
         .task-id { font-weight: 600; font-size: 0.875rem; }
         .task-meta { font-size: 0.75rem; color: #94a3b8; margin-top: 0.25rem; }
         .task-prompt { font-size: 0.85rem; color: #cbd5e1; margin-top: 0.5rem; }
@@ -559,12 +560,15 @@
                 }
                 const isCancellable = t.status !== 'COMPLETED' && t.status !== 'FAILED' && t.status !== 'CANCELLED';
                 const cancelBtn = isCancellable ? `<button class="btn btn-sm btn-danger task-cancel-btn" onclick="event.stopPropagation(); cancelTask('${t.id}')">✖</button>` : '';
+                const isPending = t.status === 'PENDING';
+                const topBtn = isPending ? `<button class="btn btn-sm btn-ghost task-top-btn" onclick="event.stopPropagation(); bringToTop('${t.id}')">🔝</button>` : '';
                 const logCount = t.log_count != null ? ` · ${t.log_count} log${t.log_count === 1 ? '' : 's'}` : '';
                 return `<div class="task-item ${itemClass}${isActive}" onclick="selectTask('${t.id}')">
                     <div class="task-id">${t.id} <span class="badge ${badgeClass}">${t.status}</span></div>
                     <div class="task-meta">${t.assigned_to ? '→ ' + t.assigned_to : 'unassigned'} · ${new Date(t.created_at).toLocaleString()}${logCount}</div>
                     <div class="task-prompt">${escapeHtml(t.prompt.substring(0, 120))}${t.prompt.length > 120 ? '...' : ''}</div>
                     ${errorHtml}
+                    ${topBtn}
                     ${cancelBtn}
                 </div>`;
             }).join('');
@@ -991,6 +995,7 @@
                         <div class="task-detail-meta">${task.assigned_to ? 'Guest: ' + escapeHtml(task.assigned_to) : 'Unassigned'} · ${logs.length} log entries</div>
                     </div>
                     <div style="display:flex;gap:0.5rem;align-items:center;">
+                        ${task.status === 'PENDING' ? `<button class="btn btn-sm btn-ghost" onclick="bringToTop('${task.id}')">🔝 Top</button>` : ''}
                         <button class="btn btn-sm btn-ghost" onclick="rerunTask('${task.id}')">🔄 Re-run</button>
                         ${task.status !== 'COMPLETED' && task.status !== 'FAILED' && task.status !== 'CANCELLED' ? `<button class="btn btn-sm btn-danger" onclick="cancelTask('${task.id}')">✖ Cancel</button>` : ''}
                         <button class="btn btn-sm btn-ghost" onclick="closeTaskDetail()">Close</button>
@@ -1098,6 +1103,24 @@
             } catch (e) {
                 console.error('cancel failed:', e);
                 alert('Failed to cancel task: ' + e.message);
+            }
+        }
+
+        // bringToTop moves a PENDING task to the front of the queue.
+        async function bringToTop(taskId) {
+            try {
+                const res = await fetch('/api/tasks/' + taskId + '/top', {
+                    method: 'POST',
+                });
+                if (!res.ok) {
+                    const errText = await res.text();
+                    alert('Failed to move task to top: ' + errText);
+                    return;
+                }
+                refresh();
+            } catch (e) {
+                console.error('bringToTop failed:', e);
+                alert('Failed to move task to top: ' + e.message);
             }
         }
 
