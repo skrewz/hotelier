@@ -17,6 +17,7 @@ import (
 	"hotelier/pkg/fatalwriter"
 	"hotelier/pkg/logstore"
 	"hotelier/pkg/orchestrator"
+	"hotelier/pkg/persona"
 	"hotelier/pkg/queue"
 	"hotelier/pkg/registry"
 	"hotelier/pkg/rpc"
@@ -234,6 +235,7 @@ type Server struct {
 	logStore       *TaskLogStore
 	diskLogStore   *logstore.LogStore
 	logAccumulator *LogAccumulator
+	personaStore   *persona.Store
 	log            *log.Logger
 	upgrader       *rpc.Upgrader
 	mu             sync.RWMutex
@@ -245,6 +247,7 @@ type Server struct {
 // It applies changes that can take effect without restarting:
 //   - MaxGuests: updates the registry capacity
 //   - LogDir: recreates the disk log store if the path changed
+//   - Personas: rebuilds the persona store
 //   - TaskTimeout, HeartbeatInterval, SilenceTimeout, MaxLogSize: stored for future use
 func (s *Server) Reload(cfg config.ServerConfig) {
 	s.mu.Lock()
@@ -257,6 +260,14 @@ func (s *Server) Reload(cfg config.ServerConfig) {
 	if cfg.MaxGuests != old.MaxGuests {
 		s.orchestrator.SetMaxGuests(cfg.MaxGuests)
 		s.log.Printf("max_guests updated: %d", cfg.MaxGuests)
+	}
+
+	// Recreate persona store if personas changed
+	if len(cfg.Personas) != len(old.Personas) {
+		s.personaStore = persona.NewStore(cfg.Personas)
+		if len(cfg.Personas) > 0 {
+			s.log.Printf("personas updated: %v", s.personaStore.List())
+		}
 	}
 
 	// Recreate disk log store if LogDir changed
@@ -312,6 +323,12 @@ func New(cfg config.ServerConfig) *Server {
 
 	// Set max guests on orchestrator
 	s.orchestrator.SetMaxGuests(cfg.MaxGuests)
+
+	// Initialize persona store
+	s.personaStore = persona.NewStore(cfg.Personas)
+	if len(cfg.Personas) > 0 {
+		logger.Printf("loaded %d persona(s): %v", len(cfg.Personas), s.personaStore.List())
+	}
 
 	// Initialize disk-backed log store if configured
 	if cfg.LogDir != "" {
@@ -1002,6 +1019,20 @@ func (s *Server) tryAssignTaskToEligible(taskID, skipGuestID string) {
 			"tags":   task.Tags,
 		}
 
+		if task.Persona != "" {
+			p, err := s.personaStore.Get(task.Persona)
+			if err != nil {
+				s.log.Printf("failed to get persona %q for task %s: %v", task.Persona, task.ID, err)
+				_ = s.orchestrator.RequeueTask(task.ID)
+				continue
+			}
+			taskData["persona"] = map[string]interface{}{
+				"name":  p.Name,
+				"env":   p.Env,
+				"files": p.Files,
+			}
+		}
+
 		if err := s.hub.SendToGuest(guest.ID, "task.assign", taskData); err != nil {
 			s.log.Printf("failed to push task to guest %s: %v", guest.ID, err)
 			// Rollback: re-queue the task
@@ -1060,6 +1091,21 @@ func (s *Server) tryAssignTask(guestID string) {
 		"id":     matchedTask.ID,
 		"prompt": matchedTask.Prompt,
 		"tags":   matchedTask.Tags,
+	}
+
+	// Include persona data if specified
+	if matchedTask.Persona != "" {
+		p, err := s.personaStore.Get(matchedTask.Persona)
+		if err != nil {
+			s.log.Printf("failed to get persona %q for task %s: %v", matchedTask.Persona, matchedTask.ID, err)
+			_ = s.orchestrator.RequeueTask(matchedTask.ID)
+			return
+		}
+		taskData["persona"] = map[string]interface{}{
+			"name":  p.Name,
+			"env":   p.Env,
+			"files": p.Files,
+		}
 	}
 
 	if err := s.hub.SendToGuest(guestID, "task.assign", taskData); err != nil {
@@ -1299,6 +1345,14 @@ func (s *Server) handleCreateTask(w http.ResponseWriter, r *http.Request) {
 	if err := json.Unmarshal(bodyBytes, &task); err != nil {
 		http.Error(w, "invalid request body", http.StatusBadRequest)
 		return
+	}
+
+	// Validate persona if specified
+	if task.Persona != "" {
+		if !s.personaStore.Exists(task.Persona) {
+			http.Error(w, fmt.Sprintf("persona %q not found", task.Persona), http.StatusBadRequest)
+			return
+		}
 	}
 
 	if task.ID == "" {

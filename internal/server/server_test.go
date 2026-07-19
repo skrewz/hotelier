@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"hotelier/pkg/config"
+	"hotelier/pkg/persona"
 	"hotelier/pkg/queue"
 	"hotelier/pkg/registry"
 	"hotelier/pkg/rpc"
@@ -209,6 +210,96 @@ func TestHandleTasks_POST_DuplicateID(t *testing.T) {
 
 	if w2.Code != http.StatusBadRequest {
 		t.Errorf("expected 400 for duplicate, got %d", w2.Code)
+	}
+}
+
+// Persona validation tests
+func TestHandleTasks_POST_InvalidPersona(t *testing.T) {
+	srv := newTestServer(t)
+
+	task := map[string]interface{}{
+		"prompt":  "Build a feature",
+		"persona": "nonexistent-persona",
+	}
+	body, _ := json.Marshal(task)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/tasks", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	srv.HandleTasks(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for invalid persona, got %d", w.Code)
+	}
+
+	bodyStr := w.Body.String()
+	if !strings.Contains(bodyStr, "persona") {
+		t.Errorf("expected error message about persona, got: %s", bodyStr)
+	}
+}
+
+func TestHandleTasks_POST_ValidPersona(t *testing.T) {
+	cfg := config.ServerConfig{
+		Host: "127.0.0.1",
+		Port: 0,
+		Personas: []persona.Persona{
+			{
+				Name: "test-persona",
+				Env:  map[string]string{"TEST_VAR": "<workpath>/test"},
+			},
+		},
+	}
+	srv := New(cfg)
+
+	task := map[string]interface{}{
+		"prompt":  "Build a feature",
+		"persona": "test-persona",
+	}
+	body, _ := json.Marshal(task)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/tasks", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	srv.HandleTasks(w, req)
+
+	if w.Code != http.StatusCreated {
+		t.Fatalf("expected 201 for valid persona, got %d. Body: %s", w.Code, w.Body.String())
+	}
+
+	var createdTask queue.Task
+	if err := json.Unmarshal(w.Body.Bytes(), &createdTask); err != nil {
+		t.Fatalf("failed to unmarshal response: %v", err)
+	}
+
+	if createdTask.Persona != "test-persona" {
+		t.Errorf("expected persona 'test-persona', got %q", createdTask.Persona)
+	}
+}
+
+func TestHandleTasks_POST_NoPersona(t *testing.T) {
+	srv := newTestServer(t)
+
+	task := map[string]interface{}{
+		"prompt": "Build a feature",
+	}
+	body, _ := json.Marshal(task)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/tasks", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	srv.HandleTasks(w, req)
+
+	if w.Code != http.StatusCreated {
+		t.Fatalf("expected 201, got %d", w.Code)
+	}
+
+	var createdTask queue.Task
+	if err := json.Unmarshal(w.Body.Bytes(), &createdTask); err != nil {
+		t.Fatalf("failed to unmarshal response: %v", err)
+	}
+
+	if createdTask.Persona != "" {
+		t.Errorf("expected empty persona, got %q", createdTask.Persona)
 	}
 }
 

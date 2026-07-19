@@ -10,6 +10,7 @@ import (
 	"sync"
 	"time"
 
+	"hotelier/pkg/persona"
 	"hotelier/pkg/pi"
 )
 
@@ -105,6 +106,9 @@ func (h *PIHandler) GetClient() *pi.PiClient {
 // If the pi client is not running when ExecuteTask is called, it attempts to restart
 // the client before proceeding. This handles the case where the subprocess was killed
 // externally (e.g. pkill pi) or crashed between tasks.
+//
+// If the task has a persona, the persona's files are copied into the working directory
+// and its environment variables are applied to the pi subprocess.
 func (h *PIHandler) ExecuteTask(ctx context.Context, task TaskAssignment, sendLog func(LogEntry) error) (*TaskResult, error) {
 	h.mu.Lock()
 	clientRunning := h.client != nil && h.client.IsRunning()
@@ -146,6 +150,36 @@ func (h *PIHandler) ExecuteTask(ctx context.Context, task TaskAssignment, sendLo
 		}
 	}()
 
+	// Apply persona if specified
+	var personaEnv map[string]string
+	if task.Persona != nil {
+		h.log.Printf("[PERSONA] applying persona %q for task %s", task.Persona.Name, task.TaskID)
+		if err := sendLog(LogEntry{TaskID: task.TaskID, Line: fmt.Sprintf("Applying persona: %s", task.Persona.Name), Level: "system"}); err != nil {
+			h.log.Printf("[PERSONA] failed to send persona log: %v", err)
+		}
+
+		// Build persona struct for ApplyPersona
+		files := make([]persona.FileCopy, len(task.Persona.Files))
+		for i, f := range task.Persona.Files {
+			files[i] = persona.FileCopy{From: f.From, To: f.To}
+		}
+		p := &persona.Persona{
+			Name:  task.Persona.Name,
+			Env:   task.Persona.Env,
+			Files: files,
+		}
+
+		personaEnv, err = persona.ApplyPersona(p, workDir)
+		if err != nil {
+			return nil, fmt.Errorf("apply persona %q: %w", task.Persona.Name, err)
+		}
+
+		h.log.Printf("[PERSONA] applied persona %q: %d env vars, %d file copies", task.Persona.Name, len(personaEnv), len(files))
+		if err := sendLog(LogEntry{TaskID: task.TaskID, Line: fmt.Sprintf("Persona %q applied: %d env vars, %d file copies", task.Persona.Name, len(personaEnv), len(files)), Level: "system"}); err != nil {
+			h.log.Printf("[PERSONA] failed to send apply log: %v", err)
+		}
+	}
+
 	// Build the prompt for pi — include repo context
 	prompt := h.buildPrompt(task)
 
@@ -156,7 +190,7 @@ func (h *PIHandler) ExecuteTask(ctx context.Context, task TaskAssignment, sendLo
 	if err := sendLog(LogEntry{TaskID: task.TaskID, Line: fmt.Sprintf("Spawning pi subprocess in: %s", workDir), Level: "system"}); err != nil {
 		h.log.Printf("[PI] failed to send operational log: %v", err)
 	}
-	if err := h.resetClient(ctx, workDir, task.TaskID, sendLog); err != nil {
+	if err := h.resetClientWithEnv(ctx, workDir, task.TaskID, sendLog, personaEnv); err != nil {
 		h.log.Printf("[PI] spawn failed: %v", err)
 		_ = sendLog(LogEntry{TaskID: task.TaskID, Line: fmt.Sprintf("Spawn failed: %v", err), Level: "error"})
 		return nil, fmt.Errorf("reset pi client with working dir %s: %w", workDir, err)
@@ -420,6 +454,14 @@ func (h *PIHandler) restartClient(ctx context.Context) error {
 // resetClient restarts the pi subprocess with a new working directory.
 // This is needed per-task so the guest operates inside the cloned repo tree.
 func (h *PIHandler) resetClient(ctx context.Context, workDir string, taskID string, sendLog func(LogEntry) error) error {
+	return h.resetClientWithEnv(ctx, workDir, taskID, sendLog, nil)
+}
+
+// resetClientWithEnv restarts the pi subprocess with a new working directory
+// and optional environment variables. The env vars are applied to the pi
+// subprocess so that persona-specific configuration (e.g. token paths)
+// is available to the agent.
+func (h *PIHandler) resetClientWithEnv(ctx context.Context, workDir string, taskID string, sendLog func(LogEntry) error, env map[string]string) error {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 
@@ -440,6 +482,7 @@ func (h *PIHandler) resetClient(ctx context.Context, workDir string, taskID stri
 		Model:         "",
 		ThinkingLevel: "",
 		Log:           h.log,
+		Env:           env,
 		SpawnOutput: func(line string) {
 			// Echo spawn-phase output to guest logs for troubleshooting.
 			// See issue #19: without this, spawn failures produce silence.

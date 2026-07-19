@@ -43,9 +43,25 @@ type TaskResult struct {
 
 // TaskAssignment represents a task assigned to a guest.
 type TaskAssignment struct {
-	TaskID string   `json:"id"`
-	Prompt string   `json:"prompt"`
-	Tags   []string `json:"tags"`
+	TaskID  string         `json:"id"`
+	Prompt  string         `json:"prompt"`
+	Tags    []string       `json:"tags"`
+	Persona *PersonaData   `json:"persona,omitempty"` // persona data to apply (optional)
+}
+
+// PersonaData holds the persona configuration sent from the server.
+// It includes environment variables and file copy mappings that are
+// applied to the task's working directory.
+type PersonaData struct {
+	Name  string            `json:"name"`
+	Env   map[string]string `json:"env"`
+	Files []personaFileCopy `json:"files"`
+}
+
+// personaFileCopy represents a source-to-destination file copy.
+type personaFileCopy struct {
+	From string `json:"from"` // absolute source path on guest
+	To   string `json:"to"`   // relative destination path (within workdir)
 }
 
 // TaskCancel represents a task cancellation notification.

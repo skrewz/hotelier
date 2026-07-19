@@ -8,6 +8,8 @@ import (
 	"strings"
 	"sync"
 
+	"hotelier/pkg/persona"
+
 	"gopkg.in/yaml.v3"
 )
 
@@ -45,6 +47,10 @@ type ServerConfig struct {
 	// LogDir is the base directory where task logs are persisted to disk.
 	// When empty, logs are kept in memory only.
 	LogDir string `yaml:"log_dir"`
+	// Personas is a list of persona definitions. Each persona specifies
+	// environment variables and file copies that are applied to a task's
+	// working directory. See pkg/persona for details.
+	Personas []persona.Persona `yaml:"personas"`
 }
 
 // GuestConfig holds the configuration for a guest.

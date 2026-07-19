@@ -8,3 +8,34 @@ task_timeout: 3600
 heartbeat_interval: 30
 max_guests: 0
 # log_dir: "/var/log/hotelier"  # Persist task logs to disk (empty = in-memory only)
+
+# Personas define named sets of environment variables and file copies
+# that are applied to a task's working directory. Tasks can specify a
+# persona when they are created via the scheduling API.
+#
+# Environment variable values can contain <workpath> as a placeholder
+# for the task's working directory.
+#
+# File copies specify absolute source paths (on the guest machine) and
+# relative destination paths (within the task's working directory).
+#personas:
+#  - name: s-issue-implementer
+#    env:
+#      FORGEJO_CLIENT_TLS: "s-autonomics-implementer"
+#      GIT_CONFIG_GLOBAL: "<workpath>/.forgejo-gitconfigs/s-autonomics-implementer"
+#      FORGEJO_TOKEN_FILE: "<workpath>/.tokens/s-autonomics-implementer"
+#    files:
+#      - from: /home/guestuser/.tokens/s-autonomics-implementer
+#        to: .tokens/s-autonomics-implementer
+#      - from: /home/guestuser/.forgejo-gitconfigs/s-autonomics-implementer
+#        to: .forgejo-gitconfigs/s-autonomics-implementer
+#  - name: s-issue-reviewer
+#    env:
+#      FORGEJO_CLIENT_TLS: "s-autonomics-reviewer"
+#      GIT_CONFIG_GLOBAL: "<workpath>/.forgejo-gitconfigs/s-autonomics-reviewer"
+#      FORGEJO_TOKEN_FILE: "<workpath>/.tokens/s-autonomics-reviewer"
+#    files:
+#      - from: /home/guestuser/.tokens/s-autonomics-reviewer
+#        to: .tokens/s-autonomics-reviewer
+#      - from: /home/guestuser/.forgejo-gitconfigs/s-autonomics-reviewer
+#        to: .forgejo-gitconfigs/s-autonomics-reviewer
