@@ -702,7 +702,7 @@ func (s *Server) handleGuestLog(ctx context.Context, params json.RawMessage) (in
 					ToolOutput: e.ToolOutput,
 					ToolError:  e.ToolError,
 				}); err != nil {
-					fmt.Fprintf(os.Stderr, "FATAL: disk log write failed: %v\n", err)
+					fmt.Fprintf(os.Stderr, fatalwriter.FatalMsgFormat, err)
 					os.Exit(1)
 				}
 			}

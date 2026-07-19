@@ -38,27 +38,27 @@ func TestWriter_Success(t *testing.T) {
 }
 
 func TestWriter_FailureExits(t *testing.T) {
-	// This test verifies that Write calls os.Exit on failure.
-	// We cannot directly test os.Exit, so we verify the behaviour
-	// by checking that the error path is reached. The actual exit
-	// is tested by the integration of the process behaviour.
-	//
-	// Instead, we test the happy path above and document that
-	// Write calls os.Exit(1) on error. The integration behaviour
-	// is that the process terminates when logs can't be written.
+	var exitedWith int
+	var didExit bool
+	exitFn := func(code int) {
+		didExit = true
+		exitedWith = code
+	}
 
-	// Test that a writer that returns io.EOF also triggers exit.
 	var buf failingWriter
 	buf.failAt = 1 // fail immediately
 
-	fw := New(&buf)
+	fw := New(&buf, WithExitFunc(exitFn))
+	_, _ = fw.Write([]byte("trigger failure"))
 
-	// We expect os.Exit(1) to be called, which terminates the test.
-	// To prevent that, we use a custom test that doesn't actually
-	// run the failing path. Instead, verify the Writer struct is
-	// correctly constructed.
-	if fw.w == nil {
-		t.Fatal("expected non-nil underlying writer")
+	if !didExit {
+		t.Fatal("expected exit function to be called")
+	}
+	if exitedWith != 1 {
+		t.Errorf("expected exit code 1, got %d", exitedWith)
+	}
+	if buf.calls != 1 {
+		t.Errorf("expected 1 call to underlying writer, got %d", buf.calls)
 	}
 }
 
@@ -74,7 +74,7 @@ func TestWriter_MultipleWrites(t *testing.T) {
 			t.Fatalf("write %d: unexpected error: %v", i, err)
 		}
 		if n != 1 {
-			t.Errorf("write %d: expected 1 byte, got %d", i, n)
+			t.Errorf("write %d: expected 1 byte, got %d", i, buf.calls)
 		}
 	}
 

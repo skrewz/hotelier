@@ -16,15 +16,39 @@ import (
 	"os"
 )
 
+// FatalMsgFormat is the format string used for fatal error messages.
+// It is exported so that callers can use a consistent message format.
+const FatalMsgFormat = "FATAL: log write failed: %v\n"
+
 // Writer wraps an io.Writer and exits the process on any write failure.
 type Writer struct {
-	w io.Writer
+	w        io.Writer
+	exitFunc func(int)
 }
 
 // New creates a Writer that wraps the given writer.
 // If a write to the underlying writer fails, the process exits with status 1.
-func New(w io.Writer) *Writer {
-	return &Writer{w: w}
+// Optional configuration can be passed via Option values (e.g. WithExitFunc).
+func New(w io.Writer, opts ...Option) *Writer {
+	fw := &Writer{
+		w:        w,
+		exitFunc: os.Exit,
+	}
+	for _, opt := range opts {
+		opt(fw)
+	}
+	return fw
+}
+
+// Option configures a Writer.
+type Option func(*Writer)
+
+// WithExitFunc sets a custom exit function. By default, os.Exit is used.
+// This is primarily useful for testing.
+func WithExitFunc(f func(int)) Option {
+	return func(fw *Writer) {
+		fw.exitFunc = f
+	}
 }
 
 // Write delegates to the underlying writer. On failure, it prints the error
@@ -32,8 +56,8 @@ func New(w io.Writer) *Writer {
 func (fw *Writer) Write(p []byte) (int, error) {
 	n, err := fw.w.Write(p)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "FATAL: log write failed: %v\n", err)
-		os.Exit(1)
+		fmt.Fprintf(os.Stderr, FatalMsgFormat, err)
+		fw.exitFunc(1)
 	}
 	return n, nil
 }
