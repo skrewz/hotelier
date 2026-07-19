@@ -396,6 +396,36 @@ func (q *TaskQueue) validTransition(from, to TaskStatus) bool {
 	return false
 }
 
+// MoveToTop moves a pending task to the front of the queue.
+// Only PENDING tasks can be moved. Returns an error if the task
+// does not exist or is not in PENDING status.
+func (q *TaskQueue) MoveToTop(taskID string) error {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+
+	task, exists := q.tasks[taskID]
+	if !exists {
+		return fmt.Errorf("task %s not found", taskID)
+	}
+
+	if task.Status != TaskStatusPending {
+		return fmt.Errorf("task %s is not pending (status: %s)", taskID, task.Status)
+	}
+
+	// Remove from current position in ordered list
+	for i, t := range q.ordered {
+		if t.ID == taskID {
+			q.ordered = append(q.ordered[:i], q.ordered[i+1:]...)
+			break
+		}
+	}
+
+	// Prepend to ordered list
+	q.ordered = append([]*Task{task}, q.ordered...)
+	q.logf("task %s moved to top of queue", taskID)
+	return nil
+}
+
 // NextPendingTask returns the next pending task (FIFO).
 func (q *TaskQueue) NextPendingTask() *Task {
 	q.mu.RLock()

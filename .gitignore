@@ -2,3 +2,4 @@
 bin/
 *.out
 coverage.html
+docs/screenshot-candidate.png
