@@ -2571,6 +2571,109 @@ func TestHandleTaskRerun_MethodNotAllowed(t *testing.T) {
 	}
 }
 
+// TestHandleTaskRerun_FailedTask verifies that a FAILED task can be re-run.
+// This is the primary use case for the requeue button in the task list UI.
+func TestHandleTaskRerun_FailedTask(t *testing.T) {
+	srv := newTestServer(t)
+
+	// Create original task
+	origTask := map[string]interface{}{
+		"id":     "failed-task",
+		"prompt": "Build a feature",
+		"tags":   []string{"business-default"},
+	}
+	body, _ := json.Marshal(origTask)
+	req := httptest.NewRequest(http.MethodPost, "/api/tasks", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	srv.HandleTasks(w, req)
+
+	if w.Code != http.StatusCreated {
+		t.Fatalf("expected 201 for original task, got %d", w.Code)
+	}
+
+	// Simulate task failure through proper lifecycle: PENDING → ASSIGNED → RUNNING → FAILED
+	taskQueue := srv.TaskQueue()
+	if err := taskQueue.Assign("failed-task", "guest-1"); err != nil {
+		t.Fatalf("failed to assign task: %v", err)
+	}
+	if err := taskQueue.Start("failed-task"); err != nil {
+		t.Fatalf("failed to start task: %v", err)
+	}
+	if err := taskQueue.Fail("failed-task", "build failed"); err != nil {
+		t.Fatalf("failed to mark task as failed: %v", err)
+	}
+
+	// Re-run the failed task
+	rerunReq := httptest.NewRequest(http.MethodPost, "/api/tasks/failed-task/rerun", nil)
+	rerunW := httptest.NewRecorder()
+	srv.HandleTaskDetail(rerunW, rerunReq)
+
+	if rerunW.Code != http.StatusCreated {
+		t.Fatalf("expected 201 for rerun of failed task, got %d", rerunW.Code)
+	}
+
+	var newTask queue.Task
+	if err := json.Unmarshal(rerunW.Body.Bytes(), &newTask); err != nil {
+		t.Fatalf("failed to unmarshal rerun response: %v", err)
+	}
+
+	if newTask.Prompt != "Build a feature" {
+		t.Errorf("expected prompt 'Build a feature', got %s", newTask.Prompt)
+	}
+	if newTask.Status != queue.TaskStatusPending {
+		t.Errorf("expected PENDING status for rerun of failed task, got %s", newTask.Status)
+	}
+}
+
+// TestHandleTaskRerun_CancelledTask verifies that a CANCELLED task can be re-run.
+func TestHandleTaskRerun_CancelledTask(t *testing.T) {
+	srv := newTestServer(t)
+
+	// Create original task
+	origTask := map[string]interface{}{
+		"id":     "cancelled-task",
+		"prompt": "Do something",
+		"tags":   []string{},
+	}
+	body, _ := json.Marshal(origTask)
+	req := httptest.NewRequest(http.MethodPost, "/api/tasks", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	srv.HandleTasks(w, req)
+
+	if w.Code != http.StatusCreated {
+		t.Fatalf("expected 201 for original task, got %d", w.Code)
+	}
+
+	// Simulate task cancellation
+	taskQueue := srv.TaskQueue()
+	if err := taskQueue.Cancel("cancelled-task"); err != nil {
+		t.Fatalf("failed to cancel task: %v", err)
+	}
+
+	// Re-run the cancelled task
+	rerunReq := httptest.NewRequest(http.MethodPost, "/api/tasks/cancelled-task/rerun", nil)
+	rerunW := httptest.NewRecorder()
+	srv.HandleTaskDetail(rerunW, rerunReq)
+
+	if rerunW.Code != http.StatusCreated {
+		t.Fatalf("expected 201 for rerun of cancelled task, got %d", rerunW.Code)
+	}
+
+	var newTask queue.Task
+	if err := json.Unmarshal(rerunW.Body.Bytes(), &newTask); err != nil {
+		t.Fatalf("failed to unmarshal rerun response: %v", err)
+	}
+
+	if newTask.Prompt != "Do something" {
+		t.Errorf("expected prompt 'Do something', got %s", newTask.Prompt)
+	}
+	if newTask.Status != queue.TaskStatusPending {
+		t.Errorf("expected PENDING status for rerun of cancelled task, got %s", newTask.Status)
+	}
+}
+
 // TestHandleTaskTop_Success verifies that a PENDING task can be moved to
 // the top of the queue.
 func TestHandleTaskTop_Success(t *testing.T) {
