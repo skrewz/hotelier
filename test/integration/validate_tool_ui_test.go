@@ -1314,7 +1314,87 @@ const { chromium } = require('playwright');
     if (spacer) spacer.remove();
   });
 
-  await takeScreenshot('03b-scroll-behaviour');
+  // =====================================================================
+  // Phase 3c: Streaming path — _appendThinkingToDetail creates new blocks
+  //              after interruptions (tool calls, text, etc.)
+  // =====================================================================
+  console.log('=== Phase 3c: Streaming thinking blocks after interruptions ===');
+
+  // Test the streaming path directly by calling _appendThinkingToDetail
+  // in a controlled environment. This validates the DOM-position check
+  // (lastBlock === body.lastElementChild) that determines whether to
+  // append to an existing block or create a new one.
+  const streamingResult = await page.evaluate(() => {
+    // Create a hidden test container to simulate task-detail-body
+    const testBody = document.createElement('div');
+    testBody.className = 'task-detail-body';
+    testBody.style.display = 'none';
+    document.body.appendChild(testBody);
+
+    // Simulate streaming sequence: thinking → tool block → thinking → text
+    // Step 1: First thinking delta (creates block 1)
+    _appendThinkingToDetail(testBody, 'Analyzing the request...', true);
+
+    // Step 2: Tool block is appended (simulates tool start)
+    const toolBlock = document.createElement('div');
+    toolBlock.className = 'tool-block';
+    toolBlock.id = 'tool-test-123';
+    toolBlock.innerHTML = '<div class="tool-block-header"><span class="tool-name">bash</span></div>';
+    testBody.appendChild(toolBlock);
+
+    // Step 3: Second thinking delta AFTER tool block
+    // Without the fix, this would append to block 1 (wrong).
+    // With the fix, it creates block 2 because block 1 is no longer
+    // the last child of the body (tool block follows it).
+    _appendThinkingToDetail(testBody, 'Now I have the hostname result...', true);
+
+    // Step 4: Text delta (creates a guest message)
+    _appendTextToDetail(testBody, 'Your hostname is **devvm**.', true);
+
+    // Step 5: Third thinking delta after text
+    // Should create block 3 because the last thinking block (2) is
+    // no longer the last child (text message follows it).
+    _appendThinkingToDetail(testBody, 'Final analysis complete.', true);
+
+    // Validate results
+    const thinkingBlocks = testBody.querySelectorAll('.thinking-block');
+    const toolBlocks = testBody.querySelectorAll('.tool-block');
+    const guestMsgs = testBody.querySelectorAll('.log-msg.guest');
+
+    // Clean up
+    document.body.removeChild(testBody);
+
+    return {
+      thinkingBlockCount: thinkingBlocks.length,
+      toolBlockCount: toolBlocks.length,
+      guestMsgCount: guestMsgs.length,
+      thinkingContents: Array.from(thinkingBlocks).map(b => {
+        const content = b.querySelector('.thinking-content');
+        return content ? content.textContent.trim() : '';
+      }),
+    };
+  });
+
+  const streamingChecks = [
+    { name: '3 thinking blocks created (not 1 merged)', pass: streamingResult.thinkingBlockCount === 3 },
+    { name: '1 tool block present', pass: streamingResult.toolBlockCount === 1 },
+    { name: '1 guest message present', pass: streamingResult.guestMsgCount === 1 },
+    { name: 'thinking block 1 has initial content', pass: streamingResult.thinkingContents[0].includes('Analyzing') },
+    { name: 'thinking block 2 has post-tool content', pass: streamingResult.thinkingContents[1].includes('hostname result') },
+    { name: 'thinking block 3 has post-text content', pass: streamingResult.thinkingContents[2].includes('Final analysis') },
+  ];
+
+  let streamingFailed = false;
+  for (const check of streamingChecks) {
+    if (!check.pass) { console.error('FAIL:', check.name); streamingFailed = true; }
+    else { console.log('PASS:', check.name); }
+  }
+  if (streamingFailed) {
+    await takeScreenshot('03c-streaming-failed');
+    process.exit(1);
+  }
+
+  await takeScreenshot('03c-streaming-thinking-blocks');
 
   // =====================================================================
   // Phase 4: Logs tab — dates, tasks, entries, breadcrumbs
@@ -1446,6 +1526,16 @@ const { chromium } = require('playwright');
     const guestMsgs = Array.from(entries).filter(e => e.classList.contains('guest'));
     const systemMsgTexts = systemMsgs.map(m => m.textContent.trim());
 
+    // Check for thinking blocks — consecutive thinking entries should be
+    // merged into single blocks by renderLogEntries' pendingThinkingLines
+    // accumulator. The test data has thinking → tool → thinking → text,
+    // so we expect thinking blocks to be present.
+    const thinkingBlocks = document.querySelectorAll('#log-entries-list .thinking-block');
+    const thinkingBlockContents = Array.from(thinkingBlocks).map(b => {
+      const content = b.querySelector('.thinking-content');
+      return content ? content.textContent.substring(0, 100) : '';
+    });
+
     return {
       entryCount: entries.length,
       systemMsgCount: systemMsgs.length,
@@ -1460,6 +1550,8 @@ const { chromium } = require('playwright');
       toolBlockStatuses,
       toolBlocksHavePre,
       hasToolMarkersOutsideBlocks,
+      thinkingBlockCount: thinkingBlocks.length,
+      thinkingBlockContents,
     };
   });
 
@@ -1479,6 +1571,13 @@ const { chromium } = require('playwright');
     { name: 'tool block status "done"', pass: logEntryResult.toolBlockStatuses.includes('done') },
     { name: 'tool block has <pre> for output', pass: logEntryResult.toolBlocksHavePre.some(Boolean) },
     { name: 'no tool markers outside blocks', pass: !logEntryResult.hasToolMarkersOutsideBlocks },
+    // --- Thinking blocks in log entries view (renderLogEntries fix) ---
+    // The test data has: thinking → tool → thinking → text
+    // renderLogEntries should merge consecutive thinking entries into
+    // single blocks. With the pendingThinkingLines accumulator, thinking
+    // entries separated by non-thinking entries get separate blocks.
+    { name: 'thinking blocks present in log entries view', pass: logEntryResult.thinkingBlockCount > 0 },
+    { name: 'thinking blocks have non-empty content', pass: logEntryResult.thinkingBlockContents.every(c => c.length > 0) },
     // Operational system messages in log entries view
     { name: 'operational message: Executing task', pass: logEntryResult.systemMsgTexts.some(t => t.includes('Executing task')) },
     { name: 'operational message: Cloning', pass: logEntryResult.systemMsgTexts.some(t => t.includes('Cloning')) },
