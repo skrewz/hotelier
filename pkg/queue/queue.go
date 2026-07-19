@@ -75,6 +75,7 @@ type Task struct {
 	ID         string     `json:"id"`
 	Prompt     string     `json:"prompt"`
 	Tags       []string   `json:"tags"`
+	Persona    string     `json:"persona,omitempty"`    // persona name to apply (optional)
 	Status     TaskStatus `json:"status"`
 	CreatedAt  time.Time  `json:"created_at"`
 	AssignedTo string     `json:"assigned_to,omitempty"`

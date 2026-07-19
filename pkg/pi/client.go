@@ -46,6 +46,7 @@ type PiClient struct {
 	thinkingLevel string
 	guestDir      string
 	debug         bool
+	env           map[string]string // extra environment variables for the subprocess
 	// spawnOutput is invoked for each line of combined stderr/stdout output
 	// during the initial spawn phase (first 10 lines total).
 	spawnOutput *func(line string)
@@ -74,6 +75,9 @@ type PiClientConfig struct {
 	Log *log.Logger
 	// Debug enables verbose RPC logging to stdout.
 	Debug bool
+	// Env is a map of extra environment variables to set for the pi subprocess.
+	// These are merged with the current process environment.
+	Env map[string]string
 	// SpawnOutput is called for each line of combined stderr/stdout output
 	// during the initial spawn phase (first 10 lines total). After the limit
 	// is reached, regular logging takes over. Useful for troubleshooting spawn
@@ -94,6 +98,7 @@ func NewClient(cfg PiClientConfig) *PiClient {
 		thinkingLevel: cfg.ThinkingLevel,
 		guestDir:      cfg.GuestDir,
 		debug:         cfg.Debug,
+		env:           cfg.Env,
 		eventCh:       make(chan Event, 256),
 		doneCh:        make(chan struct{}),
 	}
@@ -121,6 +126,14 @@ func (c *PiClient) Start(ctx context.Context) error {
 
 	c.cmd = exec.CommandContext(ctx, "pi", args...)
 	c.cmd.Dir = c.cwd
+
+	// Apply extra environment variables (persona env vars)
+	if len(c.env) > 0 {
+		c.cmd.Env = os.Environ()
+		for k, v := range c.env {
+			c.cmd.Env = append(c.cmd.Env, fmt.Sprintf("%s=%s", k, v))
+		}
+	}
 
 	stdin, err := c.cmd.StdinPipe()
 	if err != nil {

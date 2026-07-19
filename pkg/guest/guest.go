@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"hotelier/pkg/config"
+	"hotelier/pkg/persona"
 	"hotelier/pkg/rpc"
 
 	"github.com/google/uuid"
@@ -43,9 +44,10 @@ type TaskResult struct {
 
 // TaskAssignment represents a task assigned to a guest.
 type TaskAssignment struct {
-	TaskID string   `json:"id"`
-	Prompt string   `json:"prompt"`
-	Tags   []string `json:"tags"`
+	TaskID  string          `json:"id"`
+	Prompt  string          `json:"prompt"`
+	Tags    []string        `json:"tags"`
+	Persona *persona.Persona `json:"persona,omitempty"` // persona data to apply (optional)
 }
 
 // TaskCancel represents a task cancellation notification.
