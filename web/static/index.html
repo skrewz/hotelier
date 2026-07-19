@@ -64,6 +64,7 @@
         .task-detail-prompt-header { display: flex; align-items: center; justify-content: space-between; padding: 0.5rem 1rem; background: #1e293b; cursor: pointer; user-select: none; font-size: 0.8rem; }
         .task-detail-prompt-header:hover { background: #253347; }
         .task-detail-prompt-header .prompt-label { font-weight: 600; color: #38bdf8; }
+        .task-detail-prompt-header .prompt-preview { color: #64748b; font-size: 0.75rem; margin-left: 0.5rem; font-style: italic; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 400px; display: inline-block; }
         .task-detail-prompt-header .prompt-chevron { color: #64748b; transition: transform 0.15s; font-size: 0.75rem; }
         .task-detail-prompt-header .prompt-chevron.open { transform: rotate(90deg); }
         .task-detail-prompt-body { display: none; background: #0f172a; }
@@ -126,6 +127,7 @@
         .thinking-block-header:hover { background: #251747; }
         .thinking-block-header .thinking-icon { margin-right: 0.5rem; }
         .thinking-block-header .thinking-label { font-weight: 600; color: #a78bfa; font-size: 0.8rem; }
+        .thinking-block-header .thinking-preview { color: #7c6bb5; font-size: 0.75rem; margin-left: 0.5rem; font-style: italic; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 300px; display: inline-block; }
         .thinking-block-header .thinking-chevron { color: #6b5b95; transition: transform 0.15s; font-size: 0.75rem; }
         .thinking-block-header .thinking-chevron.open { transform: rotate(90deg); }
         .thinking-block-body { display: none; background: #0f0a1e; border-top: 1px solid #2d1b69; }
@@ -245,6 +247,12 @@
             color: #94a3b8; cursor: pointer; font-size: 0.85rem; text-align: center;
             transition: background 0.15s, border-color 0.15s; }
         .pending-expand-btn:hover { background: #334155; border-color: #475569; color: #e2e8f0; }
+
+        /* Block counter — increasing number shown on thinking/output blocks */
+        .block-counter { color: #475569; font-size: 0.65rem; font-family: 'SF Mono', 'Fira Code', monospace; margin-left: 0.5rem; }
+
+        /* Block timestamp — local HH:MM next to chevron */
+        .block-timestamp { color: #475569; font-size: 0.65rem; font-family: 'SF Mono', 'Fira Code', monospace; margin-right: 0.25rem; }
     </style>
 </head>
 <body>
@@ -624,15 +632,18 @@
             div.className = 'tool-block';
             div.id = 'tool-' + block.toolId;
             const cmdLine = renderCommandLineHeader(block.toolName, block.args);
+            const ts = formatTimestamp(timeStr);
             div.innerHTML = `
                 <div class="tool-block-header" onclick="toggleToolBlock('${block.toolId}')">
                     <div>
                         <span class="tool-icon">🔧</span>
                         <span class="tool-name">${escapeHtml(block.toolName)}</span>
                         ${cmdLine}
+                        <span class="block-counter">1</span>
                     </div>
                     <div style="display:flex;align-items:center;gap:0.5rem;">
                         <span class="tool-status running">running</span>
+                        <span class="block-timestamp">${ts}</span>
                         <span class="tool-chevron">▶</span>
                     </div>
                 </div>
@@ -648,9 +659,16 @@
 
         // buildToolBlockHTML creates a complete tool-block div as innerHTML.
         // Used by renderTaskDetail which builds the full view at once.
-        // Completed blocks (done/error) are rendered open so the output is
-        // visible immediately; running blocks stay collapsed.
-        function buildToolBlockHTML(toolName, toolId, args, output, status) {
+        // Completed blocks (done/error) are rendered collapsed by default.
+        // Running blocks stay collapsed.
+        //   toolName  — name of the tool (e.g. "bash")
+        //   toolId    — unique tool call identifier
+        //   args      — tool arguments (JSON string)
+        //   output    — captured output
+        //   status    — "running", "success", or "error"
+        //   timestamp — ISO timestamp for latest activity (defaults to now)
+        //   entryCount — number of log entries for this tool call (for counter)
+        function buildToolBlockHTML(toolName, toolId, args, output, status, timestamp, entryCount) {
             const statusClass = status === 'error' ? 'error' : 'success';
             const statusLabel = status === 'error' ? 'error' : 'done';
             const argsHtml = args ? `<div class="tool-args">${escapeHtml(args)}</div>` : '';
@@ -658,19 +676,22 @@
                 ? `<div class="tool-output"><div class="output-label">Output</div><pre>${escapeHtml(output)}</pre></div>`
                 : '<div class="tool-output"><div class="output-label">Output</div></div>';
             const cmdLine = renderCommandLineHeader(toolName, args);
-            // Open completed blocks so output is visible without clicking
-            const isDone = status === 'success' || status === 'error';
-            const bodyOpen = isDone ? ' open' : '';
-            const chevronOpen = isDone ? ' open' : '';
+            // All blocks collapsed by default (Issue #46: completed collapsed)
+            const bodyOpen = '';
+            const chevronOpen = '';
+            const ts = formatTimestamp(timestamp);
+            const counter = entryCount != null ? `<span class="block-counter">${entryCount}</span>` : '';
             return `<div class="tool-block" id="tool-${toolId}">
                 <div class="tool-block-header" onclick="toggleToolBlock('${toolId}')">
                     <div>
                         <span class="tool-icon">🔧</span>
                         <span class="tool-name">${escapeHtml(toolName)}</span>
                         ${cmdLine}
+                        ${counter}
                     </div>
                     <div style="display:flex;align-items:center;gap:0.5rem;">
                         <span class="tool-status ${statusClass}">${statusLabel}</span>
+                        <span class="block-timestamp">${ts}</span>
                         <span class="tool-chevron${chevronOpen}">▶</span>
                     </div>
                 </div>
@@ -688,6 +709,17 @@
             const statusClass = block.status === 'error' ? 'error' : 'success';
             const statusLabel = block.status === 'error' ? 'error' : 'done';
             const cmdLine = renderCommandLineHeader(block.toolName, block.args);
+            const ts = formatTimestamp();
+
+            // Count entries in this block (args + output lines).
+            // NOTE: This path (renderToolBlockEnd) counts output lines, while
+            // the streaming SSE path (handleLogEntry) increments by 1 per event.
+            // The values may differ if a single SSE event delivers multi-line
+            // output, but exact counter semantics are not guaranteed (Issue #46).
+            let entryCount = 1; // start event
+            if (block.output) {
+                entryCount += block.output.split('\n').length;
+            }
 
             // Update header
             const header = blockEl.querySelector('.tool-block-header');
@@ -696,9 +728,11 @@
                     <span class="tool-icon">🔧</span>
                     <span class="tool-name">${escapeHtml(block.toolName)}</span>
                     ${cmdLine}
+                    <span class="block-counter">${entryCount}</span>
                 </div>
                 <div style="display:flex;align-items:center;gap:0.5rem;">
                     <span class="tool-status ${statusClass}">${statusLabel}</span>
+                    <span class="block-timestamp">${ts}</span>
                     <span class="tool-chevron">▶</span>
                 </div>
             `;
@@ -734,6 +768,10 @@
         }
 
         // Thinking block helpers
+        // Preview truncation limits (Issue #46: named constants per reviewer feedback)
+        const THINKING_PREVIEW_MAX_LEN = 60;
+        const PROMPT_PREVIEW_MAX_LEN = 80;
+
         let _thinkingBlockCounter = 0;
 
         function nextThinkingBlockId() {
@@ -752,15 +790,27 @@
         }
 
         // buildThinkingBlockHTML creates a collapsible thinking block.
-        function buildThinkingBlockHTML(content, blockId) {
+        // content — accumulated thinking text
+        // blockId — unique identifier for the block
+        // timestamp — ISO timestamp string for the latest activity (defaults to now)
+        // entryCount — number of log entries in this block (for counter display)
+        function buildThinkingBlockHTML(content, blockId, timestamp, entryCount) {
             if (!blockId) blockId = nextThinkingBlockId();
+            const preview = getFirstLine(content);
+            const ts = formatTimestamp(timestamp);
+            const counter = entryCount != null ? `<span class="block-counter">${entryCount}</span>` : '';
             return `<div class="thinking-block" id="thinking-${blockId}">
                 <div class="thinking-block-header" onclick="toggleThinkingBlock('${blockId}')">
                     <div>
                         <span class="thinking-icon">💭</span>
                         <span class="thinking-label">Thinking</span>
+                        ${preview ? `<span class="thinking-preview">${escapeHtml(preview)}</span>` : ''}
+                        ${counter}
                     </div>
-                    <span class="thinking-chevron">▶</span>
+                    <div style="display:flex;align-items:center;gap:0.25rem;">
+                        <span class="block-timestamp">${ts}</span>
+                        <span class="thinking-chevron">▶</span>
+                    </div>
                 </div>
                 <div class="thinking-block-body" id="thinking-body-${blockId}">
                     <div class="thinking-content">${escapeHtml(content)}</div>
@@ -780,6 +830,21 @@
             const div = document.createElement('div');
             div.textContent = str;
             return div.innerHTML;
+        }
+
+        // getFirstLine extracts the first line of text, truncated to maxLen chars.
+        function getFirstLine(text, maxLen) {
+            if (!text) return '';
+            maxLen = maxLen || THINKING_PREVIEW_MAX_LEN;
+            const line = text.split('\n')[0] || text;
+            if (line.length > maxLen) return line.substring(0, maxLen) + '…';
+            return line;
+        }
+
+        // formatTimestamp returns a local HH:MM string from a Date or ISO string.
+        function formatTimestamp(ts) {
+            const d = ts instanceof Date ? ts : new Date(ts || Date.now());
+            return d.toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit', hour12: false });
         }
 
         function renderMarkdown(text) {
@@ -856,6 +921,8 @@
 
             const badgeClass = `badge-${task.status.toLowerCase()}`;
             const promptMarkdown = renderMarkdown(task.prompt);
+            // Extract first line of prompt for collapsed preview
+            const promptPreview = getFirstLine(task.prompt, PROMPT_PREVIEW_MAX_LEN);
 
             let logsHtml = '';
             if (logs.length === 0) {
@@ -866,12 +933,16 @@
 
                 // Accumulators for merging consecutive thinking/text entries
                 let pendingThinkingLines = '';
+                let pendingThinkingTimestamp = null;
+                let pendingThinkingCount = 0;
                 let pendingTextLines = '';
 
                 function flushPendingThinking() {
                     if (pendingThinkingLines) {
-                        logsHtml += buildThinkingBlockHTML(pendingThinkingLines);
+                        logsHtml += buildThinkingBlockHTML(pendingThinkingLines, null, pendingThinkingTimestamp, pendingThinkingCount);
                         pendingThinkingLines = '';
+                        pendingThinkingTimestamp = null;
+                        pendingThinkingCount = 0;
                     }
                 }
 
@@ -901,12 +972,14 @@
                                 // Flush previous incomplete block
                                 logsHtml += buildToolBlockHTML(
                                     currentToolBlock.toolName, currentToolBlock.toolId,
-                                    currentToolBlock.args, currentToolBlock.output, 'running'
+                                    currentToolBlock.args, currentToolBlock.output, 'running',
+                                    currentToolBlock.timestamp, currentToolBlock.entryCount
                                 );
                             }
                             currentToolBlock = {
                                 toolName: log.tool_name, toolId: log.tool_id,
-                                args: log.tool_args, output: '', status: 'running', hasOutput: false
+                                args: log.tool_args, output: '', status: 'running', hasOutput: false,
+                                timestamp: log.timestamp, entryCount: 1
                             };
                             return;
                         }
@@ -915,6 +988,8 @@
                             if (currentToolBlock && currentToolId(currentToolBlock) === log.tool_id) {
                                 currentToolBlock.output += log.tool_output;
                                 currentToolBlock.hasOutput = true;
+                                currentToolBlock.entryCount++;
+                                if (log.timestamp) currentToolBlock.timestamp = log.timestamp;
                             }
                             return;
                         }
@@ -923,13 +998,15 @@
                             if (currentToolBlock && currentToolId(currentToolBlock) === log.tool_id) {
                                 if (log.tool_output) currentToolBlock.output += log.tool_output;
                                 currentToolBlock.status = log.tool_error ? 'error' : 'success';
+                                currentToolBlock.entryCount++;
+                                if (log.timestamp) currentToolBlock.timestamp = log.timestamp;
                             }
                             // Build and append the complete tool block now that we have all output
                             if (currentToolBlock) {
                                 logsHtml += buildToolBlockHTML(
                                     currentToolBlock.toolName, currentToolBlock.toolId,
                                     currentToolBlock.args, currentToolBlock.output,
-                                    currentToolBlock.status
+                                    currentToolBlock.status, currentToolBlock.timestamp, currentToolBlock.entryCount
                                 );
                             }
                             currentToolBlock = null;
@@ -941,7 +1018,8 @@
                     if (currentToolBlock) {
                         logsHtml += buildToolBlockHTML(
                             currentToolBlock.toolName, currentToolBlock.toolId,
-                            currentToolBlock.args, currentToolBlock.output, 'running'
+                            currentToolBlock.args, currentToolBlock.output, 'running',
+                            currentToolBlock.timestamp, currentToolBlock.entryCount
                         );
                         currentToolBlock = null;
                     }
@@ -950,6 +1028,8 @@
                         // Merge consecutive thinking entries into a single block
                         flushPendingText();
                         pendingThinkingLines += log.line;
+                        pendingThinkingCount++;
+                        if (log.timestamp) pendingThinkingTimestamp = log.timestamp;
                     } else {
                         // Non-thinking entry: flush pending thinking, then
                         // accumulate or flush text.
@@ -975,7 +1055,8 @@
                 if (currentToolBlock) {
                     logsHtml += buildToolBlockHTML(
                         currentToolBlock.toolName, currentToolBlock.toolId,
-                        currentToolBlock.args, currentToolBlock.output, 'running'
+                        currentToolBlock.args, currentToolBlock.output, 'running',
+                        currentToolBlock.timestamp, currentToolBlock.entryCount
                     );
                     currentToolBlock = null;
                 }
@@ -1004,10 +1085,13 @@
                 </div>
                 <div class="task-detail-prompt">
                     <div class="task-detail-prompt-header" onclick="togglePromptBlock()">
-                        <span class="prompt-label">📝 Prompt</span>
-                        <span class="prompt-chevron open">▶</span>
+                        <div style="display:flex;align-items:center;flex:1;min-width:0;">
+                            <span class="prompt-label">📝 Prompt</span>
+                            <span class="prompt-preview">${escapeHtml(promptPreview)}</span>
+                        </div>
+                        <span class="prompt-chevron">▶</span>
                     </div>
-                    <div class="task-detail-prompt-body open">
+                    <div class="task-detail-prompt-body">
                         <div class="md-rendered">${promptMarkdown}</div>
                     </div>
                 </div>
@@ -1236,7 +1320,12 @@
         // tool block or other content was rendered after it), creates a new
         // block. This ensures thinking tokens after tool calls appear in a
         // new block rather than accumulating in a stale one.
-        function _appendThinkingToDetail(body, line, wasAtBottom) {
+        //   body        — the .task-detail-body container
+        //   line        — the new thinking delta text
+        //   wasAtBottom — whether user was scrolled to bottom before append
+        //   timestamp   — ISO timestamp of this delta (for display)
+        //   entryCount  — cumulative entry count for this block (for counter)
+        function _appendThinkingToDetail(body, line, wasAtBottom, timestamp, entryCount) {
             const blocks = body.querySelectorAll('.thinking-block');
             const lastBlock = blocks.length > 0 ? blocks[blocks.length - 1] : null;
             // Only append to an existing block if it is the last child of
@@ -1249,6 +1338,21 @@
                 if (contentEl) {
                     contentEl.textContent += line;
                 }
+                // Update preview label with first line of accumulated content
+                const previewEl = lastBlock.querySelector('.thinking-preview');
+                if (previewEl && contentEl) {
+                    previewEl.textContent = getFirstLine(contentEl.textContent);
+                }
+                // Update counter
+                const counterEl = lastBlock.querySelector('.block-counter');
+                if (counterEl && entryCount != null) {
+                    counterEl.textContent = entryCount;
+                }
+                // Update timestamp
+                const tsEl = lastBlock.querySelector('.block-timestamp');
+                if (tsEl) {
+                    tsEl.textContent = formatTimestamp(timestamp);
+                }
                 // Ensure the block is open
                 const bodyEl = lastBlock.querySelector('.thinking-block-body');
                 const chevron = lastBlock.querySelector('.thinking-chevron');
@@ -1260,13 +1364,21 @@
                 const msgEl = document.createElement('div');
                 msgEl.className = 'thinking-block';
                 msgEl.id = 'thinking-' + blockId;
+                const preview = getFirstLine(line);
+                const ts = formatTimestamp(timestamp);
+                const counter = entryCount != null ? `<span class="block-counter">${entryCount}</span>` : '';
                 msgEl.innerHTML = `
                     <div class="thinking-block-header" onclick="toggleThinkingBlock('${blockId}')">
                         <div>
                             <span class="thinking-icon">💭</span>
                             <span class="thinking-label">Thinking</span>
+                            ${preview ? `<span class="thinking-preview">${escapeHtml(preview)}</span>` : ''}
+                            ${counter}
                         </div>
-                        <span class="thinking-chevron open">▶</span>
+                        <div style="display:flex;align-items:center;gap:0.25rem;">
+                            <span class="block-timestamp">${ts}</span>
+                            <span class="thinking-chevron open">▶</span>
+                        </div>
                     </div>
                     <div class="thinking-block-body open" id="thinking-body-${blockId}">
                         <div class="thinking-content">${escapeHtml(line)}</div>
@@ -1355,6 +1467,16 @@
                                 outputDiv.innerHTML = '<pre>' + escapeHtml(logEntry.tool_output) + '</pre>';
                             }
                         }
+                        // Update counter
+                        const counterEl = block.querySelector('.block-counter');
+                        if (counterEl) {
+                            counterEl.textContent = parseInt(counterEl.textContent, 10) + 1;
+                        }
+                        // Update timestamp
+                        const tsEl = block.querySelector('.block-timestamp');
+                        if (tsEl) {
+                            tsEl.textContent = formatTimestamp(logEntry.timestamp);
+                        }
                     }
                     scrollToBottomIfNeeded(body, wasAtBottom);
                     return;
@@ -1369,15 +1491,23 @@
                         const argsEl = block.querySelector('.tool-args');
                         const args = argsEl ? argsEl.textContent : '';
                         const cmdLine = renderCommandLineHeader(logEntry.tool_name, args);
+                        // Update counter
+                        const counterEl = block.querySelector('.block-counter');
+                        let entryCount = counterEl ? parseInt(counterEl.textContent, 10) + 1 : 1;
+                        const counterHtml = `<span class="block-counter">${entryCount}</span>`;
+                        // Update timestamp
+                        const ts = formatTimestamp(logEntry.timestamp);
                         const header = block.querySelector('.tool-block-header');
                         header.innerHTML = `
                             <div>
                                 <span class="tool-icon">🔧</span>
                                 <span class="tool-name">${escapeHtml(logEntry.tool_name)}</span>
                                 ${cmdLine}
+                                ${counterHtml}
                             </div>
                             <div style="display:flex;align-items:center;gap:0.5rem;">
                                 <span class="tool-status ${statusClass}">${statusLabel}</span>
+                                <span class="block-timestamp">${ts}</span>
                                 <span class="tool-chevron">▶</span>
                             </div>
                         `;
@@ -1411,7 +1541,14 @@
             if (level === 'thinking') {
                 // Append to the last thinking block (streaming), or create a new
                 // one that starts open so the user can see content arriving.
-                _appendThinkingToDetail(body, line, wasAtBottom);
+                // Track cumulative count for this thinking block.
+                const existingBlocks = body.querySelectorAll('.thinking-block');
+                let thinkingEntryCount = 1;
+                if (existingBlocks.length > 0) {
+                    const lastCounter = existingBlocks[existingBlocks.length - 1].querySelector('.block-counter');
+                    if (lastCounter) thinkingEntryCount = parseInt(lastCounter.textContent, 10) + 1;
+                }
+                _appendThinkingToDetail(body, line, wasAtBottom, logEntry.timestamp, thinkingEntryCount);
                 _lastAppendedLevel = 'thinking';
             } else {
                 // Non-thinking entry: close the last thinking block if open,
@@ -1571,10 +1708,14 @@
                 // a single block — matches renderTaskDetail's behaviour.
                 let pendingThinkingLines = '';
 
+                let pendingThinkingTimestamp = null;
+                let pendingThinkingCount = 0;
                 function flushPendingThinking() {
                     if (pendingThinkingLines) {
-                        entriesHtml += buildThinkingBlockHTML(pendingThinkingLines);
+                        entriesHtml += buildThinkingBlockHTML(pendingThinkingLines, null, pendingThinkingTimestamp, pendingThinkingCount);
                         pendingThinkingLines = '';
+                        pendingThinkingTimestamp = null;
+                        pendingThinkingCount = 0;
                     }
                 }
 
@@ -1591,12 +1732,14 @@
                                 // Flush previous incomplete block
                                 entriesHtml += buildToolBlockHTML(
                                     currentToolBlock.toolName, currentToolBlock.toolId,
-                                    currentToolBlock.args, currentToolBlock.output, 'running'
+                                    currentToolBlock.args, currentToolBlock.output, 'running',
+                                    currentToolBlock.timestamp, currentToolBlock.entryCount
                                 );
                             }
                             currentToolBlock = {
                                 toolName: log.tool_name, toolId: log.tool_id,
-                                args: log.tool_args, output: '', status: 'running', hasOutput: false
+                                args: log.tool_args, output: '', status: 'running', hasOutput: false,
+                                timestamp: log.timestamp, entryCount: 1
                             };
                             return;
                         }
@@ -1605,6 +1748,8 @@
                             if (currentToolBlock && currentToolId(currentToolBlock) === log.tool_id) {
                                 currentToolBlock.output += log.tool_output;
                                 currentToolBlock.hasOutput = true;
+                                currentToolBlock.entryCount++;
+                                if (log.timestamp) currentToolBlock.timestamp = log.timestamp;
                             }
                             return;
                         }
@@ -1613,12 +1758,14 @@
                             if (currentToolBlock && currentToolId(currentToolBlock) === log.tool_id) {
                                 if (log.tool_output) currentToolBlock.output += log.tool_output;
                                 currentToolBlock.status = log.tool_error ? 'error' : 'success';
+                                currentToolBlock.entryCount++;
+                                if (log.timestamp) currentToolBlock.timestamp = log.timestamp;
                             }
                             // Build and append the complete tool block now that we have all output
                             entriesHtml += buildToolBlockHTML(
                                 currentToolBlock.toolName, currentToolBlock.toolId,
                                 currentToolBlock.args, currentToolBlock.output,
-                                currentToolBlock.status
+                                currentToolBlock.status, currentToolBlock.timestamp, currentToolBlock.entryCount
                             );
                             currentToolBlock = null;
                             return;
@@ -1629,7 +1776,8 @@
                     if (currentToolBlock) {
                         entriesHtml += buildToolBlockHTML(
                             currentToolBlock.toolName, currentToolBlock.toolId,
-                            currentToolBlock.args, currentToolBlock.output, 'running'
+                            currentToolBlock.args, currentToolBlock.output, 'running',
+                            currentToolBlock.timestamp, currentToolBlock.entryCount
                         );
                         currentToolBlock = null;
                     }
@@ -1637,6 +1785,8 @@
                     if (level === 'thinking') {
                         // Accumulate consecutive thinking entries
                         pendingThinkingLines += log.line;
+                        pendingThinkingCount++;
+                        if (log.timestamp) pendingThinkingTimestamp = log.timestamp;
                     } else if (level === 'system') {
                         flushPendingThinking();
                         entriesHtml += `<div class="log-msg system">${escapeHtml(log.line)}</div>`;
@@ -1656,7 +1806,8 @@
                 if (currentToolBlock) {
                     entriesHtml += buildToolBlockHTML(
                         currentToolBlock.toolName, currentToolBlock.toolId,
-                        currentToolBlock.args, currentToolBlock.output, 'running'
+                        currentToolBlock.args, currentToolBlock.output, 'running',
+                        currentToolBlock.timestamp, currentToolBlock.entryCount
                     );
                     currentToolBlock = null;
                 }

@@ -1125,6 +1125,100 @@ const { chromium } = require('playwright');
   }
 
   // =====================================================================
+  // Phase 3z: Issue #46 — UI polishes: counters, timestamps, previews
+  // =====================================================================
+  console.log('=== Phase 3z: Issue #46 UI polishes ===');
+
+  const uiPolishResult = await page.evaluate(() => {
+    const body = document.querySelector('.task-detail-body');
+    if (!body) return { error: 'no .task-detail-body found' };
+
+    // Check thinking blocks have preview, counter, and timestamp
+    const thinkingBlocks = body.querySelectorAll('.thinking-block');
+    const thinkingPreviews = Array.from(thinkingBlocks).map(b => {
+      const preview = b.querySelector('.thinking-preview');
+      return preview ? preview.textContent.trim() : '';
+    });
+    const thinkingCounters = Array.from(thinkingBlocks).map(b => {
+      const counter = b.querySelector('.block-counter');
+      return counter ? counter.textContent.trim() : '';
+    });
+    const thinkingTimestamps = Array.from(thinkingBlocks).map(b => {
+      const ts = b.querySelector('.block-timestamp');
+      return ts ? ts.textContent.trim() : '';
+    });
+
+    // Check tool blocks have counter and timestamp
+    const toolBlocks = body.querySelectorAll('.tool-block');
+    const toolCounters = Array.from(toolBlocks).map(b => {
+      const counter = b.querySelector('.block-counter');
+      return counter ? counter.textContent.trim() : '';
+    });
+    const toolTimestamps = Array.from(toolBlocks).map(b => {
+      const ts = b.querySelector('.block-timestamp');
+      return ts ? ts.textContent.trim() : '';
+    });
+
+    // Check tool blocks are collapsed when completed (Issue #46)
+    const toolBodies = Array.from(toolBlocks).map(b => {
+      const body = b.querySelector('.tool-block-body');
+      return body ? body.classList.contains('open') : false;
+    });
+
+    // Check prompt preview
+    const promptContainer = document.querySelector('.task-detail-prompt');
+    const promptPreview = promptContainer?.querySelector('.prompt-preview')?.textContent?.trim() || '';
+
+    return {
+      thinkingPreviews,
+      thinkingCounters,
+      thinkingTimestamps,
+      toolCounters,
+      toolTimestamps,
+      toolBodiesOpen: toolBodies,
+      promptPreview,
+    };
+  });
+
+  if (uiPolishResult.error) {
+    fail('UI polish validation error: ' + uiPolishResult.error);
+    await takeScreenshot('03z-ui-polish-error');
+    process.exit(1);
+  }
+
+  const uiPolishChecks = [
+    // Thinking blocks show first line as preview
+    { name: 'thinking block 1 has preview text', pass: uiPolishResult.thinkingPreviews[0].length > 0 },
+    { name: 'thinking block 2 has preview text', pass: uiPolishResult.thinkingPreviews[1].length > 0 },
+    // Thinking blocks have counters
+    { name: 'thinking block 1 has counter', pass: uiPolishResult.thinkingCounters[0].length > 0 },
+    { name: 'thinking block 2 has counter', pass: uiPolishResult.thinkingCounters[1].length > 0 },
+    // Thinking blocks have timestamps (HH:MM format)
+    { name: 'thinking block 1 has timestamp', pass: /^\d{2}:\d{2}$/.test(uiPolishResult.thinkingTimestamps[0]) },
+    { name: 'thinking block 2 has timestamp', pass: /^\d{2}:\d{2}$/.test(uiPolishResult.thinkingTimestamps[1]) },
+    // Tool blocks have counters
+    { name: 'tool block has counter', pass: uiPolishResult.toolCounters[0].length > 0 },
+    // Tool blocks have timestamps
+    { name: 'tool block has timestamp', pass: /^\d{2}:\d{2}$/.test(uiPolishResult.toolTimestamps[0]) },
+    // Tool blocks are collapsed when completed (Issue #46)
+    { name: 'completed tool block is collapsed', pass: uiPolishResult.toolBodiesOpen[0] === false },
+    // Prompt has preview text when collapsed
+    { name: 'prompt has preview text', pass: uiPolishResult.promptPreview.length > 0 },
+  ];
+
+  let uiPolishFailed = false;
+  for (const check of uiPolishChecks) {
+    if (!check.pass) { console.error('FAIL:', check.name); uiPolishFailed = true; }
+    else { console.log('PASS:', check.name); }
+  }
+  if (uiPolishFailed) {
+    await takeScreenshot('03z-ui-polish-failed');
+    process.exit(1);
+  }
+
+  await takeScreenshot('03z-ui-polishes');
+
+  // =====================================================================
   // Phase 3a: Prompt section — markdown rendering and collapsible
   // =====================================================================
   console.log('=== Phase 3a: Prompt section ===');
@@ -1164,8 +1258,8 @@ const { chromium } = require('playwright');
     { name: 'prompt has body element', pass: promptResult.hasBody },
     { name: 'prompt has md-rendered element', pass: promptResult.hasMdRendered },
     { name: 'prompt label is "📝 Prompt"', pass: promptResult.label === '📝 Prompt' },
-    { name: 'prompt body is open by default', pass: promptResult.bodyIsOpen === true },
-    { name: 'prompt chevron is open by default', pass: promptResult.chevronIsOpen === true },
+    { name: 'prompt body is collapsed by default (Issue #46)', pass: promptResult.bodyIsOpen === false },
+    { name: 'prompt chevron is collapsed by default (Issue #46)', pass: promptResult.chevronIsOpen === false },
     { name: 'prompt text content rendered', pass: promptResult.promptTextContent.length > 0 },
     { name: 'prompt contains expected text', pass: promptResult.promptTextContent.includes('Simulate tool calls') },
   ];
@@ -1180,25 +1274,25 @@ const { chromium } = require('playwright');
     process.exit(1);
   }
 
-  // Verify prompt can be toggled closed
+  // Verify prompt can be toggled open (starts collapsed by default — Issue #46)
+  await clickEl('.task-detail-prompt-header');
+  const promptOpened = await page.evaluate(() => {
+    const body = document.querySelector('.task-detail-prompt-body');
+    const chevron = document.querySelector('.prompt-chevron');
+    return body?.classList.contains('open') && chevron?.classList.contains('open');
+  });
+  if (!promptOpened) fail('Prompt should be open after clicking header');
+  console.log('PASS: Prompt opened after toggle');
+
+  // Verify prompt can be toggled closed again
   await clickEl('.task-detail-prompt-header');
   const promptClosed = await page.evaluate(() => {
     const body = document.querySelector('.task-detail-prompt-body');
     const chevron = document.querySelector('.prompt-chevron');
     return !body?.classList.contains('open') && !chevron?.classList.contains('open');
   });
-  if (!promptClosed) fail('Prompt should be closed after clicking header');
+  if (!promptClosed) fail('Prompt should be closed after clicking header again');
   console.log('PASS: Prompt closed after toggle');
-
-  // Verify prompt can be toggled open again
-  await clickEl('.task-detail-prompt-header');
-  const promptReopened = await page.evaluate(() => {
-    const body = document.querySelector('.task-detail-prompt-body');
-    const chevron = document.querySelector('.prompt-chevron');
-    return body?.classList.contains('open') && chevron?.classList.contains('open');
-  });
-  if (!promptReopened) fail('Prompt should be open after clicking header again');
-  console.log('PASS: Prompt reopened after toggle');
 
   await takeScreenshot('03a-prompt-collapsible');
 
