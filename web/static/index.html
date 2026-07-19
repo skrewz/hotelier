@@ -36,8 +36,7 @@
         .task-item.completed { border-left-color: #22c55e; }
         .task-item.failed { border-left-color: #ef4444; }
         .task-item.cancelled { border-left-color: #94a3b8; }
-        .task-cancel-btn { position: absolute; top: 0.5rem; right: 0.5rem; }
-        .task-top-btn { position: absolute; top: 0.5rem; right: 2.8rem; }
+        .task-btn-row { position: absolute; top: 0.5rem; right: 0.5rem; display: flex; gap: 0.25rem; align-items: center; }
         .task-id { font-weight: 600; font-size: 0.875rem; }
         .task-meta { font-size: 0.75rem; color: #94a3b8; margin-top: 0.25rem; }
         .task-prompt { font-size: 0.85rem; color: #cbd5e1; margin-top: 0.5rem; }
@@ -559,17 +558,17 @@
                     errorHtml = `<div class="task-prompt" style="color:#fca5a5;">⚠ ${escapeHtml(errorText)}</div>`;
                 }
                 const isCancellable = t.status !== 'COMPLETED' && t.status !== 'FAILED' && t.status !== 'CANCELLED';
-                const cancelBtn = isCancellable ? `<button class="btn btn-sm btn-danger task-cancel-btn" onclick="event.stopPropagation(); cancelTask('${t.id}')">✖</button>` : '';
+                const cancelBtn = isCancellable ? `<button class="btn btn-sm btn-danger" onclick="event.stopPropagation(); cancelTask('${t.id}')">✖</button>` : '';
                 const isPending = t.status === 'PENDING';
-                const topBtn = isPending ? `<button class="btn btn-sm btn-ghost task-top-btn" onclick="event.stopPropagation(); bringToTop('${t.id}')">🔝</button>` : '';
+                const topBtn = isPending ? `<button class="btn btn-sm btn-ghost" onclick="event.stopPropagation(); bringToTop('${t.id}')">🔝</button>` : '';
+                const btnRow = (topBtn || cancelBtn) ? `<div class="task-btn-row">${topBtn}${cancelBtn}</div>` : '';
                 const logCount = t.log_count != null ? ` · ${t.log_count} log${t.log_count === 1 ? '' : 's'}` : '';
                 return `<div class="task-item ${itemClass}${isActive}" onclick="selectTask('${t.id}')">
                     <div class="task-id">${t.id} <span class="badge ${badgeClass}">${t.status}</span></div>
                     <div class="task-meta">${t.assigned_to ? '→ ' + t.assigned_to : 'unassigned'} · ${new Date(t.created_at).toLocaleString()}${logCount}</div>
                     <div class="task-prompt">${escapeHtml(t.prompt.substring(0, 120))}${t.prompt.length > 120 ? '...' : ''}</div>
                     ${errorHtml}
-                    ${topBtn}
-                    ${cancelBtn}
+                    ${btnRow}
                 </div>`;
             }).join('');
 
@@ -1160,6 +1159,10 @@
                         refresh();
                         // refresh() already calls patchTaskDetailMeta() for
                         // the active task, so no extra work needed here.
+                    } else if (msg.method === 'task.position_changed') {
+                        // A task's queue position changed (e.g. bring-to-top).
+                        // Re-render the task list to reflect the new order.
+                        refresh();
                     } else if (msg.method === 'task.log') {
                         // Parse params — params may be a string (JSON-encoded) or already an object
                         let params = {};

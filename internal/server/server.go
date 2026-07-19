@@ -1436,8 +1436,10 @@ func (s *Server) handleTaskTop(w http.ResponseWriter, r *http.Request, taskID st
 		return
 	}
 
-	// Broadcast task.updated to browsers so the UI can re-render the list
-	s.hub.SendNotification("", rpc.ConnectionRoleBrowser, "task.updated", map[string]interface{}{
+	// Broadcast task.position_changed so the UI can re-render the task list
+	// in the new order.  Using a dedicated event avoids misleading consumers
+	// who expect task.updated to signal a status change.
+	s.hub.SendNotification("", rpc.ConnectionRoleBrowser, "task.position_changed", map[string]interface{}{
 		"task_id": task.ID,
 		"status":  task.Status.String(),
 	})
