@@ -12,6 +12,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 )
 
@@ -28,6 +29,12 @@ type Event struct {
 	Result                json.RawMessage `json:"result,omitempty"`
 	PartialResult         json.RawMessage `json:"partialResult,omitempty"`
 }
+
+// maxStderrLines is the maximum number of stderr lines to retain.
+const maxStderrLines = 100
+
+// maxEventHistory is the maximum number of events to retain in history.
+const maxEventHistory = 50
 
 // PiClient manages a pi RPC subprocess.
 type PiClient struct {
@@ -57,6 +64,12 @@ type PiClient struct {
 	waitOnce sync.Once
 	// waitErr holds the exit error from cmd.Wait().
 	waitErr error
+	// stderrLines captures the last N lines of stderr output for diagnostics.
+	stderrLines   []string
+	stderrLinesMu sync.Mutex
+	// eventHistory captures the last N events for diagnostics.
+	eventHistory   []Event
+	eventHistoryMu sync.Mutex
 }
 
 // PiClientConfig holds configuration for the pi client.
@@ -305,6 +318,76 @@ func (c *PiClient) CWD() string {
 	return c.cwd
 }
 
+// GetExitError returns the exit error from the subprocess, if it has exited.
+// Returns nil if the process has not exited yet or exited cleanly.
+func (c *PiClient) GetExitError() error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.waitErr
+}
+
+// GetExitCode returns the exit code of the subprocess, or -1 if the
+// process has not exited yet or the exit code is unavailable.
+func (c *PiClient) GetExitCode() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.cmd == nil || c.cmd.ProcessState == nil {
+		return -1
+	}
+	if c.waitErr == nil {
+		return 0
+	}
+	status, ok := c.cmd.ProcessState.Sys().(syscall.WaitStatus)
+	if !ok {
+		// Fallback: try ExitCode() directly
+		return c.cmd.ProcessState.ExitCode()
+	}
+	if status.Exited() {
+		return status.ExitStatus()
+	}
+	return -1
+}
+
+// GetStderrLines returns the captured stderr lines (up to maxStderrLines).
+// The lines are returned in chronological order (oldest first).
+func (c *PiClient) GetStderrLines() []string {
+	c.stderrLinesMu.Lock()
+	defer c.stderrLinesMu.Unlock()
+	lines := make([]string, len(c.stderrLines))
+	copy(lines, c.stderrLines)
+	return lines
+}
+
+// GetEventHistory returns the captured event history (up to maxEventHistory).
+// The events are returned in chronological order (oldest first).
+func (c *PiClient) GetEventHistory() []Event {
+	c.eventHistoryMu.Lock()
+	defer c.eventHistoryMu.Unlock()
+	events := make([]Event, len(c.eventHistory))
+	copy(events, c.eventHistory)
+	return events
+}
+
+// addStderrLine appends a line to the stderr ring buffer.
+func (c *PiClient) addStderrLine(line string) {
+	c.stderrLinesMu.Lock()
+	defer c.stderrLinesMu.Unlock()
+	c.stderrLines = append(c.stderrLines, line)
+	if len(c.stderrLines) > maxStderrLines {
+		c.stderrLines = c.stderrLines[len(c.stderrLines)-maxStderrLines:]
+	}
+}
+
+// addEventToHistory appends an event to the event history ring buffer.
+func (c *PiClient) addEventToHistory(event Event) {
+	c.eventHistoryMu.Lock()
+	defer c.eventHistoryMu.Unlock()
+	c.eventHistory = append(c.eventHistory, event)
+	if len(c.eventHistory) > maxEventHistory {
+		c.eventHistory = c.eventHistory[len(c.eventHistory)-maxEventHistory:]
+	}
+}
+
 func (c *PiClient) sendCommand(cmd map[string]interface{}) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -362,6 +445,9 @@ func (c *PiClient) readEvents() {
 			continue
 		}
 
+		// Record event in history for diagnostics
+		c.addEventToHistory(event)
+
 		// Skip responses (they have an "id" field and "type": "response")
 		if event.Type == "response" {
 			continue
@@ -392,6 +478,8 @@ func (c *PiClient) readStderr() {
 		if c.trySpawnOutput(line) {
 			continue
 		}
+		// Capture stderr for diagnostics
+		c.addStderrLine(line)
 		c.log.Printf("pi stderr: %s", line)
 	}
 }
