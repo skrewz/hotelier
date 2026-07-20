@@ -1157,33 +1157,40 @@ func TestPIHandler_RestartClient_RetriesOnFailure(t *testing.T) {
 		Log: logger,
 	})
 
+	// Set baseCWD to a non-existent path to force Start() to fail on every attempt.
 	h := &PIHandler{
-		baseCWD: baseDir,
+		baseCWD: "/nonexistent/path/that/does/not/exist",
 		client:  client,
 		log:     logger,
 	}
 
 	// Use a context that cancels after a short duration to interrupt retries.
+	// This verifies the retry loop respects context cancellation.
 	ctx, cancel := context.WithTimeout(context.Background(), 800*time.Millisecond)
 	defer cancel()
 
-	// restartClient uses baseCWD, so it should succeed if pi is installed.
-	// But we want to test the retry path, so we'll use a temp dir and
-	// immediately cancel the context after the first attempt starts.
+	// restartClient will fail on every attempt because baseCWD does not exist.
+	// With retries, this should take at least ~1s of backoff, but the context
+	// will cancel it sooner.
 	start := time.Now()
 	err = h.restartClient(ctx)
 	elapsed := time.Since(start)
 
-	if err != nil {
-		t.Logf("restartClient failed (context cancelled): %v", err)
+	if err == nil {
+		t.Log("restartClient succeeded unexpectedly")
 	} else {
-		t.Logf("restartClient succeeded in %v", elapsed)
+		t.Logf("restartClient failed (expected): %v", err)
 	}
 
 	// Verify retry log messages were produced
 	logOutput := logBuf.String()
 	if !strings.Contains(logOutput, "attempt 1/3") {
 		t.Errorf("expected retry attempt 1/3 in logs, got:\n%s", logOutput)
+	}
+
+	// Verify the elapsed time shows retries happened (should be at least ~500ms for first backoff attempt)
+	if elapsed < 500*time.Millisecond {
+		t.Errorf("expected retries to take time, but completed in %v (no retries?)", elapsed)
 	}
 
 	h.Stop(context.Background())
