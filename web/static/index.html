@@ -211,6 +211,7 @@
         .badge-completed { background: #052e16; color: #22c55e; }
         .badge-failed { background: #450a0a; color: #ef4444; }
         .badge-cancelled { background: #1c1917; color: #78716c; }
+        .persona-badge { display: inline-block; padding: 0.125rem 0.375rem; border-radius: 0.25rem; font-size: 0.625rem; font-weight: 600; background: #1e1045; color: #c4b5fd; }
         .task-error { background: #1c0a0a; border: 1px solid #7f1d1d; border-radius: 0.375rem; padding: 0.75rem 1rem; margin-bottom: 1rem; font-size: 0.85rem; color: #fca5a5; line-height: 1.5; }
         .task-error-label { font-weight: 600; color: #ef4444; margin-bottom: 0.25rem; font-size: 0.75rem; text-transform: uppercase; letter-spacing: 0.05em; }
         .task-error-text { white-space: pre-wrap; word-break: break-word; }
@@ -573,8 +574,9 @@
                 const rerunBtn = isRerunnable ? `<button class="btn btn-sm btn-ghost" onclick="event.stopPropagation(); rerunTask('${t.id}')">🔄</button>` : '';
                 const btnRow = (rerunBtn || topBtn || cancelBtn) ? `<div class="task-btn-row">${rerunBtn}${topBtn}${cancelBtn}</div>` : '';
                 const logCount = t.log_count != null ? ` · ${t.log_count} log${t.log_count === 1 ? '' : 's'}` : '';
+                const personaBadge = t.persona ? ` <span class="persona-badge">🧑 ${escapeHtml(t.persona)}</span>` : '';
                 return `<div class="task-item ${itemClass}${isActive}" onclick="selectTask('${t.id}')">
-                    <div class="task-id">${t.id} <span class="badge ${badgeClass}">${t.status}</span></div>
+                    <div class="task-id">${t.id} <span class="badge ${badgeClass}">${t.status}</span>${personaBadge}</div>
                     <div class="task-meta">${t.assigned_to ? '→ ' + t.assigned_to : 'unassigned'} · ${new Date(t.created_at).toLocaleString()}${logCount}</div>
                     <div class="task-prompt">${escapeHtml(t.prompt.substring(0, 120))}${t.prompt.length > 120 ? '...' : ''}</div>
                     ${errorHtml}
@@ -901,6 +903,24 @@
                     badgeEl.textContent = task.status;
                 }
 
+                // Update persona badge in header (add, remove, or keep)
+                const detailIdEl = document.querySelector('.task-detail-id');
+                if (detailIdEl) {
+                    const existingPersona = detailIdEl.querySelector('.persona-badge');
+                    if (task.persona) {
+                        if (existingPersona) {
+                            existingPersona.textContent = `🧑 ${escapeHtml(task.persona)}`;
+                        } else {
+                            const span = document.createElement('span');
+                            span.className = 'persona-badge';
+                            span.textContent = `🧑 ${escapeHtml(task.persona)}`;
+                            detailIdEl.appendChild(span);
+                        }
+                    } else if (existingPersona) {
+                        existingPersona.remove();
+                    }
+                }
+
                 // Update log count in header meta
                 const metaEl = document.querySelector('.task-detail-meta');
                 if (metaEl) {
@@ -920,6 +940,7 @@
             if (!task) return;
 
             const badgeClass = `badge-${task.status.toLowerCase()}`;
+            const personaBadge = task.persona ? `<span class="persona-badge">🧑 ${escapeHtml(task.persona)}</span>` : '';
             const promptMarkdown = renderMarkdown(task.prompt);
             // Extract first line of prompt for collapsed preview
             const promptPreview = getFirstLine(task.prompt, PROMPT_PREVIEW_MAX_LEN);
@@ -1073,7 +1094,7 @@
             detailContainer.innerHTML = `
                 <div class="task-detail-header">
                     <div>
-                        <div class="task-detail-id">${escapeHtml(task.id)} <span class="badge ${badgeClass}">${task.status}</span></div>
+                        <div class="task-detail-id">${escapeHtml(task.id)} <span class="badge ${badgeClass}">${task.status}</span>${personaBadge}</div>
                         <div class="task-detail-meta">${task.assigned_to ? 'Guest: ' + escapeHtml(task.assigned_to) : 'Unassigned'} · ${logs.length} log entries</div>
                     </div>
                     <div style="display:flex;gap:0.5rem;align-items:center;">
