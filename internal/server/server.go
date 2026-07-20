@@ -954,8 +954,10 @@ func (s *Server) handleTaskCancel(ctx context.Context, params json.RawMessage) (
 }
 
 // handleGuestDisconnect is called when a WebSocket connection is lost.
-// It immediately fails any running task for the guest associated with
-// the connection, preventing orphaned tasks.
+// It re-queues any running task for the guest associated with the connection,
+// allowing another guest (or the same guest after reconnecting) to pick it up.
+// This prevents tasks from being permanently lost due to transient connection
+// issues or pi subprocess failures.
 func (s *Server) handleGuestDisconnect(connectionID string) {
 	guestID, err := s.hub.GuestIDFromConnection(connectionID)
 	if err != nil || guestID == "" {
@@ -974,16 +976,18 @@ func (s *Server) handleGuestDisconnect(connectionID string) {
 		return // Task not active or already handled
 	}
 
-	s.log.Printf("connection lost for guest %s: failing task %s (%s)",
+	s.log.Printf("connection lost for guest %s: re-queuing task %s (%s)",
 		guestID, guest.TaskID, task.Status)
 
-	// Fail the task atomically
-	if err := s.orchestrator.FailTask(guest.TaskID, guestID, "connection lost"); err != nil {
-		s.log.Printf("failed to fail task %s on disconnect: %v", guest.TaskID, err)
+	// Re-queue the task atomically: task→PENDING, guest→IDLE.
+	// This allows the task to be picked up by another guest (or the same
+	// guest after it reconnects). See issue #4.
+	if err := s.orchestrator.RequeueTask(guest.TaskID); err != nil {
+		s.log.Printf("failed to re-queue task %s on disconnect: %v", guest.TaskID, err)
 	}
 
 	// Notify UI
-	s.broadcastTaskUpdated(guest.TaskID, "FAILED")
+	s.broadcastTaskUpdated(guest.TaskID, "PENDING")
 }
 
 // tryAssignPendingTasks iterates idle guests and tries to assign pending

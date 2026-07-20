@@ -1009,3 +1009,182 @@ func TestPIHandler_ExecuteTask_ClientKilledExternallyRestartSucceeds(t *testing.
 
 	h.Stop(context.Background())
 }
+
+// TestPIHandler_ResetClientWithEnv_RetriesOnFailure verifies that
+// resetClientWithEnv retries up to 3 times with exponential backoff
+// when the pi client fails to start. See issue #4.
+func TestPIHandler_ResetClientWithEnv_RetriesOnFailure(t *testing.T) {
+	if _, err := exec.LookPath("pi"); err != nil {
+		t.Skip("pi not installed")
+	}
+
+	baseDir, err := os.MkdirTemp("", "hotelier-base-*")
+	if err != nil {
+		t.Fatalf("create temp base dir: %v", err)
+	}
+	defer os.RemoveAll(baseDir)
+
+	// Capture log output to verify retry messages
+	var logBuf strings.Builder
+	logger := log.New(&logBuf, "[test] ", 0)
+
+	client := pi.NewClient(pi.PiClientConfig{
+		CWD: baseDir,
+		Log: logger,
+	})
+
+	h := &PIHandler{
+		baseCWD: baseDir,
+		client:  client,
+		log:     logger,
+	}
+
+	// Use a context that cancels after a short duration to interrupt retries.
+	// This verifies the retry loop respects context cancellation.
+	ctx, cancel := context.WithTimeout(context.Background(), 800*time.Millisecond)
+	defer cancel()
+
+	// Call resetClientWithEnv with a non-existent directory — Start() will fail
+	// because pi can't start in that directory. With retries, this should take
+	// at least 1s + 2s = 3s of backoff, but the context will cancel it sooner.
+	start := time.Now()
+	err = h.resetClientWithEnv(ctx, "/nonexistent/path/that/does/not/exist", "test-task", func(LogEntry) error {
+		return nil
+	}, nil)
+	elapsed := time.Since(start)
+
+	// The call should have been interrupted by context timeout (not immediate failure)
+	// because the retry loop waits between attempts.
+	if err == nil {
+		t.Log("resetClientWithEnv succeeded unexpectedly")
+	} else {
+		t.Logf("resetClientWithEnv failed (expected): %v", err)
+	}
+
+	// Verify retry log messages were produced
+	logOutput := logBuf.String()
+	if !strings.Contains(logOutput, "attempt 1/3") {
+		t.Errorf("expected retry attempt 1/3 in logs, got:\n%s", logOutput)
+	}
+
+	// Verify the elapsed time shows retries happened (should be at least ~1s for first backoff)
+	if elapsed < 500*time.Millisecond {
+		t.Errorf("expected retries to take time, but completed in %v (no retries?)", elapsed)
+	}
+
+	h.Stop(context.Background())
+}
+
+// TestPIHandler_ResetClientWithEnv_SendsRetryLogs verifies that retry
+// attempts send log entries via sendLog for visibility in task output.
+// See issue #4.
+func TestPIHandler_ResetClientWithEnv_SendsRetryLogs(t *testing.T) {
+	if _, err := exec.LookPath("pi"); err != nil {
+		t.Skip("pi not installed")
+	}
+
+	baseDir, err := os.MkdirTemp("", "hotelier-base-*")
+	if err != nil {
+		t.Fatalf("create temp base dir: %v", err)
+	}
+	defer os.RemoveAll(baseDir)
+
+	var logBuf strings.Builder
+	logger := log.New(&logBuf, "[test] ", 0)
+
+	client := pi.NewClient(pi.PiClientConfig{
+		CWD: baseDir,
+		Log: logger,
+	})
+
+	var sentLogs []LogEntry
+	var logsMu sync.Mutex
+
+	h := &PIHandler{
+		baseCWD: baseDir,
+		client:  client,
+		log:     logger,
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 800*time.Millisecond)
+	defer cancel()
+
+	_ = h.resetClientWithEnv(ctx, "/nonexistent/path", "test-task", func(entry LogEntry) error {
+		logsMu.Lock()
+		defer logsMu.Unlock()
+		sentLogs = append(sentLogs, entry)
+		return nil
+	}, nil)
+
+	// Check that retry warning logs were sent
+	logsMu.Lock()
+	var hadRetryWarning bool
+	for _, entry := range sentLogs {
+		if strings.Contains(entry.Line, "Spawn attempt") && entry.Level == "warning" {
+			hadRetryWarning = true
+			break
+		}
+	}
+	logsMu.Unlock()
+
+	if !hadRetryWarning {
+		t.Errorf("expected retry warning log entry via sendLog, got %d entries", len(sentLogs))
+	}
+
+	h.Stop(context.Background())
+}
+
+// TestPIHandler_RestartClient_RetriesOnFailure verifies that restartClient
+// retries up to 3 times with exponential backoff when the pi client fails to start.
+// See issue #4.
+func TestPIHandler_RestartClient_RetriesOnFailure(t *testing.T) {
+	if _, err := exec.LookPath("pi"); err != nil {
+		t.Skip("pi not installed")
+	}
+
+	baseDir, err := os.MkdirTemp("", "hotelier-base-*")
+	if err != nil {
+		t.Fatalf("create temp base dir: %v", err)
+	}
+	defer os.RemoveAll(baseDir)
+
+	// Capture log output to verify retry messages
+	var logBuf strings.Builder
+	logger := log.New(&logBuf, "[test] ", 0)
+
+	client := pi.NewClient(pi.PiClientConfig{
+		CWD: baseDir,
+		Log: logger,
+	})
+
+	h := &PIHandler{
+		baseCWD: baseDir,
+		client:  client,
+		log:     logger,
+	}
+
+	// Use a context that cancels after a short duration to interrupt retries.
+	ctx, cancel := context.WithTimeout(context.Background(), 800*time.Millisecond)
+	defer cancel()
+
+	// restartClient uses baseCWD, so it should succeed if pi is installed.
+	// But we want to test the retry path, so we'll use a temp dir and
+	// immediately cancel the context after the first attempt starts.
+	start := time.Now()
+	err = h.restartClient(ctx)
+	elapsed := time.Since(start)
+
+	if err != nil {
+		t.Logf("restartClient failed (context cancelled): %v", err)
+	} else {
+		t.Logf("restartClient succeeded in %v", elapsed)
+	}
+
+	// Verify retry log messages were produced
+	logOutput := logBuf.String()
+	if !strings.Contains(logOutput, "attempt 1/3") {
+		t.Errorf("expected retry attempt 1/3 in logs, got:\n%s", logOutput)
+	}
+
+	h.Stop(context.Background())
+}

@@ -470,6 +470,7 @@ func (h *PIHandler) prepareTaskDir(ctx context.Context, taskID string, sendLog f
 // e.g. because the subprocess was killed externally or crashed.
 // The restarted client is a temporary one — resetClient will replace it
 // with a task-specific client later in ExecuteTask.
+// Retries up to 3 times with exponential backoff on failure.
 func (h *PIHandler) restartClient(ctx context.Context) error {
 	h.mu.Lock()
 	defer h.mu.Unlock()
@@ -483,24 +484,52 @@ func (h *PIHandler) restartClient(ctx context.Context) error {
 		}
 	}
 
-	// Create a new client with the base working directory
-	h.log.Printf("[PI] restarting pi client in base dir: %s", h.baseCWD)
-	cfg := pi.PiClientConfig{
-		CWD:   h.baseCWD,
-		Log:   h.log,
-		Debug: h.debug,
+	// Retry with exponential backoff: 1s, 2s, 4s
+	maxRetries := 3
+	var lastErr error
+	for attempt := 1; attempt <= maxRetries; attempt++ {
+		// Create a new client with the base working directory
+		h.log.Printf("[PI] restarting pi client in base dir: %s (attempt %d/%d)", h.baseCWD, attempt, maxRetries)
+		cfg := pi.PiClientConfig{
+			CWD:   h.baseCWD,
+			Log:   h.log,
+			Debug: h.debug,
+		}
+		h.client = pi.NewClient(cfg)
+		if err := h.client.Start(ctx); err != nil {
+			lastErr = fmt.Errorf("start pi client: %w", err)
+			h.log.Printf("[PI] restart attempt %d/%d failed: %v", attempt, maxRetries, err)
+			if attempt < maxRetries {
+				backoff := time.Duration(1<<(attempt-1)) * time.Second
+				h.log.Printf("[PI] retrying in %v", backoff)
+				select {
+				case <-time.After(backoff):
+				case <-ctx.Done():
+					return ctx.Err()
+				}
+			}
+			continue
+		}
+		if !h.client.IsRunning() {
+			lastErr = fmt.Errorf("pi client started but not running")
+			h.log.Printf("[PI] restart attempt %d/%d failed: client not running", attempt, maxRetries)
+			if attempt < maxRetries {
+				backoff := time.Duration(1<<(attempt-1)) * time.Second
+				h.log.Printf("[PI] retrying in %v", backoff)
+				select {
+				case <-time.After(backoff):
+				case <-ctx.Done():
+					return ctx.Err()
+				}
+			}
+			continue
+		}
+		if h.client.Cmd() != nil && h.client.Cmd().Process != nil {
+			h.log.Printf("[PI] pi client restarted (pid %d)", h.client.Cmd().Process.Pid)
+		}
+		return nil
 	}
-	h.client = pi.NewClient(cfg)
-	if err := h.client.Start(ctx); err != nil {
-		return fmt.Errorf("start pi client: %w", err)
-	}
-	if !h.client.IsRunning() {
-		return fmt.Errorf("pi client started but not running")
-	}
-	if h.client.Cmd() != nil && h.client.Cmd().Process != nil {
-		h.log.Printf("[PI] pi client restarted (pid %d)", h.client.Cmd().Process.Pid)
-	}
-	return nil
+	return fmt.Errorf("pi client restart failed after %d attempts: %w", maxRetries, lastErr)
 }
 
 // resetClient restarts the pi subprocess with a new working directory.
@@ -513,6 +542,7 @@ func (h *PIHandler) resetClient(ctx context.Context, workDir string, taskID stri
 // and optional environment variables. The env vars are applied to the pi
 // subprocess so that persona-specific configuration (e.g. token paths)
 // is available to the agent.
+// Retries up to 3 times with exponential backoff on failure.
 func (h *PIHandler) resetClientWithEnv(ctx context.Context, workDir string, taskID string, sendLog func(LogEntry) error, env map[string]string) error {
 	h.mu.Lock()
 	defer h.mu.Unlock()
@@ -526,30 +556,64 @@ func (h *PIHandler) resetClientWithEnv(ctx context.Context, workDir string, task
 		}
 	}
 
-	// Create a new client with the task-specific working directory
-	h.log.Printf("[PI] creating new pi client for working dir: %s", workDir)
-	cfg := pi.PiClientConfig{
-		CWD:           workDir,
-		Provider:      "",
-		Model:         "",
-		ThinkingLevel: "",
-		Log:           h.log,
-		Env:           env,
-		SpawnOutput: func(line string) {
-			// Echo spawn-phase output to guest logs for troubleshooting.
-			// See issue #19: without this, spawn failures produce silence.
-			_ = sendLog(LogEntry{TaskID: taskID, Line: fmt.Sprintf("[spawn] %s", line), Level: "system"})
-		},
+	// Retry with exponential backoff: 1s, 2s, 4s
+	maxRetries := 3
+	var lastErr error
+	for attempt := 1; attempt <= maxRetries; attempt++ {
+		// Create a new client with the task-specific working directory
+		h.log.Printf("[PI] creating new pi client for working dir: %s (attempt %d/%d)", workDir, attempt, maxRetries)
+		cfg := pi.PiClientConfig{
+			CWD:           workDir,
+			Provider:      "",
+			Model:         "",
+			ThinkingLevel: "",
+			Log:           h.log,
+			Env:           env,
+			SpawnOutput: func(line string) {
+				// Echo spawn-phase output to guest logs for troubleshooting.
+				// See issue #19: without this, spawn failures produce silence.
+				_ = sendLog(LogEntry{TaskID: taskID, Line: fmt.Sprintf("[spawn] %s", line), Level: "system"})
+			},
+		}
+		h.client = pi.NewClient(cfg)
+		if err := h.client.Start(ctx); err != nil {
+			lastErr = fmt.Errorf("start pi client in %s: %w", workDir, err)
+			h.log.Printf("[PI] spawn attempt %d/%d failed: %v", attempt, maxRetries, err)
+			if sendLog != nil {
+				_ = sendLog(LogEntry{TaskID: taskID, Line: fmt.Sprintf("Spawn attempt %d/%d failed: %v", attempt, maxRetries, err), Level: "warning"})
+			}
+			if attempt < maxRetries {
+				backoff := time.Duration(1<<(attempt-1)) * time.Second
+				h.log.Printf("[PI] retrying in %v", backoff)
+				select {
+				case <-time.After(backoff):
+				case <-ctx.Done():
+					return ctx.Err()
+				}
+			}
+			continue
+		}
+		if !h.client.IsRunning() {
+			lastErr = fmt.Errorf("pi client in %s: started but not running", workDir)
+			h.log.Printf("[PI] spawn attempt %d/%d failed: client not running", attempt, maxRetries)
+			if sendLog != nil {
+				_ = sendLog(LogEntry{TaskID: taskID, Line: fmt.Sprintf("Spawn attempt %d/%d failed: client not running", attempt, maxRetries), Level: "warning"})
+			}
+			if attempt < maxRetries {
+				backoff := time.Duration(1<<(attempt-1)) * time.Second
+				h.log.Printf("[PI] retrying in %v", backoff)
+				select {
+				case <-time.After(backoff):
+				case <-ctx.Done():
+					return ctx.Err()
+				}
+			}
+			continue
+		}
+		h.log.Printf("[PI] new pi subprocess started in: %s", workDir)
+		return nil
 	}
-	h.client = pi.NewClient(cfg)
-	if err := h.client.Start(ctx); err != nil {
-		return fmt.Errorf("start pi client in %s: %w", workDir, err)
-	}
-	if !h.client.IsRunning() {
-		return fmt.Errorf("pi client in %s: started but not running", workDir)
-	}
-	h.log.Printf("[PI] new pi subprocess started in: %s", workDir)
-	return nil
+	return fmt.Errorf("pi client spawn failed after %d attempts: %w", maxRetries, lastErr)
 }
 
 // cleanupTaskDir removes the task directory and all its contents.
