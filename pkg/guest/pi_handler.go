@@ -377,10 +377,12 @@ func (h *PIHandler) ExecuteTask(ctx context.Context, task TaskAssignment, sendLo
 				h.log.Printf("[PI] task %s: pi exited without guest_end (abnormal exit)", task.TaskID)
 				h.log.Printf("[PI] exit code: %d, exit error: %v", diagnostics.ExitCode, diagnostics.ExitError)
 				if len(diagnostics.StderrLines) > 0 {
-					h.log.Printf("[PI] last stderr lines: %v", diagnostics.StderrLines[len(diagnostics.StderrLines)-3:])
+					start := max(0, len(diagnostics.StderrLines)-3)
+					h.log.Printf("[PI] last stderr lines: %v", diagnostics.StderrLines[start:])
 				}
 				if len(diagnostics.LastEventTypes) > 0 {
-					h.log.Printf("[PI] last event types: %v", diagnostics.LastEventTypes[len(diagnostics.LastEventTypes)-3:])
+					start := max(0, len(diagnostics.LastEventTypes)-3)
+					h.log.Printf("[PI] last event types: %v", diagnostics.LastEventTypes[start:])
 				}
 
 				// Append diagnostics to output for visibility
