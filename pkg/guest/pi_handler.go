@@ -234,6 +234,13 @@ func (h *PIHandler) ExecuteTask(ctx context.Context, task TaskAssignment, sendLo
 		return lastActivity
 	}
 
+	// Track whether pi sent a guest_end/agent_end event before exiting.
+	// If not, the process crashed or was killed — an abnormal exit.
+	// The happens-before ordering is guaranteed by the goroutine closing
+	// the done channel after setting this flag, and the main loop reading
+	// it only after receiving on done.
+	var guestEndReceived bool
+
 	go func() {
 		defer close(done)
 		eventCount := 0
@@ -247,6 +254,8 @@ func (h *PIHandler) ExecuteTask(ctx context.Context, task TaskAssignment, sendLo
 			}
 
 			if pi.IsGuestEnd(event) {
+				// Mark that pi completed normally.
+				guestEndReceived = true
 				// Text deltas have already been streamed via sendLog.
 				// No need to re-send the final text — it would duplicate.
 				return
@@ -358,30 +367,84 @@ func (h *PIHandler) ExecuteTask(ctx context.Context, task TaskAssignment, sendLo
 		select {
 		case <-done:
 			idleCheck.Stop()
-			// Agent completed
+
+			// Capture exit diagnostics
+			diagnostics := h.captureExitDiagnostics(guestEndReceived)
+
+			// If pi did not send guest_end, it crashed or was killed.
+			// Mark the task as failed with diagnostic information.
+			if !guestEndReceived {
+				h.log.Printf("[PI] task %s: pi exited without guest_end (abnormal exit)", task.TaskID)
+				h.log.Printf("[PI] exit code: %d, exit error: %v", diagnostics.ExitCode, diagnostics.ExitError)
+				if len(diagnostics.StderrLines) > 0 {
+					start := max(0, len(diagnostics.StderrLines)-3)
+					h.log.Printf("[PI] last stderr lines: %v", diagnostics.StderrLines[start:])
+				}
+				if len(diagnostics.LastEventTypes) > 0 {
+					start := max(0, len(diagnostics.LastEventTypes)-3)
+					h.log.Printf("[PI] last event types: %v", diagnostics.LastEventTypes[start:])
+				}
+
+				// Append diagnostics to output for visibility
+				mu.Lock()
+				output.WriteString("\n\n--- Exit Diagnostics ---\n")
+				output.WriteString(fmt.Sprintf("Exit code: %d\n", diagnostics.ExitCode))
+				if diagnostics.ExitError != "" {
+					output.WriteString(fmt.Sprintf("Exit error: %s\n", diagnostics.ExitError))
+				}
+				if len(diagnostics.StderrLines) > 0 {
+					output.WriteString(fmt.Sprintf("Stderr (%d lines):\n", len(diagnostics.StderrLines)))
+					for _, line := range diagnostics.StderrLines {
+						output.WriteString(fmt.Sprintf("  %s\n", line))
+					}
+				}
+				if len(diagnostics.LastEventTypes) > 0 {
+					output.WriteString(fmt.Sprintf("Last event types: %v\n", diagnostics.LastEventTypes))
+				}
+				mu.Unlock()
+
+				return &TaskResult{
+					TaskID:      task.TaskID,
+					Success:     false,
+					Output:      output.String(),
+					Error:       "pi subprocess exited without completing (no guest_end received)",
+					Diagnostics: diagnostics,
+				}, nil
+			}
+
+			// Normal completion — still attach diagnostics for reference
 			return &TaskResult{
-				TaskID:  task.TaskID,
-				Success: true,
-				Output:  output.String(),
+				TaskID:      task.TaskID,
+				Success:     true,
+				Output:      output.String(),
+				Diagnostics: diagnostics,
 			}, nil
 		case <-ctx.Done():
 			idleCheck.Stop()
 			h.log.Printf("[PI] task %s cancelled by context", task.TaskID)
 			_ = h.client.Abort()
+
+			// Capture diagnostics even on cancellation
+			diagnostics := h.captureExitDiagnostics(guestEndReceived)
 			return &TaskResult{
-				TaskID:  task.TaskID,
-				Success: false,
-				Error:   "task cancelled",
+				TaskID:      task.TaskID,
+				Success:     false,
+				Error:       "task cancelled",
+				Diagnostics: diagnostics,
 			}, nil
 		case <-idleCheck.C:
 			idle := time.Since(getLastActivity())
 			if idle > 10*time.Minute {
 				h.log.Printf("[PI] task %s idle for %s — agent may be stuck", task.TaskID, idle)
 				_ = h.client.Abort()
+
+				// Capture diagnostics even on idle timeout
+				diagnostics := h.captureExitDiagnostics(guestEndReceived)
 				return &TaskResult{
-					TaskID:  task.TaskID,
-					Success: false,
-					Error:   fmt.Sprintf("agent idle for %s", idle.Round(time.Second)),
+					TaskID:      task.TaskID,
+					Success:     false,
+					Error:       fmt.Sprintf("agent idle for %s", idle.Round(time.Second)),
+					Diagnostics: diagnostics,
 				}, nil
 			}
 		}
@@ -500,6 +563,45 @@ func (h *PIHandler) cleanupTaskDir(taskID string) error {
 	}
 	h.log.Printf("[CLEANUP] task directory removed: %s", taskDir)
 	return nil
+}
+
+// captureExitDiagnostics gathers diagnostic information from the pi client
+// at exit time. It captures the exit code, exit error, stderr lines, and
+// the last event types received. This data is used for troubleshooting
+// failed or abnormal task completions.
+func (h *PIHandler) captureExitDiagnostics(guestEndReceived bool) *ExitDiagnostics {
+	diag := &ExitDiagnostics{}
+	diag.GuestEndReceived = guestEndReceived
+
+	// Capture exit code
+	if h.client != nil {
+		exitCode := h.client.GetExitCode()
+		diag.ExitCode = exitCode
+
+		// Capture exit error
+		if exitErr := h.client.GetExitError(); exitErr != nil {
+			diag.ExitError = exitErr.Error()
+		}
+
+		// Capture stderr lines
+		if stderrLines := h.client.GetStderrLines(); len(stderrLines) > 0 {
+			diag.StderrLines = stderrLines
+		}
+
+		// Capture last event types
+		if events := h.client.GetEventHistory(); len(events) > 0 {
+			lastN := 10
+			if len(events) < lastN {
+				lastN = len(events)
+			}
+			diag.LastEventTypes = make([]string, lastN)
+			for i := 0; i < lastN; i++ {
+				diag.LastEventTypes[i] = events[len(events)-lastN+i].Type
+			}
+		}
+	}
+
+	return diag
 }
 
 // buildPrompt constructs the prompt for pi with context.

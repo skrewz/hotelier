@@ -34,12 +34,33 @@ type LogEntry struct {
 	ToolError  bool      `json:"tool_error,omitempty"`  // true if tool ended with error
 }
 
+// ExitDiagnostics contains diagnostic information captured when the pi
+// subprocess exits. This is used for troubleshooting failed or abnormal
+// task completions (e.g. 429 errors, process crashes).
+type ExitDiagnostics struct {
+	// ExitCode is the exit code of the pi subprocess (-1 if unavailable).
+	ExitCode int `json:"exit_code,omitempty"`
+	// ExitError is the error string from the subprocess exit, if any.
+	ExitError string `json:"exit_error,omitempty"`
+	// StderrLines are the last N lines of stderr output from the subprocess.
+	StderrLines []string `json:"stderr_lines,omitempty"`
+	// LastEventTypes are the types of the last N events received from pi.
+	// This helps identify where the process was when it exited.
+	LastEventTypes []string `json:"last_event_types,omitempty"`
+	// GuestEndReceived indicates whether pi sent a guest_end/agent_end event
+	// before exiting. False indicates an abnormal exit (crash, kill, etc.).
+	GuestEndReceived bool `json:"guest_end_received,omitempty"`
+}
+
 // TaskResult represents the result of a task execution.
 type TaskResult struct {
 	TaskID  string `json:"task_id"`
 	Success bool   `json:"success"`
 	Output  string `json:"output,omitempty"`
 	Error   string `json:"error,omitempty"`
+	// Diagnostics contains exit-time diagnostic information.
+	// Populated for all task completions to aid troubleshooting.
+	Diagnostics *ExitDiagnostics `json:"diagnostics,omitempty"`
 }
 
 // TaskAssignment represents a task assigned to a guest.
