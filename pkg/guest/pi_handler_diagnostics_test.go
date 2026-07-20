@@ -8,7 +8,6 @@ import (
 	"os"
 	"os/exec"
 	"strings"
-	"sync"
 	"testing"
 	"time"
 
@@ -58,8 +57,7 @@ func TestCaptureExitDiagnostics_NoClient(t *testing.T) {
 		log:     log.New(io.Discard, "", 0),
 	}
 
-	var guestEndMu sync.Mutex
-	diag := h.captureExitDiagnostics(&guestEndMu, false)
+	diag := h.captureExitDiagnostics(false)
 
 	if diag == nil {
 		t.Fatal("expected non-nil diagnostics")
@@ -99,16 +97,14 @@ func TestCaptureExitDiagnostics_GuestEndReceived(t *testing.T) {
 		log:     log.New(io.Discard, "", 0),
 	}
 
-	var guestEndMu sync.Mutex
-
 	// Test with guestEndReceived = true
-	diag := h.captureExitDiagnostics(&guestEndMu, true)
+	diag := h.captureExitDiagnostics(true)
 	if !diag.GuestEndReceived {
 		t.Error("expected GuestEndReceived to be true")
 	}
 
 	// Test with guestEndReceived = false
-	diag = h.captureExitDiagnostics(&guestEndMu, false)
+	diag = h.captureExitDiagnostics(false)
 	if diag.GuestEndReceived {
 		t.Error("expected GuestEndReceived to be false")
 	}
@@ -147,8 +143,7 @@ func TestCaptureExitDiagnostics_CapturesStderr(t *testing.T) {
 	// Give the process time to produce any stderr
 	time.Sleep(500 * time.Millisecond)
 
-	var guestEndMu sync.Mutex
-	diag := h.captureExitDiagnostics(&guestEndMu, true)
+	diag := h.captureExitDiagnostics(true)
 
 	// We can't guarantee stderr output, but we verify the mechanism works
 	t.Logf("captured %d stderr lines", len(diag.StderrLines))
@@ -178,8 +173,7 @@ func TestCaptureExitDiagnostics_EventHistoryAPI(t *testing.T) {
 		log:     log.New(io.Discard, "", 0),
 	}
 
-	var guestEndMu sync.Mutex
-	diag := h.captureExitDiagnostics(&guestEndMu, true)
+	diag := h.captureExitDiagnostics(true)
 
 	// Before starting, event history should be empty
 	if len(diag.LastEventTypes) != 0 {
@@ -201,7 +195,7 @@ func TestCaptureExitDiagnostics_EventHistoryAPI(t *testing.T) {
 	// Give events time to be captured
 	time.Sleep(1 * time.Second)
 
-	diag = h.captureExitDiagnostics(&guestEndMu, true)
+	diag = h.captureExitDiagnostics(true)
 	t.Logf("captured %d event types after prompt", len(diag.LastEventTypes))
 }
 
@@ -298,8 +292,7 @@ func TestPIHandler_ExecuteTask_AbnormalExitDetected(t *testing.T) {
 		log:     log.New(io.Discard, "", 0),
 	}
 
-	var guestEndMu sync.Mutex
-	diag := h.captureExitDiagnostics(&guestEndMu, false)
+	diag := h.captureExitDiagnostics(false)
 
 	// Verify abnormal exit is detected
 	if diag.GuestEndReceived {
@@ -330,8 +323,7 @@ func TestPIHandler_DiagnosticsOutputFormat(t *testing.T) {
 		log:     log.New(io.Discard, "", 0),
 	}
 
-	var guestEndMu sync.Mutex
-	diag := h.captureExitDiagnostics(&guestEndMu, false)
+	diag := h.captureExitDiagnostics(false)
 
 	// Simulate what ExecuteTask does on abnormal exit
 	var output strings.Builder

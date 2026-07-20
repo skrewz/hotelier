@@ -236,8 +236,10 @@ func (h *PIHandler) ExecuteTask(ctx context.Context, task TaskAssignment, sendLo
 
 	// Track whether pi sent a guest_end/agent_end event before exiting.
 	// If not, the process crashed or was killed — an abnormal exit.
+	// The happens-before ordering is guaranteed by the goroutine closing
+	// the done channel after setting this flag, and the main loop reading
+	// it only after receiving on done.
 	var guestEndReceived bool
-	var guestEndMu sync.Mutex
 
 	go func() {
 		defer close(done)
@@ -253,9 +255,7 @@ func (h *PIHandler) ExecuteTask(ctx context.Context, task TaskAssignment, sendLo
 
 			if pi.IsGuestEnd(event) {
 				// Mark that pi completed normally.
-				guestEndMu.Lock()
 				guestEndReceived = true
-				guestEndMu.Unlock()
 				// Text deltas have already been streamed via sendLog.
 				// No need to re-send the final text — it would duplicate.
 				return
@@ -369,7 +369,7 @@ func (h *PIHandler) ExecuteTask(ctx context.Context, task TaskAssignment, sendLo
 			idleCheck.Stop()
 
 			// Capture exit diagnostics
-			diagnostics := h.captureExitDiagnostics(&guestEndMu, guestEndReceived)
+			diagnostics := h.captureExitDiagnostics(guestEndReceived)
 
 			// If pi did not send guest_end, it crashed or was killed.
 			// Mark the task as failed with diagnostic information.
@@ -423,7 +423,7 @@ func (h *PIHandler) ExecuteTask(ctx context.Context, task TaskAssignment, sendLo
 			_ = h.client.Abort()
 
 			// Capture diagnostics even on cancellation
-			diagnostics := h.captureExitDiagnostics(&guestEndMu, guestEndReceived)
+			diagnostics := h.captureExitDiagnostics(guestEndReceived)
 			return &TaskResult{
 				TaskID:      task.TaskID,
 				Success:     false,
@@ -437,7 +437,7 @@ func (h *PIHandler) ExecuteTask(ctx context.Context, task TaskAssignment, sendLo
 				_ = h.client.Abort()
 
 				// Capture diagnostics even on idle timeout
-				diagnostics := h.captureExitDiagnostics(&guestEndMu, guestEndReceived)
+				diagnostics := h.captureExitDiagnostics(guestEndReceived)
 				return &TaskResult{
 					TaskID:      task.TaskID,
 					Success:     false,
@@ -567,13 +567,9 @@ func (h *PIHandler) cleanupTaskDir(taskID string) error {
 // at exit time. It captures the exit code, exit error, stderr lines, and
 // the last event types received. This data is used for troubleshooting
 // failed or abnormal task completions.
-func (h *PIHandler) captureExitDiagnostics(guestEndMu *sync.Mutex, guestEndReceived bool) *ExitDiagnostics {
+func (h *PIHandler) captureExitDiagnostics(guestEndReceived bool) *ExitDiagnostics {
 	diag := &ExitDiagnostics{}
-
-	// Capture guest_end status
-	guestEndMu.Lock()
 	diag.GuestEndReceived = guestEndReceived
-	guestEndMu.Unlock()
 
 	// Capture exit code
 	if h.client != nil {

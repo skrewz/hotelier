@@ -12,7 +12,6 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
-	"syscall"
 	"time"
 )
 
@@ -179,7 +178,10 @@ func (c *PiClient) Start(ctx context.Context) error {
 	// also tries to wait.
 	go func() {
 		c.waitOnce.Do(func() {
-			c.waitErr = c.cmd.Wait()
+			waitErr := c.cmd.Wait()
+			c.mu.Lock()
+			c.waitErr = waitErr
+			c.mu.Unlock()
 		})
 	}()
 
@@ -337,15 +339,7 @@ func (c *PiClient) GetExitCode() int {
 	if c.waitErr == nil {
 		return 0
 	}
-	status, ok := c.cmd.ProcessState.Sys().(syscall.WaitStatus)
-	if !ok {
-		// Fallback: try ExitCode() directly
-		return c.cmd.ProcessState.ExitCode()
-	}
-	if status.Exited() {
-		return status.ExitStatus()
-	}
-	return -1
+	return c.cmd.ProcessState.ExitCode()
 }
 
 // GetStderrLines returns the captured stderr lines (up to maxStderrLines).
