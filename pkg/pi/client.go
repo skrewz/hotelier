@@ -9,6 +9,7 @@ import (
 	"log"
 	"os"
 	"os/exec"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -145,6 +146,9 @@ func (c *PiClient) Start(ctx context.Context) error {
 		for k, v := range c.env {
 			c.cmd.Env = append(c.cmd.Env, fmt.Sprintf("%s=%s", k, v))
 		}
+		// Log the names of extra env vars being applied (not values, to avoid leaking secrets).
+		// See issue #56.
+		c.log.Printf("pi env vars: %s", EnvVarNames(c.env))
 	}
 
 	stdin, err := c.cmd.StdinPipe()
@@ -491,6 +495,20 @@ func (c *PiClient) trySpawnOutput(line string) bool {
 		return true
 	}
 	return false
+}
+
+// EnvVarNames returns a sorted, comma-separated list of environment variable
+// names (keys) from the given map. It is used for logging which env vars are
+// being applied to the pi subprocess without exposing their values.
+// See issue #56.
+func EnvVarNames(env map[string]string) string {
+	names := make([]string, 0, len(env))
+	for k := range env {
+		names = append(names, k)
+	}
+	// Sort for deterministic output
+	sort.Strings(names)
+	return strings.Join(names, ", ")
 }
 
 // ExtractTextDelta extracts text content from message_update events.

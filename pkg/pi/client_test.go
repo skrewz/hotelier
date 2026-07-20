@@ -449,3 +449,160 @@ func TestPiClient_IsRunning_DetectsCrashedProcess(t *testing.T) {
 		t.Error("started should be cleared after IsRunning detects dead process")
 	}
 }
+
+// TestEnvVarNames returns sorted comma-separated env var names.
+func TestEnvVarNames(t *testing.T) {
+	tests := []struct {
+		name     string
+		env      map[string]string
+		expected string
+	}{
+		{
+			name:     "empty map",
+			env:      map[string]string{},
+			expected: "",
+		},
+		{
+			name:     "nil map",
+			env:      nil,
+			expected: "",
+		},
+		{
+			name: "single var",
+			env: map[string]string{
+				"HOME": "/root",
+			},
+			expected: "HOME",
+		},
+		{
+			name: "multiple vars sorted alphabetically",
+			env: map[string]string{
+				"ZEBRA":      "last",
+				"ALPHA":      "first",
+				"MIDDLE":     "middle",
+				"SECRET_KEY": "super-secret-value",
+				"API_TOKEN":  "tok_12345",
+			},
+			expected: "ALPHA, API_TOKEN, MIDDLE, SECRET_KEY, ZEBRA",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := EnvVarNames(tt.env)
+			if got != tt.expected {
+				t.Errorf("EnvVarNames() = %q, want %q", got, tt.expected)
+			}
+		})
+	}
+}
+
+// TestEnvVarNames_NoValuesLeaked verifies that EnvVarNames returns only keys,
+// never values. This is a security property — values may contain secrets.
+func TestEnvVarNames_NoValuesLeaked(t *testing.T) {
+	env := map[string]string{
+		"SECRET_TOKEN": "sk-1234567890abcdef",
+		"API_PASSWORD": "p@ssw0rd!",
+		"PRIVATE_KEY":  "-----BEGIN RSA PRIVATE KEY-----",
+	}
+
+	result := EnvVarNames(env)
+
+	// Keys should be present
+	if !strings.Contains(result, "SECRET_TOKEN") {
+		t.Errorf("expected SECRET_TOKEN in output, got: %s", result)
+	}
+	if !strings.Contains(result, "API_PASSWORD") {
+		t.Errorf("expected API_PASSWORD in output, got: %s", result)
+	}
+	if !strings.Contains(result, "PRIVATE_KEY") {
+		t.Errorf("expected PRIVATE_KEY in output, got: %s", result)
+	}
+
+	// Values must NOT be present
+	for _, secret := range []string{"sk-1234567890abcdef", "p@ssw0rd!", "BEGIN RSA PRIVATE KEY"} {
+		if strings.Contains(result, secret) {
+			t.Errorf("security leak: value %q found in output: %s", secret, result)
+		}
+	}
+}
+
+// TestPiClient_Start_LogsEnvVarNames verifies that when extra env vars are
+// configured, the startup log includes the names of those variables.
+// This is a regression test for issue #56.
+func TestPiClient_Start_LogsEnvVarNames(t *testing.T) {
+	if _, err := exec.LookPath("pi"); err != nil {
+		t.Skip("pi not installed")
+	}
+
+	var logBuf strings.Builder
+	c := NewClient(PiClientConfig{
+		CWD: "/tmp",
+		Log: newTestLogger(&logBuf),
+		Env: map[string]string{
+			"TEST_VAR_ALPHA": "alpha-value",
+			"TEST_VAR_BETA":  "beta-value",
+		},
+	})
+
+	ctx := context.Background()
+	if err := c.Start(ctx); err != nil {
+		t.Fatalf("start failed: %v", err)
+	}
+	defer c.Stop(ctx)
+
+	// Give the logger time to flush
+	time.Sleep(500 * time.Millisecond)
+
+	logOutput := logBuf.String()
+
+	// Check that env var names are logged
+	if !strings.Contains(logOutput, "pi env vars:") {
+		t.Errorf("expected 'pi env vars:' in log output, got:\n%s", logOutput)
+	}
+	if !strings.Contains(logOutput, "TEST_VAR_ALPHA") {
+		t.Errorf("expected TEST_VAR_ALPHA in log output, got:\n%s", logOutput)
+	}
+	if !strings.Contains(logOutput, "TEST_VAR_BETA") {
+		t.Errorf("expected TEST_VAR_BETA in log output, got:\n%s", logOutput)
+	}
+
+	// Verify values are NOT leaked
+	if strings.Contains(logOutput, "alpha-value") {
+		t.Errorf("security leak: env var value found in log output:\n%s", logOutput)
+	}
+	if strings.Contains(logOutput, "beta-value") {
+		t.Errorf("security leak: env var value found in log output:\n%s", logOutput)
+	}
+}
+
+// TestPiClient_Start_NoEnvVars_LogsNothing verifies that when no extra env
+// vars are configured, no env var log line is produced.
+func TestPiClient_Start_NoEnvVars_LogsNothing(t *testing.T) {
+	if _, err := exec.LookPath("pi"); err != nil {
+		t.Skip("pi not installed")
+	}
+
+	var logBuf strings.Builder
+	c := NewClient(PiClientConfig{
+		CWD: "/tmp",
+		Log: newTestLogger(&logBuf),
+		Env: nil, // no extra env vars
+	})
+
+	ctx := context.Background()
+	if err := c.Start(ctx); err != nil {
+		t.Fatalf("start failed: %v", err)
+	}
+	defer c.Stop(ctx)
+
+	// Give the logger time to flush
+	time.Sleep(500 * time.Millisecond)
+
+	logOutput := logBuf.String()
+
+	// Should NOT have env vars log line when no extra env vars are set
+	if strings.Contains(logOutput, "pi env vars:") {
+		t.Errorf("expected no 'pi env vars:' log line when no env vars set, got:\n%s", logOutput)
+	}
+}
