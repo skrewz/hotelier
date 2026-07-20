@@ -9,6 +9,7 @@ import (
 	"log"
 	"os"
 	"os/exec"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -506,13 +507,7 @@ func EnvVarNames(env map[string]string) string {
 		names = append(names, k)
 	}
 	// Sort for deterministic output
-	for i := 0; i < len(names); i++ {
-		for j := i + 1; j < len(names); j++ {
-			if names[i] > names[j] {
-				names[i], names[j] = names[j], names[i]
-			}
-		}
-	}
+	sort.Strings(names)
 	return strings.Join(names, ", ")
 }
 
