@@ -236,9 +236,9 @@ func (h *PIHandler) ExecuteTask(ctx context.Context, task TaskAssignment, sendLo
 
 	// Track whether pi sent a guest_end/agent_end event before exiting.
 	// If not, the process crashed or was killed — an abnormal exit.
-	// The happens-before ordering is guaranteed by the goroutine closing
-	// the done channel after setting this flag, and the main loop reading
-	// it only after receiving on done.
+	// Ordering: goroutine sets guestEndReceived → returns → deferred close(done)
+	// fires → main loop receives on done → reads guestEndReceived.
+	// The channel close provides the happens-before guarantee.
 	var guestEndReceived bool
 
 	go func() {
@@ -500,12 +500,8 @@ func (h *PIHandler) restartClient(ctx context.Context) error {
 			lastErr = fmt.Errorf("start pi client: %w", err)
 			h.log.Printf("[PI] restart attempt %d/%d failed: %v", attempt, maxRetries, err)
 			if attempt < maxRetries {
-				backoff := time.Duration(1<<(attempt-1)) * time.Second
-				h.log.Printf("[PI] retrying in %v", backoff)
-				select {
-				case <-time.After(backoff):
-				case <-ctx.Done():
-					return ctx.Err()
+				if err := backoffAndSleep(ctx, attempt, h.log); err != nil {
+					return err
 				}
 			}
 			continue
@@ -514,12 +510,8 @@ func (h *PIHandler) restartClient(ctx context.Context) error {
 			lastErr = fmt.Errorf("pi client started but not running")
 			h.log.Printf("[PI] restart attempt %d/%d failed: client not running", attempt, maxRetries)
 			if attempt < maxRetries {
-				backoff := time.Duration(1<<(attempt-1)) * time.Second
-				h.log.Printf("[PI] retrying in %v", backoff)
-				select {
-				case <-time.After(backoff):
-				case <-ctx.Done():
-					return ctx.Err()
+				if err := backoffAndSleep(ctx, attempt, h.log); err != nil {
+					return err
 				}
 			}
 			continue
@@ -583,12 +575,8 @@ func (h *PIHandler) resetClientWithEnv(ctx context.Context, workDir string, task
 				_ = sendLog(LogEntry{TaskID: taskID, Line: fmt.Sprintf("Spawn attempt %d/%d failed: %v", attempt, maxRetries, err), Level: "warning"})
 			}
 			if attempt < maxRetries {
-				backoff := time.Duration(1<<(attempt-1)) * time.Second
-				h.log.Printf("[PI] retrying in %v", backoff)
-				select {
-				case <-time.After(backoff):
-				case <-ctx.Done():
-					return ctx.Err()
+				if err := backoffAndSleep(ctx, attempt, h.log); err != nil {
+					return err
 				}
 			}
 			continue
@@ -600,12 +588,8 @@ func (h *PIHandler) resetClientWithEnv(ctx context.Context, workDir string, task
 				_ = sendLog(LogEntry{TaskID: taskID, Line: fmt.Sprintf("Spawn attempt %d/%d failed: client not running", attempt, maxRetries), Level: "warning"})
 			}
 			if attempt < maxRetries {
-				backoff := time.Duration(1<<(attempt-1)) * time.Second
-				h.log.Printf("[PI] retrying in %v", backoff)
-				select {
-				case <-time.After(backoff):
-				case <-ctx.Done():
-					return ctx.Err()
+				if err := backoffAndSleep(ctx, attempt, h.log); err != nil {
+					return err
 				}
 			}
 			continue
@@ -614,6 +598,20 @@ func (h *PIHandler) resetClientWithEnv(ctx context.Context, workDir string, task
 		return nil
 	}
 	return fmt.Errorf("pi client spawn failed after %d attempts: %w", maxRetries, lastErr)
+}
+
+// backoffAndSleep calculates exponential backoff (1s, 2s, 4s, ...) and sleeps
+// for the duration, respecting context cancellation.
+// Returns ctx.Err() if the context was cancelled during the sleep.
+func backoffAndSleep(ctx context.Context, attempt int, logger *log.Logger) error {
+	backoff := time.Duration(1<<(attempt-1)) * time.Second
+	logger.Printf("[PI] retrying in %v", backoff)
+	select {
+	case <-time.After(backoff):
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }
 
 // cleanupTaskDir removes the task directory and all its contents.
