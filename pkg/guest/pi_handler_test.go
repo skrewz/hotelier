@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"hotelier/pkg/persona"
 	"hotelier/pkg/pi"
 )
 
@@ -210,7 +211,7 @@ func TestPIHandler_OperationalLogsSentViaCallback(t *testing.T) {
 		return nil
 	}
 
-	_, err = h.prepareTaskDir(context.Background(), "task-1", sendLog)
+	_, err = h.prepareTaskDir(context.Background(), "task-1", "", sendLog, nil)
 	if err != nil {
 		t.Fatalf("prepareTaskDir failed: %v", err)
 	}
@@ -257,7 +258,7 @@ func TestPIHandler_PrepareTaskDir(t *testing.T) {
 		log:     log.New(io.Discard, "", 0),
 	}
 
-	taskDir, err := h.prepareTaskDir(context.Background(), "task-1", nil)
+	taskDir, err := h.prepareTaskDir(context.Background(), "task-1", "", nil, nil)
 	if err != nil {
 		t.Fatalf("prepareTaskDir failed: %v", err)
 	}
@@ -303,7 +304,7 @@ func TestPIHandler_PrepareTaskDirAfterResetClient(t *testing.T) {
 	}
 
 	// First task — no repos, creates a task directory
-	taskDir1, err := h.prepareTaskDir(context.Background(), "task-1", nil)
+	taskDir1, err := h.prepareTaskDir(context.Background(), "task-1", "", nil, nil)
 	if err != nil {
 		t.Fatalf("first prepareTaskDir failed: %v", err)
 	}
@@ -323,7 +324,7 @@ func TestPIHandler_PrepareTaskDirAfterResetClient(t *testing.T) {
 	h.client = newClient
 
 	// Second task — should still use baseDir, NOT taskDir1
-	taskDir2, err := h.prepareTaskDir(context.Background(), "task-2", nil)
+	taskDir2, err := h.prepareTaskDir(context.Background(), "task-2", "", nil, nil)
 	if err != nil {
 		t.Fatalf("second prepareTaskDir failed: %v", err)
 	}
@@ -363,7 +364,7 @@ func TestPIHandler_CleanupTaskDir_RemovesDirectory(t *testing.T) {
 	}
 
 	// Create a task directory via prepareTaskDir
-	taskDir, err := h.prepareTaskDir(context.Background(), "task-1", nil)
+	taskDir, err := h.prepareTaskDir(context.Background(), "task-1", "", nil, nil)
 	if err != nil {
 		t.Fatalf("prepareTaskDir failed: %v", err)
 	}
@@ -433,7 +434,7 @@ func TestPIHandler_CleanupTaskDir_WithContents(t *testing.T) {
 	}
 
 	// Create a task directory
-	taskDir, err := h.prepareTaskDir(context.Background(), "task-1", nil)
+	taskDir, err := h.prepareTaskDir(context.Background(), "task-1", "", nil, nil)
 	if err != nil {
 		t.Fatalf("prepareTaskDir failed: %v", err)
 	}
@@ -1008,4 +1009,154 @@ func TestPIHandler_ExecuteTask_ClientKilledExternallyRestartSucceeds(t *testing.
 	}
 
 	h.Stop(context.Background())
+}
+
+// TestPIHandler_PrepareTaskDir_WithRepoRef verifies that prepareTaskDir
+// clones the specified repository when repoRef is set.
+func TestPIHandler_PrepareTaskDir_WithRepoRef(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not installed")
+	}
+
+	baseDir, err := os.MkdirTemp("", "hotelier-base-*")
+	if err != nil {
+		t.Fatalf("create temp base dir: %v", err)
+	}
+	defer os.RemoveAll(baseDir)
+
+	client := pi.NewClient(pi.PiClientConfig{
+		CWD: baseDir,
+		Log: log.New(io.Discard, "", 0),
+	})
+
+	h := &PIHandler{
+		baseCWD: baseDir,
+		client:  client,
+		log:     log.New(io.Discard, "", 0),
+	}
+
+	// Use a bare repo URL that doesn't exist — this should fail with a
+	// git clone error, not a prepareTaskDir bug.
+	_, err = h.prepareTaskDir(context.Background(), "task-repo", "https://github.com/nonexistent-user/nonexistent-repo-12345.git", nil, nil)
+	if err == nil {
+		t.Fatal("expected error when cloning nonexistent repo, got nil")
+	}
+	if !strings.Contains(err.Error(), "git clone") {
+		t.Errorf("expected 'git clone' in error, got: %v", err)
+	}
+
+	// Task directory should still have been created (even though clone failed)
+	expectedDir := filepath.Join(baseDir, "tasks", "task-repo")
+	if _, err := os.Stat(expectedDir); os.IsNotExist(err) {
+		t.Errorf("expected task dir %s to exist even after clone failure", expectedDir)
+	}
+}
+
+// TestPIHandler_PrepareTaskDir_NoRepoRef verifies that prepareTaskDir
+// works without a repo_ref (existing behaviour).
+func TestPIHandler_PrepareTaskDir_NoRepoRef(t *testing.T) {
+	baseDir, err := os.MkdirTemp("", "hotelier-base-*")
+	if err != nil {
+		t.Fatalf("create temp base dir: %v", err)
+	}
+	defer os.RemoveAll(baseDir)
+
+	client := pi.NewClient(pi.PiClientConfig{
+		CWD: baseDir,
+		Log: log.New(io.Discard, "", 0),
+	})
+
+	h := &PIHandler{
+		baseCWD: baseDir,
+		client:  client,
+		log:     log.New(io.Discard, "", 0),
+	}
+
+	var logEntries []LogEntry
+	sendLog := func(entry LogEntry) error {
+		logEntries = append(logEntries, entry)
+		return nil
+	}
+
+	taskDir, err := h.prepareTaskDir(context.Background(), "task-no-repo", "", sendLog, nil)
+	if err != nil {
+		t.Fatalf("prepareTaskDir failed: %v", err)
+	}
+
+	expectedDir := filepath.Join(baseDir, "tasks", "task-no-repo")
+	if taskDir != expectedDir {
+		t.Errorf("expected %q, got %q", expectedDir, taskDir)
+	}
+
+	// Should have sent a "Using task directory" log entry
+	found := false
+	for _, entry := range logEntries {
+		if strings.Contains(entry.Line, "Using task directory") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Error("expected 'Using task directory' log entry")
+	}
+}
+
+// TestPIHandler_PrepareTaskDir_WithPersonaAndRepoRef verifies that
+// prepareTaskDir applies persona files before and after cloning.
+func TestPIHandler_PrepareTaskDir_WithPersonaAndRepoRef(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not installed")
+	}
+
+	baseDir, err := os.MkdirTemp("", "hotelier-base-*")
+	if err != nil {
+		t.Fatalf("create temp base dir: %v", err)
+	}
+	defer os.RemoveAll(baseDir)
+
+	// Create a persona that copies a file
+	credFile := filepath.Join(baseDir, "cred-file")
+	if err := os.WriteFile(credFile, []byte("secret"), 0o600); err != nil {
+		t.Fatalf("create credential file: %v", err)
+	}
+
+	p := &persona.Persona{
+		Name: "test-persona",
+		Files: []persona.FileCopy{
+			{From: credFile, To: ".git-credentials"},
+		},
+		Env: map[string]string{
+			"GIT_CONFIG_COUNT": "1",
+		},
+	}
+
+	client := pi.NewClient(pi.PiClientConfig{
+		CWD: baseDir,
+		Log: log.New(io.Discard, "", 0),
+	})
+
+	h := &PIHandler{
+		baseCWD: baseDir,
+		client:  client,
+		log:     log.New(io.Discard, "", 0),
+	}
+
+	// Clone a nonexistent repo — should fail, but persona files
+	// should have been applied before the clone attempt.
+	_, err = h.prepareTaskDir(context.Background(), "task-persona-repo", "https://github.com/nonexistent-user/nonexistent-repo-67890.git", nil, p)
+	if err == nil {
+		t.Fatal("expected error when cloning nonexistent repo, got nil")
+	}
+
+	// The task directory should exist with the persona file applied
+	taskDir := filepath.Join(baseDir, "tasks", "task-persona-repo")
+	if _, err := os.Stat(taskDir); os.IsNotExist(err) {
+		t.Fatalf("expected task dir %s to exist", taskDir)
+	}
+
+	// The persona file should be present (applied before clone)
+	credDest := filepath.Join(taskDir, ".git-credentials")
+	if _, err := os.Stat(credDest); os.IsNotExist(err) {
+		t.Error("expected persona file .git-credentials to exist in task dir (applied before clone)")
+	}
 }
