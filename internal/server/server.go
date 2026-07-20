@@ -1315,6 +1315,7 @@ func (s *Server) handleGetTasks(w http.ResponseWriter, r *http.Request) {
 			"prompt":      t.Prompt,
 			"tags":        t.Tags,
 			"persona":     t.Persona,
+			"priority":    t.Priority,
 			"status":      t.Status.String(),
 			"created_at":  t.CreatedAt,
 			"assigned_to": t.AssignedTo,
@@ -1367,6 +1368,12 @@ func (s *Server) handleCreateTask(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// Validate priority if specified
+	if task.Priority != "" && !queue.ValidatePriority(task.Priority) {
+		http.Error(w, fmt.Sprintf("invalid priority %q (must be 🧑‍🚒, 🧑‍🏫, or 🦧)", task.Priority), http.StatusBadRequest)
+		return
+	}
+
 	if task.ID == "" {
 		task.ID = fmt.Sprintf("task-%d", time.Now().UnixNano())
 	}
@@ -1396,13 +1403,6 @@ func (s *Server) HandleTaskDetail(w http.ResponseWriter, r *http.Request) {
 	if strings.HasSuffix(path, "/rerun") {
 		taskID := strings.TrimSuffix(path, "/rerun")
 		s.handleTaskRerun(w, r, taskID)
-		return
-	}
-
-	// Check for top sub-path: /api/tasks/:id/top
-	if strings.HasSuffix(path, "/top") {
-		taskID := strings.TrimSuffix(path, "/top")
-		s.handleTaskTop(w, r, taskID)
 		return
 	}
 
@@ -1457,9 +1457,11 @@ func (s *Server) handleTaskRerun(w http.ResponseWriter, r *http.Request, taskID 
 
 	// Clone the task with a new ID
 	newTask := &queue.Task{
-		ID:     fmt.Sprintf("task-%d", time.Now().UnixNano()),
-		Prompt: orig.Prompt,
-		Tags:   orig.Tags,
+		ID:       fmt.Sprintf("task-%d", time.Now().UnixNano()),
+		Prompt:   orig.Prompt,
+		Tags:     orig.Tags,
+		Persona:  orig.Persona,
+		Priority: orig.Priority,
 	}
 
 	if err := s.orchestrator.AddTask(newTask); err != nil {
@@ -1476,51 +1478,6 @@ func (s *Server) handleTaskRerun(w http.ResponseWriter, r *http.Request, taskID 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusCreated)
 	json.NewEncoder(w).Encode(newTask)
-}
-
-// handleTaskTop moves a pending task to the front of the queue.
-// POST /api/tasks/:id/top — moves the task to the top of the pending queue
-// so it will be assigned to the next available guest before other pending tasks.
-func (s *Server) handleTaskTop(w http.ResponseWriter, r *http.Request, taskID string) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-
-	if taskID == "" {
-		http.Error(w, "task id required", http.StatusBadRequest)
-		return
-	}
-
-	task, ok := s.orchestrator.GetTask(taskID)
-	if !ok {
-		http.Error(w, "task not found", http.StatusNotFound)
-		return
-	}
-
-	if task.Status != queue.TaskStatusPending {
-		http.Error(w, fmt.Sprintf("task is not pending (status: %s)", task.Status), http.StatusConflict)
-		return
-	}
-
-	if err := s.orchestrator.Queue().MoveToTop(taskID); err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
-		return
-	}
-
-	// Broadcast task.position_changed so the UI can re-render the task list
-	// in the new order.  Using a dedicated event avoids misleading consumers
-	// who expect task.updated to signal a status change.
-	s.hub.SendNotification("", rpc.ConnectionRoleBrowser, "task.position_changed", map[string]interface{}{
-		"task_id": task.ID,
-		"status":  task.Status.String(),
-	})
-
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]interface{}{
-		"task_id": task.ID,
-		"status":  task.Status.String(),
-	})
 }
 
 // handleTaskCancelHTTP handles the /api/tasks/:id/cancel endpoint.

@@ -803,105 +803,176 @@ func TestTaskStatusTransition_RunningToPending(t *testing.T) {
 	}
 }
 
-// TestMoveToTop verifies that a pending task can be moved to the front
-// of the queue and that NextPendingTask returns it first.
-func TestMoveToTop(t *testing.T) {
+// TestValidatePriority verifies that valid and invalid priorities are
+// correctly identified.
+func TestValidatePriority(t *testing.T) {
+	tests := []struct {
+		priority string
+		valid    bool
+	}{
+		{PriorityFirefighter, true},
+		{PriorityTeacher, true},
+		{PriorityOrangutan, true},
+		{"", false},
+		{"🔥", false},
+		{"random", false},
+	}
+
+	for _, tt := range tests {
+		result := ValidatePriority(tt.priority)
+		if result != tt.valid {
+			t.Errorf("ValidatePriority(%q) = %v, want %v", tt.priority, result, tt.valid)
+		}
+	}
+}
+
+// TestPriorityValue verifies that priority values are ordered correctly
+// (lower value = higher priority).
+func TestPriorityValue(t *testing.T) {
+	if priorityValue(PriorityFirefighter) >= priorityValue(PriorityTeacher) {
+		t.Error("firefighter should have lower (higher) priority value than teacher")
+	}
+	if priorityValue(PriorityTeacher) >= priorityValue(PriorityOrangutan) {
+		t.Error("teacher should have lower (higher) priority value than orangutan")
+	}
+	if priorityValue("unknown") <= priorityValue(PriorityOrangutan) {
+		t.Error("unknown should have lower (lower) priority value than orangutan")
+	}
+}
+
+// TestAddTask_DefaultPriority verifies that tasks without a priority
+// default to orangutan (lowest).
+func TestAddTask_DefaultPriority(t *testing.T) {
 	q := newTestQueue(t)
 
-	q.Add(&Task{ID: "task-1", Prompt: "Task 1"})
-	q.Add(&Task{ID: "task-2", Prompt: "Task 2"})
-	q.Add(&Task{ID: "task-3", Prompt: "Task 3"})
+	task := &Task{ID: "task-1", Prompt: "Task 1"}
+	q.Add(task)
 
-	// Initially, task-1 is first
+	if task.Priority != PriorityOrangutan {
+		t.Errorf("expected default priority %q, got %q", PriorityOrangutan, task.Priority)
+	}
+}
+
+// TestAddTask_InvalidPriority verifies that invalid priority values
+// are normalised to orangutan.
+func TestAddTask_InvalidPriority(t *testing.T) {
+	q := newTestQueue(t)
+
+	task := &Task{ID: "task-1", Prompt: "Task 1", Priority: "🔥"}
+	q.Add(task)
+
+	if task.Priority != PriorityOrangutan {
+		t.Errorf("expected invalid priority normalised to %q, got %q", PriorityOrangutan, task.Priority)
+	}
+}
+
+// TestAddTask_ValidPriority verifies that valid priority values are preserved.
+func TestAddTask_ValidPriority(t *testing.T) {
+	q := newTestQueue(t)
+
+	for _, priority := range []string{PriorityFirefighter, PriorityTeacher, PriorityOrangutan} {
+		task := &Task{ID: "task-priority-" + priority, Prompt: "Task", Priority: priority}
+		q.Add(task)
+
+		if task.Priority != priority {
+			t.Errorf("expected priority %q, got %q", priority, task.Priority)
+		}
+	}
+}
+
+// TestGetPendingTasks_PriorityOrder verifies that pending tasks are returned
+// sorted by priority (highest first), then by creation time (FIFO).
+func TestGetPendingTasks_PriorityOrder(t *testing.T) {
+	q := newTestQueue(t)
+
+	// Add tasks in reverse priority order
+	q.Add(&Task{ID: "task-orangutan", Prompt: "Low", Priority: PriorityOrangutan})
+	q.Add(&Task{ID: "task-teacher", Prompt: "Medium", Priority: PriorityTeacher})
+	q.Add(&Task{ID: "task-firefighter", Prompt: "High", Priority: PriorityFirefighter})
+
+	pending := q.GetPendingTasks()
+	if len(pending) != 3 {
+		t.Fatalf("expected 3 pending tasks, got %d", len(pending))
+	}
+
+	if pending[0].ID != "task-firefighter" {
+		t.Errorf("expected firefighter first, got %s", pending[0].ID)
+	}
+	if pending[1].ID != "task-teacher" {
+		t.Errorf("expected teacher second, got %s", pending[1].ID)
+	}
+	if pending[2].ID != "task-orangutan" {
+		t.Errorf("expected orangutan third, got %s", pending[2].ID)
+	}
+}
+
+// TestGetPendingTasks_SamePriorityFIFO verifies that tasks with the same
+// priority are returned in creation order (FIFO).
+func TestGetPendingTasks_SamePriorityFIFO(t *testing.T) {
+	q := newTestQueue(t)
+
+	q.Add(&Task{ID: "task-1", Prompt: "First", Priority: PriorityOrangutan})
+	q.Add(&Task{ID: "task-2", Prompt: "Second", Priority: PriorityOrangutan})
+	q.Add(&Task{ID: "task-3", Prompt: "Third", Priority: PriorityOrangutan})
+
+	pending := q.GetPendingTasks()
+	if len(pending) != 3 {
+		t.Fatalf("expected 3 pending tasks, got %d", len(pending))
+	}
+
+	if pending[0].ID != "task-1" {
+		t.Errorf("expected task-1 first, got %s", pending[0].ID)
+	}
+	if pending[1].ID != "task-2" {
+		t.Errorf("expected task-2 second, got %s", pending[1].ID)
+	}
+	if pending[2].ID != "task-3" {
+		t.Errorf("expected task-3 third, got %s", pending[2].ID)
+	}
+}
+
+// TestNextPendingTask_PriorityOrder verifies that NextPendingTask returns
+// the highest-priority pending task.
+func TestNextPendingTask_PriorityOrder(t *testing.T) {
+	q := newTestQueue(t)
+
+	q.Add(&Task{ID: "task-orangutan", Prompt: "Low", Priority: PriorityOrangutan})
+	q.Add(&Task{ID: "task-firefighter", Prompt: "High", Priority: PriorityFirefighter})
+	q.Add(&Task{ID: "task-teacher", Prompt: "Medium", Priority: PriorityTeacher})
+
 	task := q.NextPendingTask()
-	if task == nil || task.ID != "task-1" {
-		t.Fatalf("expected task-1 first, got %v", task)
+	if task == nil {
+		t.Fatal("expected a pending task")
+	}
+	if task.ID != "task-firefighter" {
+		t.Errorf("expected firefighter first, got %s", task.ID)
 	}
 
-	// Move task-3 to top
-	err := q.MoveToTop("task-3")
-	if err != nil {
-		t.Fatalf("MoveToTop failed: %v", err)
-	}
-
-	// task-3 should now be first
+	// Assign firefighter, next should be teacher
+	q.Assign("task-firefighter", "guest-1")
 	task = q.NextPendingTask()
-	if task == nil || task.ID != "task-3" {
-		t.Fatalf("expected task-3 after MoveToTop, got %v", task)
+	if task == nil {
+		t.Fatal("expected next pending task")
 	}
-
-	// Verify full order: task-3, task-1, task-2
-	allTasks := q.GetAllTasks()
-	if len(allTasks) != 3 {
-		t.Fatalf("expected 3 tasks, got %d", len(allTasks))
-	}
-	if allTasks[0].ID != "task-3" {
-		t.Errorf("expected task-3 first, got %s", allTasks[0].ID)
-	}
-	if allTasks[1].ID != "task-1" {
-		t.Errorf("expected task-1 second, got %s", allTasks[1].ID)
-	}
-	if allTasks[2].ID != "task-2" {
-		t.Errorf("expected task-2 third, got %s", allTasks[2].ID)
+	if task.ID != "task-teacher" {
+		t.Errorf("expected teacher next, got %s", task.ID)
 	}
 }
 
-// TestMoveToTop_NonPending verifies that non-pending tasks cannot be moved.
-func TestMoveToTop_NonPending(t *testing.T) {
+// TestNextPendingTaskForTags_PriorityOrder verifies that tag-filtered
+// tasks are also ordered by priority.
+func TestNextPendingTaskForTags_PriorityOrder(t *testing.T) {
 	q := newTestQueue(t)
 
-	q.Add(&Task{ID: "task-1", Prompt: "Task 1"})
-	q.Add(&Task{ID: "task-2", Prompt: "Task 2"})
+	q.Add(&Task{ID: "task-low", Prompt: "Low", Tags: []string{"tag"}, Priority: PriorityOrangutan})
+	q.Add(&Task{ID: "task-high", Prompt: "High", Tags: []string{"tag"}, Priority: PriorityFirefighter})
+	q.Add(&Task{ID: "task-mid", Prompt: "Mid", Tags: []string{"tag"}, Priority: PriorityTeacher})
 
-	// Assign task-1 so it's no longer pending
-	q.Assign("task-1", "guest-1")
-
-	err := q.MoveToTop("task-1")
-	if err == nil {
-		t.Error("expected error for moving non-pending task, got nil")
+	task := q.NextPendingTaskForTags([]string{"tag"})
+	if task == nil {
+		t.Fatal("expected a matching task")
 	}
-
-	// Verify order unchanged
-	task := q.NextPendingTask()
-	if task == nil || task.ID != "task-2" {
-		t.Errorf("expected task-2 (unchanged), got %v", task)
-	}
-}
-
-// TestMoveToTop_NonExistent verifies that moving a nonexistent task fails.
-func TestMoveToTop_NonExistent(t *testing.T) {
-	q := newTestQueue(t)
-
-	q.Add(&Task{ID: "task-1", Prompt: "Task 1"})
-
-	err := q.MoveToTop("nonexistent")
-	if err == nil {
-		t.Error("expected error for nonexistent task, got nil")
-	}
-}
-
-// TestMoveToTop_AlreadyFirst verifies that moving the first task to top
-// is a no-op (no error, order unchanged).
-func TestMoveToTop_AlreadyFirst(t *testing.T) {
-	q := newTestQueue(t)
-
-	q.Add(&Task{ID: "task-1", Prompt: "Task 1"})
-	q.Add(&Task{ID: "task-2", Prompt: "Task 2"})
-
-	err := q.MoveToTop("task-1")
-	if err != nil {
-		t.Fatalf("MoveToTop failed: %v", err)
-	}
-
-	// Order should still be task-1, task-2
-	allTasks := q.GetAllTasks()
-	if len(allTasks) != 2 {
-		t.Fatalf("expected 2 tasks, got %d", len(allTasks))
-	}
-	if allTasks[0].ID != "task-1" {
-		t.Errorf("expected task-1 first, got %s", allTasks[0].ID)
-	}
-	if allTasks[1].ID != "task-2" {
-		t.Errorf("expected task-2 second, got %s", allTasks[1].ID)
+	if task.ID != "task-high" {
+		t.Errorf("expected high priority first, got %s", task.ID)
 	}
 }
