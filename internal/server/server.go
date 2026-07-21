@@ -1370,7 +1370,7 @@ func (s *Server) handleCreateTask(w http.ResponseWriter, r *http.Request) {
 
 	// Validate priority if specified
 	if task.Priority != "" && !queue.ValidatePriority(task.Priority) {
-		http.Error(w, fmt.Sprintf("invalid priority %q (must be 🧑‍🚒, 🧑‍🏫, or 🦧)", task.Priority), http.StatusBadRequest)
+		http.Error(w, fmt.Sprintf("invalid priority %q (must be firefighter, teacher, or orangutan)", task.Priority), http.StatusBadRequest)
 		return
 	}
 

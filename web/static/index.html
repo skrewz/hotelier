@@ -211,7 +211,6 @@
         .badge-completed { background: #052e16; color: #22c55e; }
         .badge-failed { background: #450a0a; color: #ef4444; }
         .badge-cancelled { background: #1c1917; color: #78716c; }
-        .persona-badge { display: inline-block; padding: 0.125rem 0.375rem; border-radius: 0.25rem; font-size: 0.625rem; font-weight: 600; background: #1e1045; color: #c4b5fd; }
         .badge-priority { background: #1e293b; color: #fbbf24; margin-left: 0.25rem; }
         .task-error { background: #1c0a0a; border: 1px solid #7f1d1d; border-radius: 0.375rem; padding: 0.75rem 1rem; margin-bottom: 1rem; font-size: 0.85rem; color: #fca5a5; line-height: 1.5; }
         .task-error-label { font-weight: 600; color: #ef4444; margin-bottom: 0.25rem; font-size: 0.75rem; text-transform: uppercase; letter-spacing: 0.05em; }
@@ -296,6 +295,20 @@
                     <div class="form-group">
                         <label>Tags (comma-separated, optional)</label>
                         <input type="text" id="task-tags" placeholder="business-default, android">
+                    </div>
+                    <div class="form-group">
+                        <label>Priority</label>
+                        <div style="display:flex;gap:0.5rem;">
+                            <label style="display:flex;align-items:center;gap:0.25rem;cursor:pointer;font-size:0.85rem;color:#e2e8f0;">
+                                <input type="radio" name="task-priority" value="firefighter">🧑‍🚒 Firefighter
+                            </label>
+                            <label style="display:flex;align-items:center;gap:0.25rem;cursor:pointer;font-size:0.85rem;color:#e2e8f0;">
+                                <input type="radio" name="task-priority" value="teacher">🧑‍🏫 Teacher
+                            </label>
+                            <label style="display:flex;align-items:center;gap:0.25rem;cursor:pointer;font-size:0.85rem;color:#e2e8f0;">
+                                <input type="radio" name="task-priority" value="orangutan" checked>🦧 Orangutan
+                            </label>
+                        </div>
                     </div>
                     <button class="btn" onclick="submitTask()">Submit Task</button>
                 </div>
@@ -573,10 +586,10 @@
                 const rerunBtn = isRerunnable ? `<button class="btn btn-sm btn-ghost" onclick="event.stopPropagation(); rerunTask('${t.id}')">🔄</button>` : '';
                 const btnRow = (rerunBtn || cancelBtn) ? `<div class="task-btn-row">${rerunBtn}${cancelBtn}</div>` : '';
                 const logCount = t.log_count != null ? ` · ${t.log_count} log${t.log_count === 1 ? '' : 's'}` : '';
-                const personaBadge = t.persona ? ` <span class="persona-badge" title="Persona: ${escapeHtml(t.persona)}">🧑 ${escapeHtml(t.persona)}</span>` : '';
+                // Priority label shown only for PENDING tasks
                 const priorityLabel = t.status === 'PENDING' && t.priority ? `<span class="badge badge-priority" title="Priority">🔜${priorityToEmoji(t.priority)}</span>` : '';
                 return `<div class="task-item ${itemClass}${isActive}" onclick="selectTask('${t.id}')">
-                    <div class="task-id">${t.id} <span class="badge ${badgeClass}">${t.status}</span>${personaBadge}${priorityLabel}</div>
+                    <div class="task-id">${t.id} <span class="badge ${badgeClass}">${t.status}</span>${priorityLabel}</div>
                     <div class="task-meta">${t.assigned_to ? '→ ' + t.assigned_to : 'unassigned'} · ${new Date(t.created_at).toLocaleString()}${logCount}</div>
                     <div class="task-prompt">${escapeHtml(t.prompt.substring(0, 120))}${t.prompt.length > 120 ? '...' : ''}</div>
                     ${errorHtml}
@@ -834,15 +847,6 @@
             return div.innerHTML;
         }
 
-        // getFirstLine extracts the first line of text, truncated to maxLen chars.
-        function getFirstLine(text, maxLen) {
-            if (!text) return '';
-            maxLen = maxLen || THINKING_PREVIEW_MAX_LEN;
-            const line = text.split('\n')[0] || text;
-            if (line.length > maxLen) return line.substring(0, maxLen) + '…';
-            return line;
-        }
-
         // priorityToEmoji maps the API priority string to its display emoji.
         // API values are plain English: "firefighter", "teacher", "orangutan".
         function priorityToEmoji(priority) {
@@ -852,6 +856,15 @@
                 'orangutan': '🦧'
             };
             return map[priority] || priority;
+        }
+
+        // getFirstLine extracts the first line of text, truncated to maxLen chars.
+        function getFirstLine(text, maxLen) {
+            if (!text) return '';
+            maxLen = maxLen || THINKING_PREVIEW_MAX_LEN;
+            const line = text.split('\n')[0] || text;
+            if (line.length > maxLen) return line.substring(0, maxLen) + '…';
+            return line;
         }
 
         // formatTimestamp returns a local HH:MM string from a Date or ISO string.
@@ -895,7 +908,7 @@
         }
 
         // patchTaskDetailMeta updates only the header metadata (status badge,
-        // persona badge, log count) of the active task detail view. It does NOT touch the
+        // log count) of the active task detail view. It does NOT touch the
         // .task-detail-body, so open/closed state of tool blocks and thinking
         // blocks is preserved across polling refreshes.
         async function patchTaskDetailMeta(taskId) {
@@ -912,26 +925,6 @@
                     const badgeClass = `badge-${task.status.toLowerCase()}`;
                     badgeEl.className = `badge ${badgeClass}`;
                     badgeEl.textContent = task.status;
-                }
-
-                // Update persona badge in header (add, remove, or keep)
-                const detailIdEl = document.querySelector('.task-detail-id');
-                if (detailIdEl) {
-                    const existingPersona = detailIdEl.querySelector('.persona-badge');
-                    if (task.persona) {
-                        if (existingPersona) {
-                            existingPersona.textContent = `🧑 ${escapeHtml(task.persona)}`;
-                            existingPersona.title = `Persona: ${escapeHtml(task.persona)}`;
-                        } else {
-                            const span = document.createElement('span');
-                            span.className = 'persona-badge';
-                            span.title = `Persona: ${escapeHtml(task.persona)}`;
-                            span.textContent = `🧑 ${escapeHtml(task.persona)}`;
-                            detailIdEl.appendChild(span);
-                        }
-                    } else if (existingPersona) {
-                        existingPersona.remove();
-                    }
                 }
 
                 // Update log count in header meta
@@ -953,7 +946,6 @@
             if (!task) return;
 
             const badgeClass = `badge-${task.status.toLowerCase()}`;
-            const personaBadge = task.persona ? `<span class="persona-badge" title="Persona: ${escapeHtml(task.persona)}">🧑 ${escapeHtml(task.persona)}</span>` : '';
             const promptMarkdown = renderMarkdown(task.prompt);
             // Extract first line of prompt for collapsed preview
             const promptPreview = getFirstLine(task.prompt, PROMPT_PREVIEW_MAX_LEN);
@@ -1107,7 +1099,7 @@
             detailContainer.innerHTML = `
                 <div class="task-detail-header">
                     <div>
-                        <div class="task-detail-id">${escapeHtml(task.id)} <span class="badge ${badgeClass}">${task.status}</span>${personaBadge}</div>
+                        <div class="task-detail-id">${escapeHtml(task.id)} <span class="badge ${badgeClass}">${task.status}</span></div>
                         <div class="task-detail-meta">${task.assigned_to ? 'Guest: ' + escapeHtml(task.assigned_to) : 'Unassigned'} · ${logs.length} log entries</div>
                     </div>
                     <div style="display:flex;gap:0.5rem;align-items:center;">
@@ -1156,6 +1148,8 @@
         async function submitTask() {
             const prompt = document.getElementById('task-prompt').value;
             const tags = document.getElementById('task-tags').value;
+            const priorityRadio = document.querySelector('input[name="task-priority"]:checked');
+            const priority = priorityRadio ? priorityRadio.value : 'orangutan';
 
             if (!prompt) {
                 alert('Prompt is required');
@@ -1164,7 +1158,8 @@
 
             const task = {
                 prompt: prompt,
-                tags: tags ? tags.split(',').map(s => s.trim()).filter(Boolean) : []
+                tags: tags ? tags.split(',').map(s => s.trim()).filter(Boolean) : [],
+                priority: priority
             };
 
             try {
@@ -1222,24 +1217,6 @@
             } catch (e) {
                 console.error('cancel failed:', e);
                 alert('Failed to cancel task: ' + e.message);
-            }
-        }
-
-        // bringToTop moves a PENDING task to the front of the queue.
-        async function bringToTop(taskId) {
-            try {
-                const res = await fetch('/api/tasks/' + taskId + '/top', {
-                    method: 'POST',
-                });
-                if (!res.ok) {
-                    const errText = await res.text();
-                    alert('Failed to move task to top: ' + errText);
-                    return;
-                }
-                refresh();
-            } catch (e) {
-                console.error('bringToTop failed:', e);
-                alert('Failed to move task to top: ' + e.message);
             }
         }
 

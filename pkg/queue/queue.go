@@ -74,16 +74,21 @@ func (s *TaskStatus) UnmarshalJSON(data []byte) error {
 // Priority levels — derived from Futurama "The Problem with Popplers".
 // Higher priority tasks are served first from the pending queue.
 //
+// API values are plain English strings. The UI maps these to emoji:
+//   - firefighter → 🧑‍🚒
+//   - teacher → 🧑‍🏫
+//   - orangutan → 🦧
+//
 // Reference: https://futurama.fandom.com/wiki/The_Problem_with_Popplers/Transcript
 const (
-	// PriorityFirefighter is the highest priority level. emoji: 🧑‍🚒
-	PriorityFirefighter = "🧑‍🚒"
+	// PriorityFirefighter is the highest priority level. Display: 🧑‍🚒
+	PriorityFirefighter = "firefighter"
 
-	// PriorityTeacher is the medium priority level. emoji: 🧑‍🏫
-	PriorityTeacher = "🧑‍🏫"
+	// PriorityTeacher is the medium priority level. Display: 🧑‍🏫
+	PriorityTeacher = "teacher"
 
-	// PriorityOrangutan is the lowest (default) priority level. emoji: 🦧
-	PriorityOrangutan = "🦧"
+	// PriorityOrangutan is the lowest (default) priority level. Display: 🦧
+	PriorityOrangutan = "orangutan"
 )
 
 // validPriorities lists all accepted priority values in descending order
@@ -118,8 +123,8 @@ type Task struct {
 	ID         string     `json:"id"`
 	Prompt     string     `json:"prompt"`
 	Tags       []string   `json:"tags"`
-	Persona    string     `json:"persona,omitempty"`       // persona name to apply (optional)
-	Priority   string     `json:"priority,omitempty"`      // priority level: 🧑‍🚒, 🧑‍🏫, or 🦧 (default)
+	Persona    string     `json:"persona,omitempty"`  // persona name to apply (optional)
+	Priority   string     `json:"priority,omitempty"` // priority level: firefighter, teacher, or orangutan (default)
 	Status     TaskStatus `json:"status"`
 	CreatedAt  time.Time  `json:"created_at"`
 	AssignedTo string     `json:"assigned_to,omitempty"`
@@ -445,8 +450,6 @@ func (q *TaskQueue) validTransition(from, to TaskStatus) bool {
 	}
 	return false
 }
-
-
 
 // sortPendingByPriority sorts pending tasks by priority (highest first),
 // then by creation time (FIFO within same priority). The caller must hold
