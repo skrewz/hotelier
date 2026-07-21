@@ -574,7 +574,7 @@
                 const rerunBtn = isRerunnable ? `<button class="btn btn-sm btn-ghost" onclick="event.stopPropagation(); rerunTask('${t.id}')">🔄</button>` : '';
                 const btnRow = (rerunBtn || topBtn || cancelBtn) ? `<div class="task-btn-row">${rerunBtn}${topBtn}${cancelBtn}</div>` : '';
                 const logCount = t.log_count != null ? ` · ${t.log_count} log${t.log_count === 1 ? '' : 's'}` : '';
-                const personaBadge = t.persona ? ` <span class="persona-badge">🧑 ${escapeHtml(t.persona)}</span>` : '';
+                const personaBadge = t.persona ? ` <span class="persona-badge" title="Persona: ${escapeHtml(t.persona)}">🧑 ${escapeHtml(t.persona)}</span>` : '';
                 return `<div class="task-item ${itemClass}${isActive}" onclick="selectTask('${t.id}')">
                     <div class="task-id">${t.id} <span class="badge ${badgeClass}">${t.status}</span>${personaBadge}</div>
                     <div class="task-meta">${t.assigned_to ? '→ ' + t.assigned_to : 'unassigned'} · ${new Date(t.created_at).toLocaleString()}${logCount}</div>
@@ -884,7 +884,7 @@
         }
 
         // patchTaskDetailMeta updates only the header metadata (status badge,
-        // log count) of the active task detail view. It does NOT touch the
+        // persona badge, log count) of the active task detail view. It does NOT touch the
         // .task-detail-body, so open/closed state of tool blocks and thinking
         // blocks is preserved across polling refreshes.
         async function patchTaskDetailMeta(taskId) {
@@ -910,9 +910,11 @@
                     if (task.persona) {
                         if (existingPersona) {
                             existingPersona.textContent = `🧑 ${escapeHtml(task.persona)}`;
+                            existingPersona.title = `Persona: ${escapeHtml(task.persona)}`;
                         } else {
                             const span = document.createElement('span');
                             span.className = 'persona-badge';
+                            span.title = `Persona: ${escapeHtml(task.persona)}`;
                             span.textContent = `🧑 ${escapeHtml(task.persona)}`;
                             detailIdEl.appendChild(span);
                         }
@@ -940,7 +942,7 @@
             if (!task) return;
 
             const badgeClass = `badge-${task.status.toLowerCase()}`;
-            const personaBadge = task.persona ? `<span class="persona-badge">🧑 ${escapeHtml(task.persona)}</span>` : '';
+            const personaBadge = task.persona ? `<span class="persona-badge" title="Persona: ${escapeHtml(task.persona)}">🧑 ${escapeHtml(task.persona)}</span>` : '';
             const promptMarkdown = renderMarkdown(task.prompt);
             // Extract first line of prompt for collapsed preview
             const promptPreview = getFirstLine(task.prompt, PROMPT_PREVIEW_MAX_LEN);
