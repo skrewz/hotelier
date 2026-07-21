@@ -1314,7 +1314,6 @@ func (s *Server) handleGetTasks(w http.ResponseWriter, r *http.Request) {
 			"id":          t.ID,
 			"prompt":      t.Prompt,
 			"tags":        t.Tags,
-			"persona":     t.Persona,
 			"priority":    t.Priority,
 			"status":      t.Status.String(),
 			"created_at":  t.CreatedAt,
@@ -1460,7 +1459,6 @@ func (s *Server) handleTaskRerun(w http.ResponseWriter, r *http.Request, taskID 
 		ID:       fmt.Sprintf("task-%d", time.Now().UnixNano()),
 		Prompt:   orig.Prompt,
 		Tags:     orig.Tags,
-		Persona:  orig.Persona,
 		Priority: orig.Priority,
 	}
 
