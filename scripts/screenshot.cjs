@@ -32,7 +32,7 @@ for (const g of guests) {
 
 (async () => {
   // Create a sample task with a tag no guest matches so it stays PENDING.
-  // This ensures the "bring to top" button (🔝) is visible in the screenshot.
+  // This ensures the priority badge (🔜🧑‍🚒) is visible in the screenshot.
   const taskRes = await fetch(`${serverUrl}/api/tasks`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -41,10 +41,11 @@ for (const g of guests) {
       prompt: 'Build a responsive landing page with hero section and feature grid',
       tags: ['screenshot-only'],
       persona: 's-autonomics-implementer',
+      priority: 'firefighter',
     }),
   });
   const task = await taskRes.json();
-  console.log('Created task:', task.id, 'status:', task.status);
+  console.log('Created task:', task.id, 'status:', task.status, 'priority:', task.priority);
 
   // Wait for UI to settle
   await new Promise(r => setTimeout(r, 1500));
@@ -56,7 +57,7 @@ for (const g of guests) {
   await page.waitForLoadState('networkidle');
   await page.waitForTimeout(1000);
 
-  // Activate PENDING filter so the pending task (and its 🔝 button) is visible.
+  // Activate PENDING filter so the pending task (and its priority badge) is visible.
   // PENDING tasks are hidden by default.
   const pendingFilterBtn = await page.$('button[data-status="PENDING"]');
   if (pendingFilterBtn) {
