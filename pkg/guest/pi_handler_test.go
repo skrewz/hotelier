@@ -1052,6 +1052,62 @@ func TestPIHandler_PrepareTaskDir_WithRepoRef(t *testing.T) {
 	}
 }
 
+// TestPIHandler_PrepareTaskDir_WithPersonaNoRepoRef verifies that
+// prepareTaskDir applies persona files even when repo_ref is empty.
+// This is a regression test for the bug where persona files were only
+// applied inside the repo_ref branch of prepareTaskDir.
+func TestPIHandler_PrepareTaskDir_WithPersonaNoRepoRef(t *testing.T) {
+	baseDir, err := os.MkdirTemp("", "hotelier-base-*")
+	if err != nil {
+		t.Fatalf("create temp base dir: %v", err)
+	}
+	defer os.RemoveAll(baseDir)
+
+	// Create a persona that copies a file
+	credFile := filepath.Join(baseDir, "cred-file")
+	if err := os.WriteFile(credFile, []byte("secret"), 0o600); err != nil {
+		t.Fatalf("create credential file: %v", err)
+	}
+
+	p := &persona.Persona{
+		Name: "test-persona",
+		Files: []persona.FileCopy{
+			{From: credFile, To: ".git-credentials"},
+		},
+		Env: map[string]string{
+			"GIT_CONFIG_COUNT": "1",
+		},
+	}
+
+	client := pi.NewClient(pi.PiClientConfig{
+		CWD: baseDir,
+		Log: log.New(io.Discard, "", 0),
+	})
+
+	h := &PIHandler{
+		baseCWD: baseDir,
+		client:  client,
+		log:     log.New(io.Discard, "", 0),
+	}
+
+	taskDir, err := h.prepareTaskDir(context.Background(), "task-persona-no-repo", "", nil, p)
+	if err != nil {
+		t.Fatalf("prepareTaskDir failed: %v", err)
+	}
+
+	// The task directory should exist with the persona file applied
+	expectedDir := filepath.Join(baseDir, "tasks", "task-persona-no-repo")
+	if taskDir != expectedDir {
+		t.Errorf("expected %q, got %q", expectedDir, taskDir)
+	}
+
+	// The persona file should be present
+	credDest := filepath.Join(taskDir, ".git-credentials")
+	if _, err := os.Stat(credDest); os.IsNotExist(err) {
+		t.Error("expected persona file .git-credentials to exist in task dir (applied without repo_ref)")
+	}
+}
+
 // TestPIHandler_PrepareTaskDir_NoRepoRef verifies that prepareTaskDir
 // works without a repo_ref (existing behaviour).
 func TestPIHandler_PrepareTaskDir_NoRepoRef(t *testing.T) {

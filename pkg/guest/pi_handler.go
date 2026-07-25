@@ -164,8 +164,18 @@ func (h *PIHandler) ExecuteTask(ctx context.Context, task TaskAssignment, sendLo
 		}
 	}()
 
+	// Apply persona files if not already done inside prepareTaskDir
+	// (i.e. when repoRef is empty). Files must be applied before
+	// resolving env vars so that <workpath> substitutions work correctly.
+	if task.Persona != nil && task.RepoRef == "" {
+		if err := task.Persona.ApplyFiles(workDir); err != nil {
+			return nil, fmt.Errorf("apply persona files: %w", err)
+		}
+	}
+
 	// Resolve persona env vars for the pi subprocess.
-	// Files were already applied inside prepareTaskDir.
+	// Files were already applied inside prepareTaskDir (when repoRef is set)
+	// or just above (when repoRef is empty).
 	var personaEnv map[string]string
 	if task.Persona != nil {
 		personaEnv = task.Persona.ResolvedEnv(workDir)
@@ -500,6 +510,15 @@ func (h *PIHandler) prepareTaskDir(ctx context.Context, taskID, repoRef string, 
 		return taskDir, nil
 	}
 
+	// Apply persona files when no repo is being cloned.
+	// When repoRef is set, persona files are applied before and after
+	// the clone inside the repoRef branch above.
+	if persona != nil {
+		if err := persona.ApplyFiles(taskDir); err != nil {
+			return "", fmt.Errorf("apply persona files: %w", err)
+		}
+	}
+
 	h.log.Printf("[WORKDIR] using task dir: %s", taskDir)
 	if sendLog != nil {
 		_ = sendLog(LogEntry{TaskID: taskID, Line: fmt.Sprintf("Using task directory: %s", taskDir), Level: "system"})
@@ -527,19 +546,17 @@ func (h *PIHandler) cloneRepo(ctx context.Context, taskDir, repoRef string, send
 	}
 	defer os.RemoveAll(tmpDir)
 
-	// Build git clone command with persona environment
+	// Build git clone command with persona environment.
+	// Start from the host environment and overlay persona vars so that
+	// essential variables (HOME, USER, TERM, LANG) are preserved.
 	cmd := exec.CommandContext(ctx, "git", "clone", repoRef, tmpDir)
-	if len(personaEnv) > 0 {
-		cmd.Env = make([]string, 0, len(personaEnv))
-		for k, v := range personaEnv {
-			cmd.Env = append(cmd.Env, fmt.Sprintf("%s=%s", k, v))
-		}
-		// Ensure PATH is set so git can find dependencies
-		if _, ok := personaEnv["PATH"]; !ok {
-			cmd.Env = append(cmd.Env, fmt.Sprintf("PATH=%s", os.Getenv("PATH")))
-		}
-	} else {
-		cmd.Env = os.Environ()
+	cmd.Env = os.Environ()
+	for k, v := range personaEnv {
+		cmd.Env = append(cmd.Env, fmt.Sprintf("%s=%s", k, v))
+	}
+	// Ensure PATH is set so git can find dependencies
+	if _, ok := personaEnv["PATH"]; !ok {
+		cmd.Env = append(cmd.Env, fmt.Sprintf("PATH=%s", os.Getenv("PATH")))
 	}
 
 	output, err := cmd.CombinedOutput()
