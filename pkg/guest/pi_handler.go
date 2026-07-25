@@ -164,18 +164,9 @@ func (h *PIHandler) ExecuteTask(ctx context.Context, task TaskAssignment, sendLo
 		}
 	}()
 
-	// Apply persona files if not already done inside prepareTaskDir
-	// (i.e. when repoRef is empty). Files must be applied before
-	// resolving env vars so that <workpath> substitutions work correctly.
-	if task.Persona != nil && task.RepoRef == "" {
-		if err := task.Persona.ApplyFiles(workDir); err != nil {
-			return nil, fmt.Errorf("apply persona files: %w", err)
-		}
-	}
-
 	// Resolve persona env vars for the pi subprocess.
-	// Files were already applied inside prepareTaskDir (when repoRef is set)
-	// or just above (when repoRef is empty).
+	// Files were already applied inside prepareTaskDir for both
+	// the repo and non-repo paths.
 	var personaEnv map[string]string
 	if task.Persona != nil {
 		personaEnv = task.Persona.ResolvedEnv(workDir)
