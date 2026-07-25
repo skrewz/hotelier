@@ -1314,6 +1314,7 @@ func (s *Server) handleGetTasks(w http.ResponseWriter, r *http.Request) {
 			"id":          t.ID,
 			"prompt":      t.Prompt,
 			"tags":        t.Tags,
+			"persona":     t.Persona,
 			"status":      t.Status.String(),
 			"created_at":  t.CreatedAt,
 			"assigned_to": t.AssignedTo,

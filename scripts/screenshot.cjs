@@ -40,6 +40,7 @@ for (const g of guests) {
       id: 'screenshot-demo-task',
       prompt: 'Build a responsive landing page with hero section and feature grid',
       tags: ['screenshot-only'],
+      persona: 's-autonomics-implementer',
     }),
   });
   const task = await taskRes.json();
