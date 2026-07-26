@@ -132,8 +132,8 @@ func TestPersona_ApplyFiles_multiple_files(t *testing.T) {
 
 	// Verify all files were copied
 	expectedFiles := map[string]string{
-		".tokens/s-autonomics-implementer":    "secret1",
-		".tokens/s-autonomics-reviewer":       "secret2",
+		".tokens/s-autonomics-implementer":             "secret1",
+		".tokens/s-autonomics-reviewer":                "secret2",
 		".forgejo-gitconfigs/s-autonomics-implementer": "git config content",
 	}
 	for relPath, expectedContent := range expectedFiles {
@@ -146,6 +146,55 @@ func TestPersona_ApplyFiles_multiple_files(t *testing.T) {
 		if string(data) != expectedContent {
 			t.Errorf("unexpected content for %s: got %q, want %q", relPath, string(data), expectedContent)
 		}
+	}
+}
+
+func TestPersona_ApplyFiles_readonly_source_reapply(t *testing.T) {
+	// Regression test: when a source file has mode 0o400 (read-only),
+	// re-applying it after it already exists in the work dir must not
+	// fail with "permission denied". This can happen when ApplyFiles is
+	// called twice — e.g. before and after a repo clone.
+	workDir := t.TempDir()
+	srcDir := t.TempDir()
+
+	srcFile := filepath.Join(srcDir, "token")
+	if err := os.WriteFile(srcFile, []byte("secret"), 0o400); err != nil {
+		t.Fatalf("failed to create source file: %v", err)
+	}
+
+	p := &Persona{
+		Name: "test-persona",
+		Files: []FileCopy{
+			{From: srcFile, To: ".tokens/token"},
+		},
+	}
+
+	// First apply — creates the file with mode 0o400.
+	if err := p.ApplyFiles(workDir); err != nil {
+		t.Fatalf("first ApplyFiles failed: %v", err)
+	}
+
+	// Verify first apply set read-only permissions.
+	info, err := os.Stat(filepath.Join(workDir, ".tokens", "token"))
+	if err != nil {
+		t.Fatalf("failed to stat dest file: %v", err)
+	}
+	if info.Mode().Perm() != 0o400 {
+		t.Errorf("expected mode 0o400 after first apply, got %o", info.Mode().Perm())
+	}
+
+	// Second apply — must not fail even though the dest is read-only.
+	if err := p.ApplyFiles(workDir); err != nil {
+		t.Fatalf("second ApplyFiles failed (re-apply of read-only source): %v", err)
+	}
+
+	// Verify the file was overwritten with correct content.
+	data, err := os.ReadFile(filepath.Join(workDir, ".tokens", "token"))
+	if err != nil {
+		t.Fatalf("failed to read overwritten file: %v", err)
+	}
+	if string(data) != "secret" {
+		t.Errorf("unexpected content: %q", string(data))
 	}
 }
 
