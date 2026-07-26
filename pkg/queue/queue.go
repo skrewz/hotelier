@@ -75,8 +75,8 @@ type Task struct {
 	ID         string     `json:"id"`
 	Prompt     string     `json:"prompt"`
 	Tags       []string   `json:"tags"`
-	RepoRef    string     `json:"repo_ref,omitempty"`    // git repository URL to clone (optional)
-	Persona    string     `json:"persona,omitempty"`     // persona name to apply (optional)
+	RepoRef    string     `json:"repo_ref,omitempty"` // git repository URL to clone (optional)
+	Persona    string     `json:"persona,omitempty"`  // persona name to apply (optional)
 	Status     TaskStatus `json:"status"`
 	CreatedAt  time.Time  `json:"created_at"`
 	AssignedTo string     `json:"assigned_to,omitempty"`
