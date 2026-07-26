@@ -976,3 +976,51 @@ func TestNextPendingTaskForTags_PriorityOrder(t *testing.T) {
 		t.Errorf("expected high priority first, got %s", task.ID)
 	}
 }
+
+// TestTask_RepoRefField verifies that the RepoRef field is correctly
+// stored and retrieved on tasks.
+func TestTask_RepoRefField(t *testing.T) {
+	q := newTestQueue(t)
+
+	task := &Task{
+		ID:      "task-repo",
+		Prompt:  "Build a feature",
+		RepoRef: "https://github.com/user/repo.git",
+	}
+
+	if err := q.Add(task); err != nil {
+		t.Fatalf("Add failed: %v", err)
+	}
+
+	retrieved, ok := q.Get("task-repo")
+	if !ok {
+		t.Fatal("task not found")
+	}
+
+	if retrieved.RepoRef != "https://github.com/user/repo.git" {
+		t.Errorf("expected RepoRef 'https://github.com/user/repo.git', got %q", retrieved.RepoRef)
+	}
+}
+
+// TestTask_RepoRefEmpty verifies that tasks without RepoRef work correctly.
+func TestTask_RepoRefEmpty(t *testing.T) {
+	q := newTestQueue(t)
+
+	task := &Task{
+		ID:     "task-no-repo",
+		Prompt: "Just a prompt",
+	}
+
+	if err := q.Add(task); err != nil {
+		t.Fatalf("Add failed: %v", err)
+	}
+
+	retrieved, ok := q.Get("task-no-repo")
+	if !ok {
+		t.Fatal("task not found")
+	}
+
+	if retrieved.RepoRef != "" {
+		t.Errorf("expected empty RepoRef, got %q", retrieved.RepoRef)
+	}
+}

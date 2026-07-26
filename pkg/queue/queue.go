@@ -123,6 +123,7 @@ type Task struct {
 	ID         string     `json:"id"`
 	Prompt     string     `json:"prompt"`
 	Tags       []string   `json:"tags"`
+	RepoRef    string     `json:"repo_ref,omitempty"` // git repository URL to clone (optional)
 	Persona    string     `json:"persona,omitempty"`  // persona name to apply (optional)
 	Priority   string     `json:"priority,omitempty"` // priority level: firefighter, teacher, or orangutan (default)
 	Status     TaskStatus `json:"status"`

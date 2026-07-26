@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -136,34 +137,42 @@ func (h *PIHandler) ExecuteTask(ctx context.Context, task TaskAssignment, sendLo
 		h.log.Printf("[PI] failed to send operational log: %v", err)
 	}
 
-	// Create a task-specific working directory.
-	workDir, err := h.prepareTaskDir(ctx, task.TaskID, sendLog)
-	if err != nil {
-		return nil, fmt.Errorf("prepare task dir: %w", err)
+	// Apply persona logging (the actual file application happens inside
+	// prepareTaskDir — before the clone for repo_ref, or unconditionally
+	// otherwise — so credentials are available for git auth).
+	if task.Persona != nil {
+		h.log.Printf("[PERSONA] applying persona %q for task %s", task.Persona.Name, task.TaskID)
+		if err := sendLog(LogEntry{TaskID: task.TaskID, Line: fmt.Sprintf("Applying persona: %s", task.Persona.Name), Level: "system"}); err != nil {
+			h.log.Printf("[PERSONA] failed to send persona log: %v", err)
+		}
 	}
 
+	// Create a task-specific working directory.
+	// If the task has a repo_ref, the repo is cloned here.
+	// If a persona is specified, its files are applied before the clone
+	// (for credentials) and re-applied after (for overlays).
 	// Clean up the task directory when the task completes (success or failure).
-	// Guests should clean up after themselves.
+	// Guests should clean up after themselves. Set up the defer before
+	// prepareTaskDir so the error path also gets cleaned up (e.g. if
+	// cloneRepo fails and leaves an empty task directory behind).
 	defer func() {
 		if err := h.cleanupTaskDir(task.TaskID); err != nil {
 			h.log.Printf("[CLEANUP] failed to remove task directory: %v", err)
 		}
 	}()
 
-	// Apply persona if specified
+	workDir, err := h.prepareTaskDir(ctx, task.TaskID, task.RepoRef, sendLog, task.Persona)
+	if err != nil {
+		return nil, fmt.Errorf("prepare task dir: %w", err)
+	}
+
+	// Resolve persona env vars for the pi subprocess.
+	// Files were already applied inside prepareTaskDir for both
+	// the repo and non-repo paths.
 	var personaEnv map[string]string
 	if task.Persona != nil {
-		h.log.Printf("[PERSONA] applying persona %q for task %s", task.Persona.Name, task.TaskID)
-		if err := sendLog(LogEntry{TaskID: task.TaskID, Line: fmt.Sprintf("Applying persona: %s", task.Persona.Name), Level: "system"}); err != nil {
-			h.log.Printf("[PERSONA] failed to send persona log: %v", err)
-		}
-
-		personaEnv, err = persona.ApplyPersona(task.Persona, workDir)
-		if err != nil {
-			return nil, fmt.Errorf("apply persona %q: %w", task.Persona.Name, err)
-		}
-
-		h.log.Printf("[PERSONA] applied persona %q: %d env vars, %d file copies", task.Persona.Name, len(personaEnv), len(task.Persona.Files))
+		personaEnv = task.Persona.ResolvedEnv(workDir)
+		h.log.Printf("[PERSONA] resolved persona %q: %d env vars, %d file copies", task.Persona.Name, len(personaEnv), len(task.Persona.Files))
 		if err := sendLog(LogEntry{TaskID: task.TaskID, Line: fmt.Sprintf("Persona %q applied: %d env vars, %d file copies", task.Persona.Name, len(personaEnv), len(task.Persona.Files)), Level: "system"}); err != nil {
 			h.log.Printf("[PERSONA] failed to send apply log: %v", err)
 		}
@@ -453,16 +462,131 @@ func (h *PIHandler) ExecuteTask(ctx context.Context, task TaskAssignment, sendLo
 
 // prepareTaskDir creates a task-specific directory and returns
 // the path to use as the working directory for the pi subprocess.
-func (h *PIHandler) prepareTaskDir(ctx context.Context, taskID string, sendLog func(LogEntry) error) (string, error) {
+// If repoRef is non-empty, the repository is cloned into the task directory
+// using git clone. If a persona is provided, its files are applied before
+// the clone (for credentials) and re-applied after (for overlays like
+// AGENTS.md). The persona's resolved environment variables are passed to
+// the git clone command for authentication.
+func (h *PIHandler) prepareTaskDir(ctx context.Context, taskID, repoRef string, sendLog func(LogEntry) error, persona *persona.Persona) (string, error) {
 	taskDir := filepath.Join(h.baseCWD, "tasks", taskID)
 	if err := os.MkdirAll(taskDir, 0o755); err != nil {
 		return "", fmt.Errorf("create task dir %s: %w", taskDir, err)
 	}
+
+	if repoRef != "" {
+		// Apply persona files before clone so credentials are available.
+		// (e.g. SSH keys, git configs)
+		if persona != nil {
+			if err := persona.ApplyFiles(taskDir); err != nil {
+				return "", fmt.Errorf("apply persona files before clone: %w", err)
+			}
+		}
+
+		// Resolve persona env for git clone credentials
+		var personaEnv map[string]string
+		if persona != nil {
+			personaEnv = persona.ResolvedEnv(taskDir)
+		}
+
+		if err := h.cloneRepo(ctx, taskDir, repoRef, sendLog, personaEnv); err != nil {
+			return "", err
+		}
+
+		// Diagnostic: log task dir state before re-applying persona.
+		h.log.Printf("[WORKDIR] task dir state before re-apply persona:")
+		filepath.Walk(taskDir, func(path string, info os.FileInfo, err error) error {
+			if err != nil {
+				return nil
+			}
+			rel, _ := filepath.Rel(taskDir, path)
+			h.log.Printf("[WORKDIR]   %s mode=%o", rel, info.Mode().Perm())
+			return nil
+		})
+
+		// Re-apply persona files after clone. The clone may have overwritten
+		// files that the persona wants to overlay (e.g. AGENTS.md).
+		if persona != nil {
+			if err := persona.ApplyFiles(taskDir); err != nil {
+				return "", fmt.Errorf("apply persona files after clone: %w", err)
+			}
+		}
+
+		return taskDir, nil
+	}
+
+	// Apply persona files when no repo is being cloned.
+	// When repoRef is set, persona files are applied before and after
+	// the clone inside the repoRef branch above.
+	if persona != nil {
+		if err := persona.ApplyFiles(taskDir); err != nil {
+			return "", fmt.Errorf("apply persona files: %w", err)
+		}
+	}
+
 	h.log.Printf("[WORKDIR] using task dir: %s", taskDir)
 	if sendLog != nil {
 		_ = sendLog(LogEntry{TaskID: taskID, Line: fmt.Sprintf("Using task directory: %s", taskDir), Level: "system"})
 	}
 	return taskDir, nil
+}
+
+// cloneRepo clones the specified git repository into the task directory.
+// The personaEnv map is passed to the git clone command so that persona-
+// provided credentials are available for authentication.
+// After cloning, the task directory contains the repo contents and the
+// pi subprocess will run inside it.
+func (h *PIHandler) cloneRepo(ctx context.Context, taskDir, repoRef string, sendLog func(LogEntry) error, personaEnv map[string]string) error {
+	h.log.Printf("[WORKDIR] cloning repo %q into %s", repoRef, taskDir)
+	if sendLog != nil {
+		_ = sendLog(LogEntry{TaskID: filepath.Base(taskDir), Line: fmt.Sprintf("Cloning repository: %s", repoRef), Level: "system"})
+	}
+
+	// Create a temporary directory for the clone, then move contents
+	// into the task directory. This avoids issues with git refusing to
+	// clone into a non-empty directory.
+	tmpDir, err := os.MkdirTemp(filepath.Dir(taskDir), "clone-*")
+	if err != nil {
+		return fmt.Errorf("create temp dir for clone: %w", err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	// Build git clone command with persona environment.
+	// Start from the host environment and overlay persona vars so that
+	// essential variables (HOME, USER, TERM, LANG) are preserved.
+	cmd := exec.CommandContext(ctx, "git", "clone", repoRef, tmpDir)
+	cmd.Env = os.Environ()
+	for k, v := range personaEnv {
+		cmd.Env = append(cmd.Env, fmt.Sprintf("%s=%s", k, v))
+	}
+
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("git clone %s: %w (output: %s)", repoRef, err, string(output))
+	}
+
+	// Move cloned contents into the task directory.
+	// git clone <url> <dir> puts contents directly in <dir>.
+	entries, err := os.ReadDir(tmpDir)
+	if err != nil {
+		return fmt.Errorf("read cloned dir %s: %w", tmpDir, err)
+	}
+
+	for _, entry := range entries {
+		src := filepath.Join(tmpDir, entry.Name())
+		dst := filepath.Join(taskDir, entry.Name())
+		entryInfo, _ := entry.Info()
+		h.log.Printf("[WORKDIR] moving %s (mode=%o) -> %s", entry.Name(), entryInfo.Mode().Perm(), dst)
+		if err := os.Rename(src, dst); err != nil {
+			return fmt.Errorf("move %s to %s: %w", src, dst, err)
+		}
+	}
+
+	h.log.Printf("[WORKDIR] cloned %q into %s", repoRef, taskDir)
+	if sendLog != nil {
+		_ = sendLog(LogEntry{TaskID: filepath.Base(taskDir), Line: fmt.Sprintf("Repository cloned: %s", repoRef), Level: "system"})
+	}
+
+	return nil
 }
 
 // restartClient restarts the pi subprocess using the handler's base CWD.

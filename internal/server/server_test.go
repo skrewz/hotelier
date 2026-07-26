@@ -153,6 +153,63 @@ func TestHandleTasks_POST_EmptyReposRejected(t *testing.T) {
 	}
 }
 
+func TestHandleTasks_POST_RepoRefAccepted(t *testing.T) {
+	srv := newTestServer(t)
+
+	task := map[string]interface{}{
+		"prompt":   "Build a feature",
+		"repo_ref": "https://github.com/user/repo.git",
+	}
+	body, _ := json.Marshal(task)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/tasks", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	srv.HandleTasks(w, req)
+
+	if w.Code != http.StatusCreated {
+		t.Fatalf("expected 201 when repo_ref is provided, got %d: %s", w.Code, w.Body.String())
+	}
+
+	var createdTask queue.Task
+	if err := json.Unmarshal(w.Body.Bytes(), &createdTask); err != nil {
+		t.Fatalf("failed to unmarshal response: %v", err)
+	}
+
+	if createdTask.RepoRef != "https://github.com/user/repo.git" {
+		t.Errorf("expected repo_ref 'https://github.com/user/repo.git', got %q", createdTask.RepoRef)
+	}
+}
+
+func TestHandleTasks_POST_RepoRefAndPersona(t *testing.T) {
+	srv := newTestServer(t)
+
+	task := map[string]interface{}{
+		"prompt":   "Build a feature",
+		"repo_ref": "https://github.com/user/repo.git",
+		"persona":  "",
+	}
+	body, _ := json.Marshal(task)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/tasks", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	srv.HandleTasks(w, req)
+
+	if w.Code != http.StatusCreated {
+		t.Fatalf("expected 201 when repo_ref and persona are provided, got %d: %s", w.Code, w.Body.String())
+	}
+
+	var createdTask queue.Task
+	if err := json.Unmarshal(w.Body.Bytes(), &createdTask); err != nil {
+		t.Fatalf("failed to unmarshal response: %v", err)
+	}
+
+	if createdTask.RepoRef != "https://github.com/user/repo.git" {
+		t.Errorf("expected repo_ref 'https://github.com/user/repo.git', got %q", createdTask.RepoRef)
+	}
+}
+
 func TestHandleTasks_POST_CustomID(t *testing.T) {
 	srv := newTestServer(t)
 

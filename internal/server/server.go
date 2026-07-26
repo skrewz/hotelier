@@ -1025,9 +1025,10 @@ func (s *Server) tryAssignTaskToEligible(taskID, skipGuestID string) {
 		}
 
 		taskData := map[string]interface{}{
-			"id":     task.ID,
-			"prompt": task.Prompt,
-			"tags":   task.Tags,
+			"id":       task.ID,
+			"prompt":   task.Prompt,
+			"tags":     task.Tags,
+			"repo_ref": task.RepoRef,
 		}
 
 		if task.Persona != "" {
@@ -1099,9 +1100,10 @@ func (s *Server) tryAssignTask(guestID string) {
 
 	// Push task to guest
 	taskData := map[string]interface{}{
-		"id":     matchedTask.ID,
-		"prompt": matchedTask.Prompt,
-		"tags":   matchedTask.Tags,
+		"id":       matchedTask.ID,
+		"prompt":   matchedTask.Prompt,
+		"tags":     matchedTask.Tags,
+		"repo_ref": matchedTask.RepoRef,
 	}
 
 	// Include persona data if specified
@@ -1314,6 +1316,7 @@ func (s *Server) handleGetTasks(w http.ResponseWriter, r *http.Request) {
 			"id":          t.ID,
 			"prompt":      t.Prompt,
 			"tags":        t.Tags,
+			"repo_ref":    t.RepoRef,
 			"persona":     t.Persona,
 			"priority":    t.Priority,
 			"status":      t.Status.String(),
@@ -1460,6 +1463,8 @@ func (s *Server) handleTaskRerun(w http.ResponseWriter, r *http.Request, taskID 
 		ID:       fmt.Sprintf("task-%d", time.Now().UnixNano()),
 		Prompt:   orig.Prompt,
 		Tags:     orig.Tags,
+		RepoRef:  orig.RepoRef,
+		Persona:  orig.Persona,
 		Priority: orig.Priority,
 	}
 
