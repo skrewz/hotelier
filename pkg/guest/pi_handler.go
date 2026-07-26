@@ -492,6 +492,17 @@ func (h *PIHandler) prepareTaskDir(ctx context.Context, taskID, repoRef string, 
 			return "", err
 		}
 
+		// Diagnostic: log task dir state before re-applying persona.
+		h.log.Printf("[WORKDIR] task dir state before re-apply persona:")
+		filepath.Walk(taskDir, func(path string, info os.FileInfo, err error) error {
+			if err != nil {
+				return nil
+			}
+			rel, _ := filepath.Rel(taskDir, path)
+			h.log.Printf("[WORKDIR]   %s mode=%o", rel, info.Mode().Perm())
+			return nil
+		})
+
 		// Re-apply persona files after clone. The clone may have overwritten
 		// files that the persona wants to overlay (e.g. AGENTS.md).
 		if persona != nil {
@@ -563,6 +574,8 @@ func (h *PIHandler) cloneRepo(ctx context.Context, taskDir, repoRef string, send
 	for _, entry := range entries {
 		src := filepath.Join(tmpDir, entry.Name())
 		dst := filepath.Join(taskDir, entry.Name())
+		entryInfo, _ := entry.Info()
+		h.log.Printf("[WORKDIR] moving %s (mode=%o) -> %s", entry.Name(), entryInfo.Mode().Perm(), dst)
 		if err := os.Rename(src, dst); err != nil {
 			return fmt.Errorf("move %s to %s: %w", src, dst, err)
 		}
