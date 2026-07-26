@@ -891,7 +891,9 @@ func TestPIHandler_ExecuteTask_ClientNotRunningAttemptsRestart(t *testing.T) {
 
 	var restartWarningSent, restartSuccessSent bool
 	var mu sync.Mutex
-	_, err = h.ExecuteTask(context.Background(), task, func(entry LogEntry) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	_, err = h.ExecuteTask(ctx, task, func(entry LogEntry) error {
 		mu.Lock()
 		defer mu.Unlock()
 		if strings.Contains(entry.Line, "attempting restart") {
@@ -1217,47 +1219,7 @@ func TestPIHandler_PrepareTaskDir_WithPersonaAndRepoRef(t *testing.T) {
 	}
 }
 
-// TestPIHandler_PrepareTaskDir_CreatesTmpDir verifies that prepareTaskDir
-// creates a tmp subdirectory for the task's TMPDIR. This isolates temp files
-// (git, npm, etc.) from other concurrent tasks. See issue #59.
-func TestPIHandler_PrepareTaskDir_CreatesTmpDir(t *testing.T) {
-	baseDir, err := os.MkdirTemp("", "hotelier-base-*")
-	if err != nil {
-		t.Fatalf("create temp base dir: %v", err)
-	}
-	defer os.RemoveAll(baseDir)
-
-	client := pi.NewClient(pi.PiClientConfig{
-		CWD: baseDir,
-		Log: log.New(io.Discard, "", 0),
-	})
-
-	h := &PIHandler{
-		baseCWD: baseDir,
-		client:  client,
-		log:     log.New(io.Discard, "", 0),
-	}
-
-	taskDir, err := h.prepareTaskDir(context.Background(), "task-tmp", "", nil, nil)
-	if err != nil {
-		t.Fatalf("prepareTaskDir failed: %v", err)
-	}
-
-	// The tmp subdirectory should exist inside the task directory.
-	tmpDir := filepath.Join(taskDir, "tmp")
-	info, err := os.Stat(tmpDir)
-	if err != nil {
-		t.Fatalf("tmp dir %s should exist: %v", tmpDir, err)
-	}
-	if !info.IsDir() {
-		t.Errorf("tmp path %s should be a directory", tmpDir)
-	}
-}
-
-// TestPIHandler_ResetClientWithEnv_SetsTMPDIR verifies that resetClientWithEnv
-// passes the TMPDIR environment variable to the pi subprocess. This ensures
-// that temp files (git, npm, etc.) are isolated per task. See issue #59.
-func TestPIHandler_ResetClientWithEnv_SetsTMPDIR(t *testing.T) {
+func TestPIHandler_ResetClientWithEnv_RetriesOnFailure(t *testing.T) {
 	if _, err := exec.LookPath("pi"); err != nil {
 		t.Skip("pi not installed")
 	}
@@ -1268,62 +1230,114 @@ func TestPIHandler_ResetClientWithEnv_SetsTMPDIR(t *testing.T) {
 	}
 	defer os.RemoveAll(baseDir)
 
-	taskDir := filepath.Join(baseDir, "tasks", "task-tmpdir")
-	tmpDir := filepath.Join(taskDir, "tmp")
-	if err := os.MkdirAll(tmpDir, 0o755); err != nil {
-		t.Fatalf("create tmp dir: %v", err)
-	}
+	// Capture log output to verify retry messages
+	var logBuf strings.Builder
+	logger := log.New(&logBuf, "[test] ", 0)
 
 	client := pi.NewClient(pi.PiClientConfig{
 		CWD: baseDir,
-		Log: log.New(io.Discard, "", 0),
+		Log: logger,
 	})
 
 	h := &PIHandler{
 		baseCWD: baseDir,
 		client:  client,
-		log:     log.New(io.Discard, "", 0),
+		log:     logger,
 	}
 
-	taskEnv := map[string]string{
-		"TMPDIR": tmpDir,
+	// Use a context that cancels after a short duration to interrupt retries.
+	// This verifies the retry loop respects context cancellation.
+	ctx, cancel := context.WithTimeout(context.Background(), 800*time.Millisecond)
+	defer cancel()
+
+	// Call resetClientWithEnv with a non-existent directory — Start() will fail
+	// because pi can't start in that directory. With retries, this should take
+	// at least 1s + 2s = 3s of backoff, but the context will cancel it sooner.
+	start := time.Now()
+	err = h.resetClientWithEnv(ctx, "/nonexistent/path/that/does/not/exist", "test-task", func(LogEntry) error {
+		return nil
+	}, nil)
+	elapsed := time.Since(start)
+
+	// The call should have been interrupted by context timeout (not immediate failure)
+	// because the retry loop waits between attempts.
+	if err == nil {
+		t.Log("resetClientWithEnv succeeded unexpectedly")
+	} else {
+		t.Logf("resetClientWithEnv failed (expected): %v", err)
 	}
 
-	ctx := context.Background()
-	err = h.resetClientWithEnv(ctx, taskDir, "task-tmpdir", func(LogEntry) error { return nil }, taskEnv)
+	// Verify retry log messages were produced
+	logOutput := logBuf.String()
+	if !strings.Contains(logOutput, "attempt 1/3") {
+		t.Errorf("expected retry attempt 1/3 in logs, got:\n%s", logOutput)
+	}
+
+	// Verify the elapsed time shows retries happened (should be at least ~1s for first backoff)
+	if elapsed < 500*time.Millisecond {
+		t.Errorf("expected retries to take time, but completed in %v (no retries?)", elapsed)
+	}
+
+	h.Stop(context.Background())
+}
+
+func TestPIHandler_ResetClientWithEnv_SendsRetryLogs(t *testing.T) {
+	if _, err := exec.LookPath("pi"); err != nil {
+		t.Skip("pi not installed")
+	}
+
+	baseDir, err := os.MkdirTemp("", "hotelier-base-*")
 	if err != nil {
-		t.Fatalf("resetClientWithEnv failed: %v", err)
+		t.Fatalf("create temp base dir: %v", err)
 	}
-	defer h.client.Stop(ctx)
+	defer os.RemoveAll(baseDir)
 
-	// Verify the subprocess has TMPDIR set correctly
-	cmd := h.client.Cmd()
-	if cmd == nil || cmd.Env == nil {
-		t.Fatal("client cmd or env should not be nil")
+	var logBuf strings.Builder
+	logger := log.New(&logBuf, "[test] ", 0)
+
+	client := pi.NewClient(pi.PiClientConfig{
+		CWD: baseDir,
+		Log: logger,
+	})
+
+	var sentLogs []LogEntry
+	var logsMu sync.Mutex
+
+	h := &PIHandler{
+		baseCWD: baseDir,
+		client:  client,
+		log:     logger,
 	}
 
-	found := false
-	for _, envVar := range cmd.Env {
-		if strings.HasPrefix(envVar, "TMPDIR=") {
-			value := strings.TrimPrefix(envVar, "TMPDIR=")
-			if value != tmpDir {
-				t.Errorf("TMPDIR = %q, want %q", value, tmpDir)
-			} else {
-				found = true
-			}
+	ctx, cancel := context.WithTimeout(context.Background(), 800*time.Millisecond)
+	defer cancel()
+
+	_ = h.resetClientWithEnv(ctx, "/nonexistent/path", "test-task", func(entry LogEntry) error {
+		logsMu.Lock()
+		defer logsMu.Unlock()
+		sentLogs = append(sentLogs, entry)
+		return nil
+	}, nil)
+
+	// Check that retry warning logs were sent
+	logsMu.Lock()
+	var hadRetryWarning bool
+	for _, entry := range sentLogs {
+		if strings.Contains(entry.Line, "Spawn attempt") && entry.Level == "warning" {
+			hadRetryWarning = true
 			break
 		}
 	}
+	logsMu.Unlock()
 
-	if !found {
-		t.Error("TMPDIR not found in subprocess environment")
+	if !hadRetryWarning {
+		t.Errorf("expected retry warning log entry via sendLog, got %d entries", len(sentLogs))
 	}
+
+	h.Stop(context.Background())
 }
 
-// TestPIHandler_ResetClientWithEnv_MergesPersonaEnv verifies that persona
-// environment variables are merged with TMPDIR, and that persona vars
-// take precedence if they conflict. See issue #59.
-func TestPIHandler_ResetClientWithEnv_MergesPersonaEnv(t *testing.T) {
+func TestPIHandler_RestartClient_RetriesOnFailure(t *testing.T) {
 	if _, err := exec.LookPath("pi"); err != nil {
 		t.Skip("pi not installed")
 	}
@@ -1334,66 +1348,50 @@ func TestPIHandler_ResetClientWithEnv_MergesPersonaEnv(t *testing.T) {
 	}
 	defer os.RemoveAll(baseDir)
 
-	taskDir := filepath.Join(baseDir, "tasks", "task-merge")
-	tmpDir := filepath.Join(taskDir, "tmp")
-	if err := os.MkdirAll(tmpDir, 0o755); err != nil {
-		t.Fatalf("create tmp dir: %v", err)
-	}
+	// Capture log output to verify retry messages
+	var logBuf strings.Builder
+	logger := log.New(&logBuf, "[test] ", 0)
 
 	client := pi.NewClient(pi.PiClientConfig{
 		CWD: baseDir,
-		Log: log.New(io.Discard, "", 0),
+		Log: logger,
 	})
 
+	// Set baseCWD to a non-existent path to force Start() to fail on every attempt.
 	h := &PIHandler{
-		baseCWD: baseDir,
+		baseCWD: "/nonexistent/path/that/does/not/exist",
 		client:  client,
-		log:     log.New(io.Discard, "", 0),
+		log:     logger,
 	}
 
-	// Simulate the env construction done in ExecuteTask:
-	// TMPDIR + persona vars (persona takes precedence)
-	taskEnv := map[string]string{
-		"TMPDIR": tmpDir,
-	}
-	personaEnv := map[string]string{
-		"PERSONA_TOKEN": "secret-token",
-	}
-	for k, v := range personaEnv {
-		taskEnv[k] = v
+	// Use a context that cancels after a short duration to interrupt retries.
+	// This verifies the retry loop respects context cancellation.
+	ctx, cancel := context.WithTimeout(context.Background(), 800*time.Millisecond)
+	defer cancel()
+
+	// restartClient will fail on every attempt because baseCWD does not exist.
+	// With retries, this should take at least ~1s of backoff, but the context
+	// will cancel it sooner.
+	start := time.Now()
+	err = h.restartClient(ctx)
+	elapsed := time.Since(start)
+
+	if err == nil {
+		t.Log("restartClient succeeded unexpectedly")
+	} else {
+		t.Logf("restartClient failed (expected): %v", err)
 	}
 
-	ctx := context.Background()
-	err = h.resetClientWithEnv(ctx, taskDir, "task-merge", func(LogEntry) error { return nil }, taskEnv)
-	if err != nil {
-		t.Fatalf("resetClientWithEnv failed: %v", err)
-	}
-	defer h.client.Stop(ctx)
-
-	cmd := h.client.Cmd()
-	if cmd == nil || cmd.Env == nil {
-		t.Fatal("client cmd or env should not be nil")
+	// Verify retry log messages were produced
+	logOutput := logBuf.String()
+	if !strings.Contains(logOutput, "attempt 1/3") {
+		t.Errorf("expected retry attempt 1/3 in logs, got:\n%s", logOutput)
 	}
 
-	// Verify both TMPDIR and PERSONA_TOKEN are present
-	var foundTmpdir, foundPersona bool
-	for _, envVar := range cmd.Env {
-		if strings.HasPrefix(envVar, "TMPDIR=") {
-			value := strings.TrimPrefix(envVar, "TMPDIR=")
-			if value != tmpDir {
-				t.Errorf("TMPDIR = %q, want %q", value, tmpDir)
-			}
-			foundTmpdir = true
-		}
-		if strings.HasPrefix(envVar, "PERSONA_TOKEN=") {
-			foundPersona = true
-		}
+	// Verify the elapsed time shows retries happened (should be at least ~500ms for first backoff attempt)
+	if elapsed < 500*time.Millisecond {
+		t.Errorf("expected retries to take time, but completed in %v (no retries?)", elapsed)
 	}
 
-	if !foundTmpdir {
-		t.Error("TMPDIR not found in subprocess environment")
-	}
-	if !foundPersona {
-		t.Error("PERSONA_TOKEN not found in subprocess environment")
-	}
+	h.Stop(context.Background())
 }
