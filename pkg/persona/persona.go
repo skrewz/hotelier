@@ -2,6 +2,7 @@ package persona
 
 import (
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"strings"
@@ -61,27 +62,46 @@ func (p *Persona) ApplyFiles(workDir string) error {
 		// Skip if source does not exist — the file may not be present
 		// on this particular guest machine.
 		if _, err := os.Stat(src); err != nil {
+			log.Printf("[PERSONA] skip %s (not found)", src)
 			continue
 		}
 
-		// Create parent directory if needed
-		if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
-			return fmt.Errorf("create directory %s: %w", filepath.Dir(dst), err)
+		// Log source file info for troubleshooting.
+		srcInfo, err := os.Stat(src)
+		if err != nil {
+			return fmt.Errorf("stat source %s: %w", src, err)
+		}
+		log.Printf("[PERSONA] applying %s -> %s (src mode=%o, size=%d)", src, dst, srcInfo.Mode().Perm(), srcInfo.Size())
+
+		// Create parent directory if needed.
+		dstDir := filepath.Dir(dst)
+		if err := os.MkdirAll(dstDir, 0o755); err != nil {
+			return fmt.Errorf("create directory %s: %w", dstDir, err)
 		}
 
-		// Read source file
+		// Read source file.
 		data, err := os.ReadFile(src)
 		if err != nil {
 			return fmt.Errorf("read file %s: %w", src, err)
 		}
 
-		// Write to destination with same permissions
-		info, err := os.Stat(src)
-		if err != nil {
-			return fmt.Errorf("stat source %s: %w", src, err)
+		// Write the destination file, preserving the source mode.
+		// If the destination already exists and is read-only (e.g.
+		// on a re-apply after a repo clone), chmod it temporarily
+		// so that os.WriteFile can truncate and overwrite it, then
+		// restore the source mode afterwards.
+		dstPerm := srcInfo.Mode().Perm()
+		if info, err := os.Stat(dst); err == nil {
+			if info.Mode().Perm()&0o200 == 0 {
+				// File exists and is not writeable — make it
+				// temporarily writable so WriteFile can truncate it.
+				if err := os.Chmod(dst, 0o600); err != nil {
+					return fmt.Errorf("chmod file %s: %w", dst, err)
+				}
+				defer os.Chmod(dst, dstPerm)
+			}
 		}
-
-		if err := os.WriteFile(dst, data, info.Mode().Perm()); err != nil {
+		if err := os.WriteFile(dst, data, dstPerm); err != nil {
 			return fmt.Errorf("write file %s: %w", dst, err)
 		}
 	}
