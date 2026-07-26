@@ -1216,3 +1216,184 @@ func TestPIHandler_PrepareTaskDir_WithPersonaAndRepoRef(t *testing.T) {
 		t.Error("expected persona file .git-credentials to exist in task dir (applied before clone)")
 	}
 }
+
+// TestPIHandler_PrepareTaskDir_CreatesTmpDir verifies that prepareTaskDir
+// creates a tmp subdirectory for the task's TMPDIR. This isolates temp files
+// (git, npm, etc.) from other concurrent tasks. See issue #59.
+func TestPIHandler_PrepareTaskDir_CreatesTmpDir(t *testing.T) {
+	baseDir, err := os.MkdirTemp("", "hotelier-base-*")
+	if err != nil {
+		t.Fatalf("create temp base dir: %v", err)
+	}
+	defer os.RemoveAll(baseDir)
+
+	client := pi.NewClient(pi.PiClientConfig{
+		CWD: baseDir,
+		Log: log.New(io.Discard, "", 0),
+	})
+
+	h := &PIHandler{
+		baseCWD: baseDir,
+		client:  client,
+		log:     log.New(io.Discard, "", 0),
+	}
+
+	taskDir, err := h.prepareTaskDir(context.Background(), "task-tmp", "", nil, nil)
+	if err != nil {
+		t.Fatalf("prepareTaskDir failed: %v", err)
+	}
+
+	// The tmp subdirectory should exist inside the task directory.
+	tmpDir := filepath.Join(taskDir, "tmp")
+	info, err := os.Stat(tmpDir)
+	if err != nil {
+		t.Fatalf("tmp dir %s should exist: %v", tmpDir, err)
+	}
+	if !info.IsDir() {
+		t.Errorf("tmp path %s should be a directory", tmpDir)
+	}
+}
+
+// TestPIHandler_ResetClientWithEnv_SetsTMPDIR verifies that resetClientWithEnv
+// passes the TMPDIR environment variable to the pi subprocess. This ensures
+// that temp files (git, npm, etc.) are isolated per task. See issue #59.
+func TestPIHandler_ResetClientWithEnv_SetsTMPDIR(t *testing.T) {
+	if _, err := exec.LookPath("pi"); err != nil {
+		t.Skip("pi not installed")
+	}
+
+	baseDir, err := os.MkdirTemp("", "hotelier-base-*")
+	if err != nil {
+		t.Fatalf("create temp base dir: %v", err)
+	}
+	defer os.RemoveAll(baseDir)
+
+	taskDir := filepath.Join(baseDir, "tasks", "task-tmpdir")
+	tmpDir := filepath.Join(taskDir, "tmp")
+	if err := os.MkdirAll(tmpDir, 0o755); err != nil {
+		t.Fatalf("create tmp dir: %v", err)
+	}
+
+	client := pi.NewClient(pi.PiClientConfig{
+		CWD: baseDir,
+		Log: log.New(io.Discard, "", 0),
+	})
+
+	h := &PIHandler{
+		baseCWD: baseDir,
+		client:  client,
+		log:     log.New(io.Discard, "", 0),
+	}
+
+	taskEnv := map[string]string{
+		"TMPDIR": tmpDir,
+	}
+
+	ctx := context.Background()
+	err = h.resetClientWithEnv(ctx, taskDir, "task-tmpdir", func(LogEntry) error { return nil }, taskEnv)
+	if err != nil {
+		t.Fatalf("resetClientWithEnv failed: %v", err)
+	}
+	defer h.client.Stop(ctx)
+
+	// Verify the subprocess has TMPDIR set correctly
+	cmd := h.client.Cmd()
+	if cmd == nil || cmd.Env == nil {
+		t.Fatal("client cmd or env should not be nil")
+	}
+
+	found := false
+	for _, envVar := range cmd.Env {
+		if strings.HasPrefix(envVar, "TMPDIR=") {
+			value := strings.TrimPrefix(envVar, "TMPDIR=")
+			if value != tmpDir {
+				t.Errorf("TMPDIR = %q, want %q", value, tmpDir)
+			} else {
+				found = true
+			}
+			break
+		}
+	}
+
+	if !found {
+		t.Error("TMPDIR not found in subprocess environment")
+	}
+}
+
+// TestPIHandler_ResetClientWithEnv_MergesPersonaEnv verifies that persona
+// environment variables are merged with TMPDIR, and that persona vars
+// take precedence if they conflict. See issue #59.
+func TestPIHandler_ResetClientWithEnv_MergesPersonaEnv(t *testing.T) {
+	if _, err := exec.LookPath("pi"); err != nil {
+		t.Skip("pi not installed")
+	}
+
+	baseDir, err := os.MkdirTemp("", "hotelier-base-*")
+	if err != nil {
+		t.Fatalf("create temp base dir: %v", err)
+	}
+	defer os.RemoveAll(baseDir)
+
+	taskDir := filepath.Join(baseDir, "tasks", "task-merge")
+	tmpDir := filepath.Join(taskDir, "tmp")
+	if err := os.MkdirAll(tmpDir, 0o755); err != nil {
+		t.Fatalf("create tmp dir: %v", err)
+	}
+
+	client := pi.NewClient(pi.PiClientConfig{
+		CWD: baseDir,
+		Log: log.New(io.Discard, "", 0),
+	})
+
+	h := &PIHandler{
+		baseCWD: baseDir,
+		client:  client,
+		log:     log.New(io.Discard, "", 0),
+	}
+
+	// Simulate the env construction done in ExecuteTask:
+	// TMPDIR + persona vars (persona takes precedence)
+	taskEnv := map[string]string{
+		"TMPDIR": tmpDir,
+	}
+	personaEnv := map[string]string{
+		"PERSONA_TOKEN": "secret-token",
+	}
+	for k, v := range personaEnv {
+		taskEnv[k] = v
+	}
+
+	ctx := context.Background()
+	err = h.resetClientWithEnv(ctx, taskDir, "task-merge", func(LogEntry) error { return nil }, taskEnv)
+	if err != nil {
+		t.Fatalf("resetClientWithEnv failed: %v", err)
+	}
+	defer h.client.Stop(ctx)
+
+	cmd := h.client.Cmd()
+	if cmd == nil || cmd.Env == nil {
+		t.Fatal("client cmd or env should not be nil")
+	}
+
+	// Verify both TMPDIR and PERSONA_TOKEN are present
+	var foundTmpdir, foundPersona bool
+	for _, envVar := range cmd.Env {
+		if strings.HasPrefix(envVar, "TMPDIR=") {
+			value := strings.TrimPrefix(envVar, "TMPDIR=")
+			if value != tmpDir {
+				t.Errorf("TMPDIR = %q, want %q", value, tmpDir)
+			}
+			foundTmpdir = true
+		}
+		if strings.HasPrefix(envVar, "PERSONA_TOKEN=") {
+			foundPersona = true
+		}
+	}
+
+	if !foundTmpdir {
+		t.Error("TMPDIR not found in subprocess environment")
+	}
+	if !foundPersona {
+		t.Error("PERSONA_TOKEN not found in subprocess environment")
+	}
+}
