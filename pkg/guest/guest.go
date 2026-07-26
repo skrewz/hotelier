@@ -68,8 +68,8 @@ type TaskAssignment struct {
 	TaskID  string           `json:"id"`
 	Prompt  string           `json:"prompt"`
 	Tags    []string         `json:"tags"`
-	RepoRef string           `json:"repo_ref,omitempty"`    // git repository URL to clone (optional)
-	Persona *persona.Persona `json:"persona,omitempty"`     // persona data to apply (optional)
+	RepoRef string           `json:"repo_ref,omitempty"` // git repository URL to clone (optional)
+	Persona *persona.Persona `json:"persona,omitempty"`  // persona data to apply (optional)
 }
 
 // TaskCancel represents a task cancellation notification.

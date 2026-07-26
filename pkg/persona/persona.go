@@ -85,7 +85,23 @@ func (p *Persona) ApplyFiles(workDir string) error {
 			return fmt.Errorf("read file %s: %w", src, err)
 		}
 
-		if err := os.WriteFile(dst, data, srcInfo.Mode().Perm()); err != nil {
+		// Write the destination file, preserving the source mode.
+		// If the destination already exists and is read-only (e.g.
+		// on a re-apply after a repo clone), chmod it temporarily
+		// so that os.WriteFile can truncate and overwrite it, then
+		// restore the source mode afterwards.
+		dstPerm := srcInfo.Mode().Perm()
+		if info, err := os.Stat(dst); err == nil {
+			if info.Mode().Perm()&0o200 == 0 {
+				// File exists and is not writeable — make it
+				// temporarily writable so WriteFile can truncate it.
+				if err := os.Chmod(dst, 0o600); err != nil {
+					return fmt.Errorf("chmod file %s: %w", dst, err)
+				}
+				defer os.Chmod(dst, dstPerm)
+			}
+		}
+		if err := os.WriteFile(dst, data, dstPerm); err != nil {
 			return fmt.Errorf("write file %s: %w", dst, err)
 		}
 	}
