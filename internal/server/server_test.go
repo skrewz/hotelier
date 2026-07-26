@@ -153,6 +153,63 @@ func TestHandleTasks_POST_EmptyReposRejected(t *testing.T) {
 	}
 }
 
+func TestHandleTasks_POST_RepoRefAccepted(t *testing.T) {
+	srv := newTestServer(t)
+
+	task := map[string]interface{}{
+		"prompt":   "Build a feature",
+		"repo_ref": "https://github.com/user/repo.git",
+	}
+	body, _ := json.Marshal(task)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/tasks", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	srv.HandleTasks(w, req)
+
+	if w.Code != http.StatusCreated {
+		t.Fatalf("expected 201 when repo_ref is provided, got %d: %s", w.Code, w.Body.String())
+	}
+
+	var createdTask queue.Task
+	if err := json.Unmarshal(w.Body.Bytes(), &createdTask); err != nil {
+		t.Fatalf("failed to unmarshal response: %v", err)
+	}
+
+	if createdTask.RepoRef != "https://github.com/user/repo.git" {
+		t.Errorf("expected repo_ref 'https://github.com/user/repo.git', got %q", createdTask.RepoRef)
+	}
+}
+
+func TestHandleTasks_POST_RepoRefAndPersona(t *testing.T) {
+	srv := newTestServer(t)
+
+	task := map[string]interface{}{
+		"prompt":   "Build a feature",
+		"repo_ref": "https://github.com/user/repo.git",
+		"persona":  "",
+	}
+	body, _ := json.Marshal(task)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/tasks", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	srv.HandleTasks(w, req)
+
+	if w.Code != http.StatusCreated {
+		t.Fatalf("expected 201 when repo_ref and persona are provided, got %d: %s", w.Code, w.Body.String())
+	}
+
+	var createdTask queue.Task
+	if err := json.Unmarshal(w.Body.Bytes(), &createdTask); err != nil {
+		t.Fatalf("failed to unmarshal response: %v", err)
+	}
+
+	if createdTask.RepoRef != "https://github.com/user/repo.git" {
+		t.Errorf("expected repo_ref 'https://github.com/user/repo.git', got %q", createdTask.RepoRef)
+	}
+}
+
 func TestHandleTasks_POST_CustomID(t *testing.T) {
 	srv := newTestServer(t)
 
@@ -338,6 +395,99 @@ func TestHandleTasks_GET(t *testing.T) {
 
 	if response.Count != 3 {
 		t.Errorf("expected 3 tasks, got %d", response.Count)
+	}
+}
+
+func TestHandleTasks_GET_PersonaInResponse(t *testing.T) {
+	cfg := config.ServerConfig{
+		Host: "127.0.0.1",
+		Port: 0,
+		Personas: []persona.Persona{
+			{Name: "dev-agent"},
+		},
+	}
+	srv := New(cfg)
+
+	// Create a task with persona
+	task := map[string]interface{}{
+		"prompt":  "Build a feature",
+		"persona": "dev-agent",
+	}
+	body, _ := json.Marshal(task)
+	req := httptest.NewRequest(http.MethodPost, "/api/tasks", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	srv.HandleTasks(w, req)
+
+	if w.Code != http.StatusCreated {
+		t.Fatalf("expected 201, got %d", w.Code)
+	}
+
+	// List tasks and verify persona is in the response
+	req = httptest.NewRequest(http.MethodGet, "/api/tasks", nil)
+	w = httptest.NewRecorder()
+	srv.HandleTasks(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+
+	var response struct {
+		Tasks []map[string]interface{} `json:"tasks"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &response); err != nil {
+		t.Fatalf("failed to unmarshal: %v", err)
+	}
+
+	if len(response.Tasks) != 1 {
+		t.Fatalf("expected 1 task, got %d", len(response.Tasks))
+	}
+
+	gotPersona, ok := response.Tasks[0]["persona"].(string)
+	if !ok {
+		t.Fatalf("persona field missing or not a string in task list response")
+	}
+	if gotPersona != "dev-agent" {
+		t.Errorf("expected persona 'dev-agent', got %q", gotPersona)
+	}
+}
+
+func TestHandleTasks_GET_PersonaEmpty(t *testing.T) {
+	srv := newTestServer(t)
+
+	// Create a task without persona
+	task := map[string]interface{}{
+		"prompt": "Build something",
+	}
+	body, _ := json.Marshal(task)
+	req := httptest.NewRequest(http.MethodPost, "/api/tasks", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	srv.HandleTasks(w, req)
+
+	// List tasks and verify persona is present but empty
+	req = httptest.NewRequest(http.MethodGet, "/api/tasks", nil)
+	w = httptest.NewRecorder()
+	srv.HandleTasks(w, req)
+
+	var response struct {
+		Tasks []map[string]interface{} `json:"tasks"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &response); err != nil {
+		t.Fatalf("failed to unmarshal: %v", err)
+	}
+
+	if len(response.Tasks) != 1 {
+		t.Fatalf("expected 1 task, got %d", len(response.Tasks))
+	}
+
+	// Persona should be present but empty string
+	gotPersona, ok := response.Tasks[0]["persona"].(string)
+	if !ok {
+		t.Fatalf("persona field missing or not a string in task list response")
+	}
+	if gotPersona != "" {
+		t.Errorf("expected empty persona, got %q", gotPersona)
 	}
 }
 
