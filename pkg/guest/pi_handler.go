@@ -188,7 +188,18 @@ func (h *PIHandler) ExecuteTask(ctx context.Context, task TaskAssignment, sendLo
 	if err := sendLog(LogEntry{TaskID: task.TaskID, Line: fmt.Sprintf("Spawning pi subprocess in: %s", workDir), Level: "system"}); err != nil {
 		h.log.Printf("[PI] failed to send operational log: %v", err)
 	}
-	if err := h.resetClientWithEnv(ctx, workDir, task.TaskID, sendLog, personaEnv); err != nil {
+	// Build the task environment: TMPDIR for isolation + persona env vars.
+	// TMPDIR points to a per-task temp directory to prevent resource contention
+	// between concurrent tasks. See issue #59.
+	taskEnv := map[string]string{
+		"TMPDIR": filepath.Join(workDir, "tmp"),
+	}
+	// Merge persona env vars (persona vars take precedence over defaults)
+	for k, v := range personaEnv {
+		taskEnv[k] = v
+	}
+
+	if err := h.resetClientWithEnv(ctx, workDir, task.TaskID, sendLog, taskEnv); err != nil {
 		h.log.Printf("[PI] spawn failed: %v", err)
 		_ = sendLog(LogEntry{TaskID: task.TaskID, Line: fmt.Sprintf("Spawn failed: %v", err), Level: "error"})
 		return nil, fmt.Errorf("reset pi client with working dir %s: %w", workDir, err)
@@ -510,6 +521,14 @@ func (h *PIHandler) prepareTaskDir(ctx context.Context, taskID, repoRef string, 
 		if err := persona.ApplyFiles(taskDir); err != nil {
 			return "", fmt.Errorf("apply persona files: %w", err)
 		}
+	}
+
+	// Create a tmp subdirectory for this task's TMPDIR.
+	// This isolates temp files (git, npm, etc.) from other concurrent tasks.
+	// See issue #59.
+	tmpDir := filepath.Join(taskDir, "tmp")
+	if err := os.MkdirAll(tmpDir, 0o755); err != nil {
+		return "", fmt.Errorf("create task tmp dir %s: %w", tmpDir, err)
 	}
 
 	h.log.Printf("[WORKDIR] using task dir: %s", taskDir)
