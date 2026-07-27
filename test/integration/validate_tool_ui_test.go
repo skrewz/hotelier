@@ -20,6 +20,7 @@ import (
 	"hotelier/internal/server"
 	"hotelier/pkg/config"
 	"hotelier/pkg/logstore"
+	"hotelier/pkg/persona"
 	"hotelier/pkg/queue"
 	"hotelier/pkg/rpc"
 )
@@ -314,6 +315,11 @@ func TestValidateToolUI(t *testing.T) {
 		Port:      0,
 		MaxGuests: 0,
 		LogDir:    logDir,
+		Personas: []persona.Persona{
+			{Name: "test-purple", Env: map[string]string{"ROLE": "implementer"}},
+			{Name: "test-blue", Env: map[string]string{"ROLE": "reviewer"}},
+			{Name: "test-green", Env: map[string]string{"ROLE": "architect"}},
+		},
 	}
 	srv := server.New(cfg)
 	hub := srv.Hub()
@@ -370,9 +376,10 @@ func TestValidateToolUI(t *testing.T) {
 	// Step 2: Create a task via the task queue.
 	taskID := fmt.Sprintf("ui-test-task-%d", time.Now().UnixNano())
 	taskObj := &queue.Task{
-		ID:     taskID,
-		Prompt: "Simulate tool calls and validate UI rendering",
-		Tags:   []string{"business-default"},
+		ID:      taskID,
+		Prompt:  "Simulate tool calls and validate UI rendering",
+		Tags:    []string{"business-default"},
+		Persona: "test-purple",
 	}
 	if err := srv.TaskQueue().Add(taskObj); err != nil {
 		t.Fatalf("add task: %v", err)
@@ -469,9 +476,26 @@ func TestValidateToolUI(t *testing.T) {
 	}
 	t.Logf("Pending task created: %s", pendingTaskID)
 
-	// Step 5: Validate UI rendering via Playwright by exercising the real
-	// user flow: navigate → task list → click task → detail view.
-	validateUI(t, baseURL, taskID, failedTaskID, completedTaskID, pendingTaskID, failureReason, projectRoot)
+	// Step 4e: Create a second task with a different persona to test colour distribution.
+	colouredTaskID := fmt.Sprintf("ui-test-coloured-task-%d", time.Now().UnixNano())
+	colouredTask := &queue.Task{
+		ID:      colouredTaskID,
+		Prompt:  "A task with a distinct persona for colour testing",
+		Tags:    []string{"business-default"},
+		Persona: "test-blue",
+	}
+	if err := srv.TaskQueue().Add(colouredTask); err != nil {
+		t.Fatalf("add coloured task: %v", err)
+	}
+	if err := srv.TaskQueue().Assign(colouredTaskID, "ui-test-guest"); err != nil {
+		t.Fatalf("assign coloured task: %v", err)
+	}
+	if err := srv.TaskQueue().Start(colouredTaskID); err != nil {
+		t.Fatalf("start coloured task: %v", err)
+	}
+	t.Logf("Coloured task created: %s", colouredTaskID)
+
+	validateUI(t, baseURL, taskID, failedTaskID, completedTaskID, pendingTaskID, failureReason, projectRoot, colouredTaskID)
 }
 
 func validateServerLogs(t *testing.T, srv *server.Server, taskID string, expectedEntries []testLogEntry) {
@@ -560,7 +584,7 @@ func validateServerLogs(t *testing.T, srv *server.Server, taskID string, expecte
 	}
 }
 
-func validateUI(t *testing.T, baseURL, taskID, failedTaskID, completedTaskID, pendingTaskID, failureReason, projectRoot string) {
+func validateUI(t *testing.T, baseURL, taskID, failedTaskID, completedTaskID, pendingTaskID, failureReason, projectRoot, colouredTaskID string) {
 	// Allow overriding the screenshot directory via env var for manual inspection.
 	// When set, screenshots survive t.TempDir() cleanup.
 	overrideDir := os.Getenv("SCREENSHOT_DIR")
@@ -598,6 +622,7 @@ const { chromium } = require('playwright');
   const pendingTaskId = '%s';
   const failureReason = '%s';
   const expectedLogDate = '%s';
+  const colouredTaskId = '%s';
   const path = require('path');
 
   async function takeScreenshot(name) {
@@ -857,9 +882,9 @@ const { chromium } = require('playwright');
   const visibleTaskCount = await page.evaluate(() => {
     return document.querySelectorAll('.task-item').length;
   });
-  // With 4 tasks (1 RUNNING + 1 FAILED + 1 PENDING + 1 COMPLETED) and PENDING/COMPLETED hidden,
-  // only 2 should be visible
-  if (visibleTaskCount !== 2) fail('Should show 2 tasks (PENDING and COMPLETED hidden by default), got ' + visibleTaskCount);
+  // With 5 tasks (1 RUNNING + 1 FAILED + 1 PENDING + 1 COMPLETED + 1 RUNNING with persona)
+  // and PENDING/COMPLETED hidden, only 3 should be visible
+  if (visibleTaskCount !== 3) fail('Should show 3 tasks (PENDING and COMPLETED hidden by default), got ' + visibleTaskCount);
   console.log('PASS:', visibleTaskCount, 'task(s) visible with default filter (PENDING and COMPLETED hidden)');
 
   // Verify the "N pending" expand button is visible
@@ -900,6 +925,33 @@ const { chromium } = require('playwright');
   if (!runningTaskHasLogs) fail('At least one visible task should have log entries > 0');
   console.log('PASS: Log counts displayed in task meta:', logCountResult.map(r => r.count + ' logs').join(', '));
 
+  // =====================================================================
+  // Phase 1d: Persona badge colours
+  // =====================================================================
+  console.log('=== Phase 1d: Persona badge colours ===');
+
+  const personaResult = await page.evaluate((ctid) => {
+    const items = document.querySelectorAll('.task-item');
+    const results = [];
+    for (const item of items) {
+      const badge = item.querySelector('.persona-badge');
+      if (!badge) continue;
+      results.push({
+        id: item.textContent.substring(0, 40),
+        className: badge.className,
+        text: badge.textContent.trim(),
+        hasColourClass: /persona-badge-[0-7]/.test(badge.className),
+      });
+    }
+    return results;
+  }, colouredTaskId);
+
+  if (personaResult.length === 0) fail('No persona badges found in task list');
+  for (const p of personaResult) {
+    if (!p.hasColourClass) fail('Persona badge should have a colour class, got: ' + p.className);
+    console.log('PASS: Persona badge colour class for', p.id, ':', p.className);
+  }
+
   await takeScreenshot('01-front-page');
 
   // =====================================================================
@@ -907,12 +959,12 @@ const { chromium } = require('playwright');
   // =====================================================================
   console.log('=== Phase 1c: Pending expand button ===');
 
-  // With 4 tasks (RUNNING + FAILED + PENDING + COMPLETED) and PENDING/COMPLETED hidden,
-  // only 2 should be visible
+  // With 5 tasks (RUNNING + FAILED + PENDING + COMPLETED + RUNNING-with-persona)
+  // and PENDING/COMPLETED hidden, only 3 should be visible
   const visibleBefore = await page.evaluate(() => {
     return document.querySelectorAll('.task-item').length;
   });
-  if (visibleBefore !== 2) fail('Should show 2 tasks (PENDING and COMPLETED hidden by default), got ' + visibleBefore);
+  if (visibleBefore !== 3) fail('Should show 3 tasks (PENDING and COMPLETED hidden by default), got ' + visibleBefore);
   console.log('PASS:', visibleBefore, 'tasks visible (PENDING and COMPLETED hidden)');
 
   // Verify the pending task is NOT in the list
@@ -932,11 +984,11 @@ const { chromium } = require('playwright');
   // Wait for re-render
   await page.waitForTimeout(500);
 
-  // Now 3 tasks should be visible (RUNNING + FAILED + PENDING)
+  // Now 4 tasks should be visible (RUNNING + FAILED + PENDING + RUNNING-with-persona)
   const visibleAfter = await page.evaluate(() => {
     return document.querySelectorAll('.task-item').length;
   });
-  if (visibleAfter !== 3) fail('Should show 3 tasks (PENDING now shown), got ' + visibleAfter);
+  if (visibleAfter !== 4) fail('Should show 4 tasks (PENDING now shown), got ' + visibleAfter);
   console.log('PASS:', visibleAfter, 'tasks visible (PENDING shown)');
 
   // Verify the pending task IS now in the list
@@ -986,11 +1038,11 @@ const { chromium } = require('playwright');
   await clickEl('button[data-status="PENDING"]');
   await page.waitForTimeout(500);
 
-  // Back to 2 visible tasks, "N pending" button reappears
+  // Back to 3 visible tasks, "N pending" button reappears
   const visibleFinal = await page.evaluate(() => {
     return document.querySelectorAll('.task-item').length;
   });
-  if (visibleFinal !== 2) fail('Should show 2 tasks (PENDING hidden again), got ' + visibleFinal);
+  if (visibleFinal !== 3) fail('Should show 3 tasks (PENDING hidden again), got ' + visibleFinal);
   console.log('PASS:', visibleFinal, 'tasks visible (PENDING hidden again)');
 
   const pendingBtnReappeared = await page.evaluate(() => {
@@ -2251,7 +2303,7 @@ const { chromium } = require('playwright');
   console.log('All UI validation checks passed!');
   await browser.close();
 })().catch(e => { console.error('Test failed:', e); process.exit(1); });
-`, screenshotDir, baseURL, taskID, failedTaskID, completedTaskID, pendingTaskID, failureReason, logDate)
+`, screenshotDir, baseURL, taskID, failedTaskID, completedTaskID, pendingTaskID, failureReason, logDate, colouredTaskID)
 
 	tmpScript := t.TempDir() + "/validate_ui.js"
 	if err := os.WriteFile(tmpScript, []byte(script), 0o644); err != nil {
