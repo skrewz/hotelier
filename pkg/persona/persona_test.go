@@ -6,61 +6,6 @@ import (
 	"testing"
 )
 
-func TestColourForName_deterministic(t *testing.T) {
-	// Same name must always return the same colour.
-	c1 := ColourForName("test-persona")
-	c2 := ColourForName("test-persona")
-	if c1 != c2 {
-		t.Errorf("same name should return same colour, got %q and %q", c1, c2)
-	}
-}
-
-func TestColourForName_returnsValidColour(t *testing.T) {
-	// Colour must match the expected format: "bg/fg" where each is a hex colour.
-	c := ColourForName("any-persona")
-	if c == "" {
-		t.Error("expected non-empty colour")
-	}
-	// Should contain exactly one slash separating bg and fg.
-	parts := splitColour(c)
-	if len(parts) != 2 {
-		t.Errorf("expected colour in 'bg/fg' format, got %q", c)
-	}
-	for i, part := range parts {
-		if part == "" {
-			t.Errorf("colour part %d is empty in %q", i, c)
-		}
-	}
-}
-
-func TestColourForName_distributesAcrossPalette(t *testing.T) {
-	// A set of diverse names should produce multiple distinct colours,
-	// proving the hash distributes across the palette rather than
-	// collapsing to a single entry.
-	names := []string{
-		"alpha", "beta", "gamma", "delta",
-		"epsilon", "zeta", "eta", "theta",
-		"implementer", "reviewer", "architect", "scaffold",
-	}
-	colours := make(map[string]bool)
-	for _, name := range names {
-		colours[ColourForName(name)] = true
-	}
-	// With 12 names and 8 palette entries we expect at least 3 distinct colours.
-	if len(colours) < 3 {
-		t.Errorf("expected at least 3 distinct colours for 12 names, got %d (%v)", len(colours), colours)
-	}
-}
-
-func splitColour(c string) []string {
-	for i := 0; i < len(c); i++ {
-		if c[i] == '/' {
-			return []string{c[:i], c[i+1:]}
-		}
-	}
-	return []string{c}
-}
-
 func TestPersona_ResolvedEnv(t *testing.T) {
 	p := &Persona{
 		Name: "test-persona",

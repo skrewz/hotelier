@@ -495,7 +495,7 @@ func TestValidateToolUI(t *testing.T) {
 	}
 	t.Logf("Coloured task created: %s", colouredTaskID)
 
-	validateUI(t, baseURL, taskID, failedTaskID, completedTaskID, pendingTaskID, failureReason, projectRoot, colouredTaskID)
+	validateUI(t, baseURL, taskID, failedTaskID, completedTaskID, pendingTaskID, failureReason, projectRoot)
 }
 
 func validateServerLogs(t *testing.T, srv *server.Server, taskID string, expectedEntries []testLogEntry) {
@@ -584,7 +584,7 @@ func validateServerLogs(t *testing.T, srv *server.Server, taskID string, expecte
 	}
 }
 
-func validateUI(t *testing.T, baseURL, taskID, failedTaskID, completedTaskID, pendingTaskID, failureReason, projectRoot, colouredTaskID string) {
+func validateUI(t *testing.T, baseURL, taskID, failedTaskID, completedTaskID, pendingTaskID, failureReason, projectRoot string) {
 	// Allow overriding the screenshot directory via env var for manual inspection.
 	// When set, screenshots survive t.TempDir() cleanup.
 	overrideDir := os.Getenv("SCREENSHOT_DIR")
@@ -622,7 +622,6 @@ const { chromium } = require('playwright');
   const pendingTaskId = '%s';
   const failureReason = '%s';
   const expectedLogDate = '%s';
-  const colouredTaskId = '%s';
   const path = require('path');
 
   async function takeScreenshot(name) {
@@ -926,11 +925,11 @@ const { chromium } = require('playwright');
   console.log('PASS: Log counts displayed in task meta:', logCountResult.map(r => r.count + ' logs').join(', '));
 
   // =====================================================================
-  // Phase 1d: Persona badge colours
+  // Phase 1c: Persona badge colours
   // =====================================================================
-  console.log('=== Phase 1d: Persona badge colours ===');
+  console.log('=== Phase 1c: Persona badge colours ===');
 
-  const personaResult = await page.evaluate((ctid) => {
+  const personaResult = await page.evaluate(() => {
     const items = document.querySelectorAll('.task-item');
     const results = [];
     for (const item of items) {
@@ -944,7 +943,7 @@ const { chromium } = require('playwright');
       });
     }
     return results;
-  }, colouredTaskId);
+  });
 
   if (personaResult.length === 0) fail('No persona badges found in task list');
   for (const p of personaResult) {
@@ -955,9 +954,9 @@ const { chromium } = require('playwright');
   await takeScreenshot('01-front-page');
 
   // =====================================================================
-  // Phase 1c: "N pending" expand button — pending tasks hidden/shown
+  // Phase 1d: "N pending" expand button — pending tasks hidden/shown
   // =====================================================================
-  console.log('=== Phase 1c: Pending expand button ===');
+  console.log('=== Phase 1d: Pending expand button ===');
 
   // With 5 tasks (RUNNING + FAILED + PENDING + COMPLETED + RUNNING-with-persona)
   // and PENDING/COMPLETED hidden, only 3 should be visible
@@ -2303,7 +2302,7 @@ const { chromium } = require('playwright');
   console.log('All UI validation checks passed!');
   await browser.close();
 })().catch(e => { console.error('Test failed:', e); process.exit(1); });
-`, screenshotDir, baseURL, taskID, failedTaskID, completedTaskID, pendingTaskID, failureReason, logDate, colouredTaskID)
+`, screenshotDir, baseURL, taskID, failedTaskID, completedTaskID, pendingTaskID, failureReason, logDate)
 
 	tmpScript := t.TempDir() + "/validate_ui.js"
 	if err := os.WriteFile(tmpScript, []byte(script), 0o644); err != nil {

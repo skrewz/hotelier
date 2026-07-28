@@ -2,39 +2,11 @@ package persona
 
 import (
 	"fmt"
-	"hash/fnv"
 	"log"
 	"os"
 	"path/filepath"
 	"strings"
 )
-
-// personaPalette is a set of distinguishable background/foreground colour
-// pairs for persona badges. Each entry is "background/foreground" in hex.
-var personaPalette = []string{
-	"#1e1045/#c4b5fd", // purple
-	"#1e3a5f/#93c5fd", // blue
-	"#0f4c4a/#5eead4", // teal
-	"#14532d/#86efac", // green
-	"#78350f/#fde68a", // amber
-	"#7f1d1d/#fca5a5", // red
-	"#831843/#f9a8d4", // pink
-	"#312e81/#a5b4fc", // indigo
-}
-
-// ColourForName returns a deterministic background/foreground colour string
-// for the given persona name. The colour is chosen by hashing the name and
-// indexing into personaPalette, so the same name always maps to the same
-// colour while different names are distributed across the palette.
-func ColourForName(name string) string {
-	if name == "" {
-		return personaPalette[0]
-	}
-	h := fnv.New32a()
-	_, _ = h.Write([]byte(name))
-	idx := int(h.Sum32()) % len(personaPalette)
-	return personaPalette[idx]
-}
 
 // FileCopy represents a source-to-destination file copy mapping.
 // Source is an absolute path on the guest machine.
