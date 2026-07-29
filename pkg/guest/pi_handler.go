@@ -484,6 +484,14 @@ func (h *PIHandler) prepareTaskDir(ctx context.Context, taskID, repoRef string, 
 		return "", fmt.Errorf("create task dir %s: %w", taskDir, err)
 	}
 
+	// Create a tmp subdirectory for this task's TMPDIR.
+	// This isolates temp files (git, npm, etc.) from other concurrent tasks.
+	// See issue #59.
+	tmpDir := filepath.Join(taskDir, "tmp")
+	if err := os.MkdirAll(tmpDir, 0o755); err != nil {
+		return "", fmt.Errorf("create task tmp dir %s: %w", tmpDir, err)
+	}
+
 	if repoRef != "" {
 		// Apply persona files before clone so credentials are available.
 		// (e.g. SSH keys, git configs)
@@ -532,14 +540,6 @@ func (h *PIHandler) prepareTaskDir(ctx context.Context, taskID, repoRef string, 
 		if err := persona.ApplyFiles(taskDir); err != nil {
 			return "", fmt.Errorf("apply persona files: %w", err)
 		}
-	}
-
-	// Create a tmp subdirectory for this task's TMPDIR.
-	// This isolates temp files (git, npm, etc.) from other concurrent tasks.
-	// See issue #59.
-	tmpDir := filepath.Join(taskDir, "tmp")
-	if err := os.MkdirAll(tmpDir, 0o755); err != nil {
-		return "", fmt.Errorf("create task tmp dir %s: %w", tmpDir, err)
 	}
 
 	h.log.Printf("[WORKDIR] using task dir: %s", taskDir)
