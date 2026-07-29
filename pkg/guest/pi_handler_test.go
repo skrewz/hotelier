@@ -273,6 +273,12 @@ func TestPIHandler_PrepareTaskDir(t *testing.T) {
 	if _, err := os.Stat(taskDir); err != nil {
 		t.Errorf("task dir %s should exist: %v", taskDir, err)
 	}
+
+	// The tmp subdirectory should also exist (for TMPDIR isolation).
+	tmpDir := filepath.Join(taskDir, "tmp")
+	if _, err := os.Stat(tmpDir); os.IsNotExist(err) {
+		t.Errorf("tmp dir %s should exist for TMPDIR isolation", tmpDir)
+	}
 }
 
 // TestPIHandler_PrepareTaskDirAfterResetClient verifies that prepareTaskDir uses
@@ -1052,6 +1058,12 @@ func TestPIHandler_PrepareTaskDir_WithRepoRef(t *testing.T) {
 	if _, err := os.Stat(expectedDir); os.IsNotExist(err) {
 		t.Errorf("expected task dir %s to exist even after clone failure", expectedDir)
 	}
+
+	// The tmp subdirectory should also exist (for TMPDIR isolation).
+	tmpDir := filepath.Join(expectedDir, "tmp")
+	if _, err := os.Stat(tmpDir); os.IsNotExist(err) {
+		t.Errorf("tmp dir %s should exist for TMPDIR isolation even after clone failure", tmpDir)
+	}
 }
 
 // TestPIHandler_PrepareTaskDir_WithPersonaNoRepoRef verifies that
@@ -1156,6 +1168,12 @@ func TestPIHandler_PrepareTaskDir_NoRepoRef(t *testing.T) {
 	}
 	if !found {
 		t.Error("expected 'Using task directory' log entry")
+	}
+
+	// The tmp subdirectory should exist (for TMPDIR isolation).
+	tmpDir := filepath.Join(expectedDir, "tmp")
+	if _, err := os.Stat(tmpDir); os.IsNotExist(err) {
+		t.Errorf("tmp dir %s should exist for TMPDIR isolation", tmpDir)
 	}
 }
 
