@@ -2,6 +2,8 @@ package guest
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"fmt"
 	"log"
 	"os"
@@ -155,9 +157,12 @@ func (h *PIHandler) ExecuteTask(ctx context.Context, task TaskAssignment, sendLo
 	// Guests should clean up after themselves. Set up the defer before
 	// prepareTaskDir so the error path also gets cleaned up (e.g. if
 	// cloneRepo fails and leaves an empty task directory behind).
+	var workDir string
 	defer func() {
-		if err := h.cleanupTaskDir(task.TaskID); err != nil {
-			h.log.Printf("[CLEANUP] failed to remove task directory: %v", err)
+		if workDir != "" {
+			if err := h.cleanupTaskDir(workDir); err != nil {
+				h.log.Printf("[CLEANUP] failed to remove task directory: %v", err)
+			}
 		}
 	}()
 
@@ -479,7 +484,15 @@ func (h *PIHandler) ExecuteTask(ctx context.Context, task TaskAssignment, sendLo
 // AGENTS.md). The persona's resolved environment variables are passed to
 // the git clone command for authentication.
 func (h *PIHandler) prepareTaskDir(ctx context.Context, taskID, repoRef string, sendLog func(LogEntry) error, persona *persona.Persona) (string, error) {
-	taskDir := filepath.Join(h.baseCWD, "tasks", taskID)
+	// Use a random suffix so that concurrent or re-queued executions of the
+	// same task never collide on the same directory path. This avoids the
+	// rename race where a stale .git (or any other file) from a previous
+	// interrupted run would cause os.Rename to fail with "file exists".
+	randSuffix, err := randomHexSuffix(6)
+	if err != nil {
+		return "", fmt.Errorf("generate task dir random suffix: %w", err)
+	}
+	taskDir := filepath.Join(h.baseCWD, "tasks", taskID+"-"+randSuffix)
 	if err := os.MkdirAll(taskDir, 0o755); err != nil {
 		return "", fmt.Errorf("create task dir %s: %w", taskDir, err)
 	}
@@ -595,6 +608,16 @@ func (h *PIHandler) cloneRepo(ctx context.Context, taskDir, repoRef string, send
 		dst := filepath.Join(taskDir, entry.Name())
 		entryInfo, _ := entry.Info()
 		h.log.Printf("[WORKDIR] moving %s (mode=%o) -> %s", entry.Name(), entryInfo.Mode().Perm(), dst)
+		// Handle the case where the destination already exists from a
+		// previous task execution that was interrupted (e.g. guest crash,
+		// OOM kill, signal) before cleanupTaskDir could run. The stale
+		// directory is safe to remove — persona files are re-applied
+		// after the clone in prepareTaskDir.
+		if _, err := os.Lstat(dst); err == nil {
+			if err := os.RemoveAll(dst); err != nil {
+				return fmt.Errorf("remove existing %s: %w", dst, err)
+			}
+		}
 		if err := os.Rename(src, dst); err != nil {
 			return fmt.Errorf("move %s to %s: %w", src, dst, err)
 		}
@@ -760,14 +783,22 @@ func backoffAndSleep(ctx context.Context, attempt int, logger *log.Logger) error
 // cleanupTaskDir removes the task directory and all its contents.
 // Guests clean up after themselves so stale directories don't accumulate.
 // This method is safe to call even if the directory does not exist.
-func (h *PIHandler) cleanupTaskDir(taskID string) error {
-	taskDir := filepath.Join(h.baseCWD, "tasks", taskID)
+func (h *PIHandler) cleanupTaskDir(taskDir string) error {
 	h.log.Printf("[CLEANUP] removing task directory: %s", taskDir)
 	if err := os.RemoveAll(taskDir); err != nil {
 		return fmt.Errorf("cleanup task dir %s: %w", taskDir, err)
 	}
 	h.log.Printf("[CLEANUP] task directory removed: %s", taskDir)
 	return nil
+}
+
+// randomHexSuffix returns a random hex string of the given length.
+func randomHexSuffix(n int) (string, error) {
+	b := make([]byte, n)
+	if _, err := rand.Read(b); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(b), nil
 }
 
 // captureExitDiagnostics gathers diagnostic information from the pi client
