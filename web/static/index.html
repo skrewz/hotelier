@@ -312,6 +312,10 @@
                         <input type="text" id="task-tags" placeholder="business-default, android">
                     </div>
                     <div class="form-group">
+                        <label>Repository (optional)</label>
+                        <input type="text" id="task-repo-ref" placeholder="https://github.com/user/repo.git">
+                    </div>
+                    <div class="form-group">
                         <label>Priority</label>
                         <div style="display:flex;gap:0.5rem;">
                             <label style="display:flex;align-items:center;gap:0.25rem;cursor:pointer;font-size:0.85rem;color:#e2e8f0;">
@@ -1279,6 +1283,7 @@
         async function submitTask() {
             const prompt = document.getElementById('task-prompt').value;
             const tags = document.getElementById('task-tags').value;
+            const repoRef = document.getElementById('task-repo-ref').value.trim();
             const priorityRadio = document.querySelector('input[name="task-priority"]:checked');
             const priority = priorityRadio ? priorityRadio.value : 'orangutan';
 
@@ -1290,6 +1295,7 @@
             const task = {
                 prompt: prompt,
                 tags: tags ? tags.split(',').map(s => s.trim()).filter(Boolean) : [],
+                repo_ref: repoRef || undefined,
                 priority: priority
             };
 
@@ -1302,6 +1308,7 @@
                 if (res.ok) {
                     document.getElementById('task-prompt').value = '';
                     document.getElementById('task-tags').value = '';
+                    document.getElementById('task-repo-ref').value = '';
                     refresh();
                 }
             } catch (e) {
