@@ -263,10 +263,11 @@ func TestPIHandler_PrepareTaskDir(t *testing.T) {
 		t.Fatalf("prepareTaskDir failed: %v", err)
 	}
 
-	// Should return a task-specific directory, not the base CWD.
-	expectedPrefix := filepath.Join(baseDir, "tasks", "task-1")
-	if taskDir != expectedPrefix {
-		t.Errorf("expected working dir %q, got %q", expectedPrefix, taskDir)
+	// Should return a task-specific directory under baseDir/tasks/ with the
+	// task ID as a prefix (random suffix is appended for uniqueness).
+	expectedPrefix := filepath.Join(baseDir, "tasks", "task-1-")
+	if !strings.HasPrefix(taskDir, expectedPrefix) {
+		t.Errorf("expected working dir to start with %q, got %q", expectedPrefix, taskDir)
 	}
 
 	// The directory should exist.
@@ -315,10 +316,10 @@ func TestPIHandler_PrepareTaskDirAfterResetClient(t *testing.T) {
 		t.Fatalf("first prepareTaskDir failed: %v", err)
 	}
 
-	// Verify first task dir is under baseDir
-	expectedDir1 := filepath.Join(baseDir, "tasks", "task-1")
-	if taskDir1 != expectedDir1 {
-		t.Errorf("first task dir = %q, want %q", taskDir1, expectedDir1)
+	// Verify first task dir is under baseDir with the expected prefix.
+	expectedPrefix1 := filepath.Join(baseDir, "tasks", "task-1-")
+	if !strings.HasPrefix(taskDir1, expectedPrefix1) {
+		t.Errorf("first task dir = %q, want prefix %q", taskDir1, expectedPrefix1)
 	}
 
 	// Simulate resetClient: replace the client with one whose CWD is the
@@ -337,14 +338,14 @@ func TestPIHandler_PrepareTaskDirAfterResetClient(t *testing.T) {
 
 	// The second task dir should be under baseDir, NOT nested under taskDir1.
 	// Bug: it would be taskDir1/tasks/task-2 instead of baseDir/tasks/task-2.
-	expectedDir2 := filepath.Join(baseDir, "tasks", "task-2")
-	if taskDir2 != expectedDir2 {
-		t.Errorf("second task dir = %q, want %q (base CWD leaked into task dir)", taskDir2, expectedDir2)
+	expectedPrefix2 := filepath.Join(baseDir, "tasks", "task-2-")
+	if !strings.HasPrefix(taskDir2, expectedPrefix2) {
+		t.Errorf("second task dir = %q, want prefix %q (base CWD leaked into task dir)", taskDir2, expectedPrefix2)
 	}
 
-	// Verify the directory was actually created at the correct path
-	if _, err := os.Stat(expectedDir2); os.IsNotExist(err) {
-		t.Errorf("expected task dir %s to exist", expectedDir2)
+	// Verify the directory was actually created
+	if _, err := os.Stat(taskDir2); os.IsNotExist(err) {
+		t.Errorf("expected task dir %s to exist", taskDir2)
 	}
 }
 
@@ -380,8 +381,8 @@ func TestPIHandler_CleanupTaskDir_RemovesDirectory(t *testing.T) {
 		t.Fatalf("task dir %s should exist before cleanup: %v", taskDir, err)
 	}
 
-	// Clean up the task directory
-	err = h.cleanupTaskDir("task-1")
+	// Clean up the task directory using the actual path returned by prepareTaskDir.
+	err = h.cleanupTaskDir(taskDir)
 	if err != nil {
 		t.Fatalf("cleanupTaskDir failed: %v", err)
 	}
@@ -412,8 +413,8 @@ func TestPIHandler_CleanupTaskDir_Idempotent(t *testing.T) {
 		log:     log.New(io.Discard, "", 0),
 	}
 
-	// Cleanup a non-existent directory should not error
-	err = h.cleanupTaskDir("nonexistent-task")
+	// Cleanup a non-existent directory should not error.
+	err = h.cleanupTaskDir(filepath.Join(baseDir, "tasks", "nonexistent-task-abc123"))
 	if err != nil {
 		t.Errorf("cleanupTaskDir should not error on missing directory: %v", err)
 	}
@@ -451,8 +452,8 @@ func TestPIHandler_CleanupTaskDir_WithContents(t *testing.T) {
 		t.Fatalf("create test file: %v", err)
 	}
 
-	// Clean up
-	err = h.cleanupTaskDir("task-1")
+	// Clean up using the actual path returned by prepareTaskDir.
+	err = h.cleanupTaskDir(taskDir)
 	if err != nil {
 		t.Fatalf("cleanupTaskDir failed: %v", err)
 	}
@@ -1053,16 +1054,31 @@ func TestPIHandler_PrepareTaskDir_WithRepoRef(t *testing.T) {
 		t.Errorf("expected 'git clone' in error, got: %v", err)
 	}
 
-	// Task directory should still have been created (even though clone failed)
-	expectedDir := filepath.Join(baseDir, "tasks", "task-repo")
-	if _, err := os.Stat(expectedDir); os.IsNotExist(err) {
-		t.Errorf("expected task dir %s to exist even after clone failure", expectedDir)
+	// Task directory should still have been created (even though clone failed).
+	// We can't check the exact path because of the random suffix, but we can
+	// verify a new directory was created under baseDir/tasks/ with the right prefix.
+	tasksDir := filepath.Join(baseDir, "tasks")
+	entries, err := os.ReadDir(tasksDir)
+	if err != nil {
+		t.Fatalf("read tasks dir: %v", err)
 	}
-
-	// The tmp subdirectory should also exist (for TMPDIR isolation).
-	tmpDir := filepath.Join(expectedDir, "tmp")
-	if _, err := os.Stat(tmpDir); os.IsNotExist(err) {
-		t.Errorf("tmp dir %s should exist for TMPDIR isolation even after clone failure", tmpDir)
+	found := false
+	for _, e := range entries {
+		if strings.HasPrefix(e.Name(), "task-repo-") {
+			found = true
+			expectedDir := filepath.Join(tasksDir, e.Name())
+			if _, err := os.Stat(expectedDir); os.IsNotExist(err) {
+				t.Errorf("expected task dir %s to exist even after clone failure", expectedDir)
+			}
+			tmpDir := filepath.Join(expectedDir, "tmp")
+			if _, err := os.Stat(tmpDir); os.IsNotExist(err) {
+				t.Errorf("tmp dir %s should exist for TMPDIR isolation even after clone failure", tmpDir)
+			}
+			break
+		}
+	}
+	if !found {
+		t.Errorf("expected a task directory with prefix 'task-repo-' to exist under %s", tasksDir)
 	}
 }
 
@@ -1109,10 +1125,10 @@ func TestPIHandler_PrepareTaskDir_WithPersonaNoRepoRef(t *testing.T) {
 		t.Fatalf("prepareTaskDir failed: %v", err)
 	}
 
-	// The task directory should exist with the persona file applied
-	expectedDir := filepath.Join(baseDir, "tasks", "task-persona-no-repo")
-	if taskDir != expectedDir {
-		t.Errorf("expected %q, got %q", expectedDir, taskDir)
+	// The task directory should exist with the persona file applied.
+	expectedPrefix := filepath.Join(baseDir, "tasks", "task-persona-no-repo-")
+	if !strings.HasPrefix(taskDir, expectedPrefix) {
+		t.Errorf("expected task dir to start with %q, got %q", expectedPrefix, taskDir)
 	}
 
 	// The persona file should be present
@@ -1153,9 +1169,9 @@ func TestPIHandler_PrepareTaskDir_NoRepoRef(t *testing.T) {
 		t.Fatalf("prepareTaskDir failed: %v", err)
 	}
 
-	expectedDir := filepath.Join(baseDir, "tasks", "task-no-repo")
-	if taskDir != expectedDir {
-		t.Errorf("expected %q, got %q", expectedDir, taskDir)
+	expectedPrefix := filepath.Join(baseDir, "tasks", "task-no-repo-")
+	if !strings.HasPrefix(taskDir, expectedPrefix) {
+		t.Errorf("expected task dir to start with %q, got %q", expectedPrefix, taskDir)
 	}
 
 	// Should have sent a "Using task directory" log entry
@@ -1171,7 +1187,7 @@ func TestPIHandler_PrepareTaskDir_NoRepoRef(t *testing.T) {
 	}
 
 	// The tmp subdirectory should exist (for TMPDIR isolation).
-	tmpDir := filepath.Join(expectedDir, "tmp")
+	tmpDir := filepath.Join(taskDir, "tmp")
 	if _, err := os.Stat(tmpDir); os.IsNotExist(err) {
 		t.Errorf("tmp dir %s should exist for TMPDIR isolation", tmpDir)
 	}
@@ -1224,14 +1240,28 @@ func TestPIHandler_PrepareTaskDir_WithPersonaAndRepoRef(t *testing.T) {
 		t.Fatal("expected error when cloning nonexistent repo, got nil")
 	}
 
-	// The task directory should exist with the persona file applied
-	taskDir := filepath.Join(baseDir, "tasks", "task-persona-repo")
-	if _, err := os.Stat(taskDir); os.IsNotExist(err) {
-		t.Fatalf("expected task dir %s to exist", taskDir)
+	// The task directory should exist with the persona file applied.
+	tasksDir := filepath.Join(baseDir, "tasks")
+	entries, err := os.ReadDir(tasksDir)
+	if err != nil {
+		t.Fatalf("read tasks dir: %v", err)
+	}
+	var foundDir string
+	for _, e := range entries {
+		if strings.HasPrefix(e.Name(), "task-persona-repo-") {
+			foundDir = filepath.Join(tasksDir, e.Name())
+			break
+		}
+	}
+	if foundDir == "" {
+		t.Fatalf("expected a task directory with prefix 'task-persona-repo-' to exist under %s", tasksDir)
+	}
+	if _, err := os.Stat(foundDir); os.IsNotExist(err) {
+		t.Fatalf("expected task dir %s to exist", foundDir)
 	}
 
 	// The persona file should be present (applied before clone)
-	credDest := filepath.Join(taskDir, ".git-credentials")
+	credDest := filepath.Join(foundDir, ".git-credentials")
 	if _, err := os.Stat(credDest); os.IsNotExist(err) {
 		t.Error("expected persona file .git-credentials to exist in task dir (applied before clone)")
 	}
@@ -1412,4 +1442,120 @@ func TestPIHandler_RestartClient_RetriesOnFailure(t *testing.T) {
 	}
 
 	h.Stop(context.Background())
+}
+
+// TestPIHandler_PrepareTaskDir_UniquePaths verifies that each call to
+// prepareTaskDir produces a unique directory path, even when called with
+// the same task ID. This prevents the rename race condition where a stale
+// .git (or any other file) from a previous interrupted run would cause
+// os.Rename to fail with "file exists".
+func TestPIHandler_PrepareTaskDir_UniquePaths(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not installed")
+	}
+
+	baseDir, err := os.MkdirTemp("", "hotelier-base-*")
+	if err != nil {
+		t.Fatalf("create temp base dir: %v", err)
+	}
+	defer os.RemoveAll(baseDir)
+
+	// Create a minimal repo to clone from.
+	repoDir, err := os.MkdirTemp("", "hotelier-repo-*")
+	if err != nil {
+		t.Fatalf("create temp repo dir: %v", err)
+	}
+	defer os.RemoveAll(repoDir)
+
+	workDir := filepath.Join(repoDir, "work")
+	if err := os.MkdirAll(workDir, 0o755); err != nil {
+		t.Fatalf("create work dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(workDir, "README.md"), []byte("hello"), 0o644); err != nil {
+		t.Fatalf("write README: %v", err)
+	}
+	if out, err := exec.Command("git", "-C", workDir, "init").CombinedOutput(); err != nil {
+		t.Fatalf("init repo: %v\n%s", err, out)
+	}
+	if out, err := exec.Command("git", "-C", workDir, "config", "user.email", "test@test.com").CombinedOutput(); err != nil {
+		t.Fatalf("git config email: %v\n%s", err, out)
+	}
+	if out, err := exec.Command("git", "-C", workDir, "config", "user.name", "Test").CombinedOutput(); err != nil {
+		t.Fatalf("git config name: %v\n%s", err, out)
+	}
+	if out, err := exec.Command("git", "-C", workDir, "add", ".").CombinedOutput(); err != nil {
+		t.Fatalf("git add: %v\n%s", err, out)
+	}
+	if out, err := exec.Command("git", "-C", workDir, "commit", "-m", "initial").CombinedOutput(); err != nil {
+		t.Fatalf("commit: %v\n%s", err, out)
+	}
+	bundleFile := filepath.Join(repoDir, "repo.bundle")
+	if out, err := exec.Command("git", "-C", workDir, "bundle", "create", bundleFile, "--all").CombinedOutput(); err != nil {
+		t.Fatalf("bundle: %v\n%s", err, out)
+	}
+
+	client := pi.NewClient(pi.PiClientConfig{
+		CWD: baseDir,
+		Log: log.New(io.Discard, "", 0),
+	})
+
+	h := &PIHandler{
+		baseCWD: baseDir,
+		client:  client,
+		log:     log.New(io.Discard, "", 0),
+	}
+
+	taskID := "task-unique-paths"
+
+	// Call prepareTaskDir twice with the same task ID.
+	dir1, err := h.prepareTaskDir(context.Background(), taskID, bundleFile, nil, nil)
+	if err != nil {
+		t.Fatalf("first prepareTaskDir failed: %v", err)
+	}
+	dir2, err := h.prepareTaskDir(context.Background(), taskID, bundleFile, nil, nil)
+	if err != nil {
+		t.Fatalf("second prepareTaskDir failed: %v", err)
+	}
+
+	// The two directories must be different.
+	if dir1 == dir2 {
+		t.Errorf("expected unique paths, got same dir %q", dir1)
+	}
+
+	// Both should have the task ID prefix.
+	prefix := filepath.Join(baseDir, "tasks", taskID+"-")
+	if !strings.HasPrefix(dir1, prefix) {
+		t.Errorf("first dir %q should have prefix %q", dir1, prefix)
+	}
+	if !strings.HasPrefix(dir2, prefix) {
+		t.Errorf("second dir %q should have prefix %q", dir2, prefix)
+	}
+
+	// Both should contain a cloned repo.
+	for i, dir := range []string{dir1, dir2} {
+		gitDir := filepath.Join(dir, ".git")
+		if _, err := os.Stat(gitDir); os.IsNotExist(err) {
+			t.Errorf("dir %d: expected .git to exist", i+1)
+		}
+		readme := filepath.Join(dir, "README.md")
+		if _, err := os.Stat(readme); os.IsNotExist(err) {
+			t.Errorf("dir %d: expected README.md to exist", i+1)
+		}
+	}
+
+	// Clean up both directories.
+	if err := h.cleanupTaskDir(dir1); err != nil {
+		t.Fatalf("cleanup dir1: %v", err)
+	}
+	if err := h.cleanupTaskDir(dir2); err != nil {
+		t.Fatalf("cleanup dir2: %v", err)
+	}
+
+	// Verify both are gone.
+	if _, err := os.Stat(dir1); !os.IsNotExist(err) {
+		t.Errorf("dir1 should have been removed")
+	}
+	if _, err := os.Stat(dir2); !os.IsNotExist(err) {
+		t.Errorf("dir2 should have been removed")
+	}
 }
