@@ -949,6 +949,28 @@
                     }
                 }
 
+                // Update priority badge in header (add, remove, or keep)
+                // Priority badge only shown for PENDING tasks
+                const headerRow = document.querySelector('.task-detail-header > div:last-child');
+                if (headerRow) {
+                    const existingPriority = headerRow.querySelector('.badge-priority');
+                    const showPriority = task.status === 'PENDING' && task.priority;
+                    if (showPriority) {
+                        if (existingPriority) {
+                            existingPriority.textContent = `🔜${priorityToEmoji(task.priority)}`;
+                            existingPriority.title = `Priority`;
+                        } else {
+                            const span = document.createElement('span');
+                            span.className = 'badge badge-priority';
+                            span.title = 'Priority';
+                            span.textContent = `🔜${priorityToEmoji(task.priority)}`;
+                            headerRow.insertBefore(span, headerRow.firstChild);
+                        }
+                    } else if (existingPriority) {
+                        existingPriority.remove();
+                    }
+                }
+
                 // Update log count in header meta
                 const metaEl = document.querySelector('.task-detail-meta');
                 if (metaEl) {
