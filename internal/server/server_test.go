@@ -4031,7 +4031,9 @@ func TestTryAssignTask_AssignsToIdleGuestWithConnection(t *testing.T) {
 }
 
 // TestHandleGuestDisconnect verifies that when a guest's WebSocket
-// connection is lost, the server immediately fails the guest's running task.
+// connection is lost, the server re-queues the guest's running task
+// so it can be picked up by another guest (or the same guest after reconnecting).
+// See issue #4.
 func TestHandleGuestDisconnect(t *testing.T) {
 	srv := newTestServer(t)
 	hub := srv.Hub()
@@ -4088,10 +4090,13 @@ func TestHandleGuestDisconnect(t *testing.T) {
 	// Simulate connection disconnect
 	srv.handleGuestDisconnect("guest-conn-1")
 
-	// Task should be FAILED
+	// Task should be re-queued to PENDING, not FAILED
 	task, _ = srv.TaskQueue().Get("task-disconnect")
-	if task.Status != queue.TaskStatusFailed {
-		t.Errorf("expected task FAILED after disconnect, got %s", task.Status)
+	if task.Status != queue.TaskStatusPending {
+		t.Errorf("expected task PENDING after disconnect (re-queued), got %s", task.Status)
+	}
+	if task.AssignedTo != "" {
+		t.Errorf("expected task AssignedTo cleared after disconnect, got %s", task.AssignedTo)
 	}
 
 	// Guest should be cleared
