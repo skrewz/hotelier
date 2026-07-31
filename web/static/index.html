@@ -1300,10 +1300,6 @@
                         refresh();
                         // refresh() already calls patchTaskDetailMeta() for
                         // the active task, so no extra work needed here.
-                    } else if (msg.method === 'task.position_changed') {
-                        // A task's queue position changed (e.g. bring-to-top).
-                        // Re-render the task list to reflect the new order.
-                        refresh();
                     } else if (msg.method === 'task.log') {
                         // Parse params — params may be a string (JSON-encoded) or already an object
                         let params = {};
