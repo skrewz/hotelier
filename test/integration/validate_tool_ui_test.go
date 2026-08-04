@@ -197,6 +197,9 @@ func loadCaptureEntries(logPath, taskID, prompt string) []testLogEntry {
 		{fmt.Sprintf("Cloning https://github.com/example/repo.git -> /tmp/hotelier/tasks/%s/repo", taskID), "system", "", "", "", "", "", false},
 		{"Cloned https://github.com/example/repo.git", "system", "", "", "", "", "", false},
 		{fmt.Sprintf("Spawning pi subprocess in: /tmp/hotelier/tasks/%s/repo", taskID), "system", "", "", "", "", "", false},
+		{"[spawn] Checking pi binary...", "system", "", "", "", "", "", false},
+		{"[spawn] Checking configuration...", "system", "", "", "", "", "", false},
+		{"[spawn] Starting RPC server...", "system", "", "", "", "", "", false},
 		{"Sending prompt to pi", "system", "", "", "", "", "", false},
 		{"Prompt sent, waiting for events", "system", "", "", "", "", "", false},
 	}, entries...)
@@ -1076,9 +1079,22 @@ const { chromium } = require('playwright');
         return content ? content.textContent.substring(0, 100) : '';
       }),
       thinkingHasHeader: Array.from(thinkingBlocks).map(b => b.querySelector('.thinking-block-header') !== null),
+      // Spawn blocks (Issue #45: collapsed pre-run troubleshooting output)
+      spawnBlocks: body.querySelectorAll('.spawn-block'),
+      spawnBlockCount: body.querySelectorAll('.spawn-block').length,
+      spawnBlockContents: Array.from(body.querySelectorAll('.spawn-block')).map(b => {
+        const content = b.querySelector('.spawn-content');
+        return content ? content.textContent.substring(0, 100) : '';
+      }),
+      spawnBlockBodiesOpen: Array.from(body.querySelectorAll('.spawn-block')).map(b => {
+        const body = b.querySelector('.spawn-block-body');
+        return body ? body.classList.contains('open') : false;
+      }),
+      spawnHasHeader: Array.from(body.querySelectorAll('.spawn-block')).map(b => b.querySelector('.spawn-block-header') !== null),
       logMsgCount: logMsgs.length,
       hasToolMarkersOutsideBlocks,
       // System-level operational messages (Executing task, Cloning, Spawning, etc.)
+      // NOTE: [spawn] lines are now inside spawn-blocks, not plain .log-msg.system
       systemMsgCount: Array.from(logMsgs).filter(m => m.classList.contains('system')).length,
       systemMsgTexts: Array.from(logMsgs).filter(m => m.classList.contains('system')).map(m => m.textContent.trim()),
     };
@@ -1106,6 +1122,12 @@ const { chromium } = require('playwright');
     { name: 'thinking block 1 has non-empty content', pass: detailResult.thinkingBlockContents[0].length > 0 },
     { name: 'thinking block 2 has header', pass: detailResult.thinkingHasHeader[1] === true },
     { name: 'thinking block 2 has non-empty content', pass: detailResult.thinkingBlockContents[1].length > 0 },
+    // Spawn blocks (Issue #45: collapsed pre-run troubleshooting output)
+    { name: 'spawn blocks rendered', pass: detailResult.spawnBlockCount >= 1 },
+    { name: 'spawn block 1 has header', pass: detailResult.spawnHasHeader[0] === true },
+    { name: 'spawn block 1 has non-empty content', pass: detailResult.spawnBlockContents[0].length > 0 },
+    { name: 'spawn block 1 content includes [spawn]', pass: detailResult.spawnBlockContents[0].includes('[spawn]') },
+    { name: 'spawn block is collapsed by default', pass: detailResult.spawnBlockBodiesOpen[0] === false },
     // Operational system messages
     { name: 'system messages present (including operational)', pass: detailResult.systemMsgCount >= 2 },
     { name: 'operational message: Executing task', pass: detailResult.systemMsgTexts.some(t => t.includes('Executing task')) },

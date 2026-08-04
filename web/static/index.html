@@ -135,6 +135,19 @@
         .thinking-block-body.open { display: block; }
         .thinking-block-body .thinking-content { padding: 0.5rem 0.75rem; font-size: 0.8rem; color: #94a3b8; font-style: italic; font-family: 'SF Mono', 'Fira Code', monospace; white-space: pre-wrap; word-break: break-all; line-height: 1.6; }
 
+        /* Spawn block — collapsible pre-run troubleshooting output (Issue #45) */
+        .spawn-block { margin-bottom: 0.75rem; border-radius: 0.5rem; overflow: hidden; border: 1px solid #1e3a5f; }
+        .spawn-block-header { display: flex; align-items: center; justify-content: space-between; padding: 0.5rem 0.75rem; background: #0c1929; cursor: pointer; user-select: none; font-size: 0.8rem; }
+        .spawn-block-header:hover { background: #162640; }
+        .spawn-block-header .spawn-icon { margin-right: 0.5rem; }
+        .spawn-block-header .spawn-label { font-weight: 600; color: #38bdf8; font-size: 0.8rem; }
+        .spawn-block-header .spawn-preview { color: #2563eb; font-size: 0.75rem; margin-left: 0.5rem; font-style: italic; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 300px; display: inline-block; }
+        .spawn-block-header .spawn-chevron { color: #3b82f6; transition: transform 0.15s; font-size: 0.75rem; }
+        .spawn-block-header .spawn-chevron.open { transform: rotate(90deg); }
+        .spawn-block-body { display: none; background: #0a1628; border-top: 1px solid #1e3a5f; }
+        .spawn-block-body.open { display: block; }
+        .spawn-block-body .spawn-content { padding: 0.5rem 0.75rem; font-size: 0.8rem; color: #64748b; font-family: 'SF Mono', 'Fira Code', monospace; white-space: pre-wrap; word-break: break-all; line-height: 1.6; }
+
         /* Tool call blocks */
         .tool-block { margin-bottom: 0.75rem; border-radius: 0.5rem; overflow: hidden; border: 1px solid #334155; }
         .tool-block-header { display: flex; align-items: center; justify-content: space-between; padding: 0.5rem 0.75rem; background: #1e293b; cursor: pointer; user-select: none; font-size: 0.8rem; }
@@ -820,6 +833,57 @@
             </div>`;
         }
 
+        // =====================================================================
+        // Spawn block helpers — collapsible pre-run troubleshooting output
+        // (Issue #45)
+        // =====================================================================
+
+        let _spawnBlockCounter = 0;
+
+        function nextSpawnBlockId() {
+            _spawnBlockCounter++;
+            return 'spawn-' + _spawnBlockCounter;
+        }
+
+        function toggleSpawnBlock(blockId) {
+            const body = document.getElementById('spawn-body-' + blockId);
+            if (!body) return;
+            const header = body.previousElementSibling;
+            const chevron = header?.querySelector('.spawn-chevron');
+            body.classList.toggle('open');
+            if (chevron) chevron.classList.toggle('open');
+        }
+
+        // buildSpawnBlockHTML creates a collapsible spawn block for pre-run
+        // troubleshooting output. Always collapsed by default.
+        //   content  — accumulated spawn output text (lines joined with newlines)
+        //   blockId  — unique identifier for the block
+        //   timestamp — ISO timestamp string for the latest activity (defaults to now)
+        //   lineCount — number of spawn lines in this block (for counter display)
+        function buildSpawnBlockHTML(content, blockId, timestamp, lineCount) {
+            if (!blockId) blockId = nextSpawnBlockId();
+            const preview = getFirstLine(content);
+            const ts = formatTimestamp(timestamp);
+            const counter = lineCount != null ? `<span class="block-counter">${lineCount}</span>` : '';
+            return `<div class="spawn-block" id="spawn-${blockId}">
+                <div class="spawn-block-header" onclick="toggleSpawnBlock('${blockId}')">
+                    <div>
+                        <span class="spawn-icon">🔍</span>
+                        <span class="spawn-label">Spawn output</span>
+                        ${preview ? `<span class="spawn-preview">${escapeHtml(preview)}</span>` : ''}
+                        ${counter}
+                    </div>
+                    <div style="display:flex;align-items:center;gap:0.25rem;">
+                        <span class="block-timestamp">${ts}</span>
+                        <span class="spawn-chevron">▶</span>
+                    </div>
+                </div>
+                <div class="spawn-block-body" id="spawn-body-${blockId}">
+                    <div class="spawn-content">${escapeHtml(content)}</div>
+                </div>
+            </div>`;
+        }
+
         // renderUnknownEvent renders an unrecognized RPC event in a grey <pre> block.
         function renderUnknownEvent(event) {
             const pre = document.createElement('pre');
@@ -953,11 +1017,14 @@
                 const isRunning = task.status === 'RUNNING' || task.status === 'ASSIGNED';
                 let currentToolBlock = null;
 
-                // Accumulators for merging consecutive thinking/text entries
+                // Accumulators for merging consecutive thinking/text/spawn entries
                 let pendingThinkingLines = '';
                 let pendingThinkingTimestamp = null;
                 let pendingThinkingCount = 0;
                 let pendingTextLines = '';
+                let pendingSpawnLines = '';
+                let pendingSpawnTimestamp = null;
+                let pendingSpawnCount = 0;
 
                 function flushPendingThinking() {
                     if (pendingThinkingLines) {
@@ -976,6 +1043,15 @@
                     }
                 }
 
+                function flushPendingSpawn() {
+                    if (pendingSpawnLines) {
+                        logsHtml += buildSpawnBlockHTML(pendingSpawnLines, null, pendingSpawnTimestamp, pendingSpawnCount);
+                        pendingSpawnLines = '';
+                        pendingSpawnTimestamp = null;
+                        pendingSpawnCount = 0;
+                    }
+                }
+
                 let pendingTextCursor = '';
 
                 logs.forEach((log, i) => {
@@ -985,8 +1061,9 @@
 
                     // Use structured fields to determine event type.
                     if (level === 'tool' && log.tool_type) {
-                        // Flush any pending thinking/text before tool processing.
+                        // Flush any pending thinking/text/spawn before tool processing.
                         flushPendingThinking();
+                        flushPendingSpawn();
                         flushPendingText();
 
                         if (log.tool_type === 'start') {
@@ -1049,13 +1126,23 @@
                     if (level === 'thinking') {
                         // Merge consecutive thinking entries into a single block
                         flushPendingText();
+                        flushPendingSpawn();
                         pendingThinkingLines += log.line;
                         pendingThinkingCount++;
                         if (log.timestamp) pendingThinkingTimestamp = log.timestamp;
+                    } else if (level === 'system' && log.line.startsWith('[spawn]')) {
+                        // Spawn output — group consecutive [spawn] lines into
+                        // a collapsible block (Issue #45).
+                        flushPendingThinking();
+                        flushPendingText();
+                        pendingSpawnLines += log.line + '\n';
+                        pendingSpawnCount++;
+                        if (log.timestamp) pendingSpawnTimestamp = log.timestamp;
                     } else {
-                        // Non-thinking entry: flush pending thinking, then
+                        // Non-thinking entry: flush pending thinking/spawn, then
                         // accumulate or flush text.
                         flushPendingThinking();
+                        flushPendingSpawn();
                         if (level === 'system') {
                             logsHtml += `<div class="log-msg system${cursorClass}">${escapeHtml(log.line)}</div>`;
                         } else if (level === 'error') {
@@ -1071,6 +1158,7 @@
 
                 // Flush any remaining accumulators
                 flushPendingThinking();
+                flushPendingSpawn();
                 flushPendingText();
 
                 // Close any remaining open tool block
@@ -1424,6 +1512,79 @@
             }
         }
 
+        // _appendSpawnToDetail appends a spawn line to the last spawn block
+        // (streaming). If no spawn block exists, creates a new one.
+        // Spawn blocks are kept open while content is arriving.
+        function _appendSpawnToDetail(body, line, wasAtBottom, timestamp, entryCount) {
+            const blocks = body.querySelectorAll('.spawn-block');
+            const lastBlock = blocks.length > 0 ? blocks[blocks.length - 1] : null;
+            const canAppend = lastBlock && lastBlock === body.lastElementChild;
+            if (canAppend) {
+                const contentEl = lastBlock.querySelector('.spawn-content');
+                if (contentEl) {
+                    contentEl.textContent += line;
+                }
+                const previewEl = lastBlock.querySelector('.spawn-preview');
+                if (previewEl && contentEl) {
+                    previewEl.textContent = getFirstLine(contentEl.textContent);
+                }
+                const counterEl = lastBlock.querySelector('.block-counter');
+                if (counterEl && entryCount != null) {
+                    counterEl.textContent = entryCount;
+                }
+                const tsEl = lastBlock.querySelector('.block-timestamp');
+                if (tsEl) {
+                    tsEl.textContent = formatTimestamp(timestamp);
+                }
+                // Keep the block open while content is arriving
+                const bodyEl = lastBlock.querySelector('.spawn-block-body');
+                const chevron = lastBlock.querySelector('.spawn-chevron');
+                if (bodyEl) bodyEl.classList.add('open');
+                if (chevron) chevron.classList.add('open');
+            } else {
+                // Create a new spawn block, open while streaming
+                const blockId = nextSpawnBlockId();
+                const msgEl = document.createElement('div');
+                msgEl.className = 'spawn-block';
+                msgEl.id = 'spawn-' + blockId;
+                const preview = getFirstLine(line);
+                const ts = formatTimestamp(timestamp);
+                const counter = entryCount != null ? `<span class="block-counter">${entryCount}</span>` : '';
+                msgEl.innerHTML = `
+                    <div class="spawn-block-header" onclick="toggleSpawnBlock('${blockId}')">
+                        <div>
+                            <span class="spawn-icon">🔍</span>
+                            <span class="spawn-label">Spawn output</span>
+                            ${preview ? `<span class="spawn-preview">${escapeHtml(preview)}</span>` : ''}
+                            ${counter}
+                        </div>
+                        <div style="display:flex;align-items:center;gap:0.25rem;">
+                            <span class="block-timestamp">${ts}</span>
+                            <span class="spawn-chevron open">▶</span>
+                        </div>
+                    </div>
+                    <div class="spawn-block-body open" id="spawn-body-${blockId}">
+                        <div class="spawn-content">${escapeHtml(line)}</div>
+                    </div>
+                `;
+                body.appendChild(msgEl);
+            }
+            scrollToBottomIfNeeded(body, wasAtBottom);
+        }
+
+        // _closeLastSpawnBlock closes the last spawn block (collapses it)
+        // if one exists. Used when a non-spawn entry arrives.
+        function _closeLastSpawnBlock(body) {
+            const blocks = body.querySelectorAll('.spawn-block');
+            const lastBlock = blocks.length > 0 ? blocks[blocks.length - 1] : null;
+            if (lastBlock) {
+                const bodyEl = lastBlock.querySelector('.spawn-block-body');
+                const chevron = lastBlock.querySelector('.spawn-chevron');
+                if (bodyEl) bodyEl.classList.remove('open');
+                if (chevron) chevron.classList.remove('open');
+            }
+        }
+
         // _appendTextToDetail appends a text delta to the last text message div.
         // If no text message div exists, creates a new one.
         function _appendTextToDetail(body, line, wasAtBottom) {
@@ -1571,11 +1732,25 @@
                     if (lastCounter) thinkingEntryCount = parseInt(lastCounter.textContent, 10) + 1;
                 }
                 _appendThinkingToDetail(body, line, wasAtBottom, logEntry.timestamp, thinkingEntryCount);
+                _closeLastSpawnBlock(body);
                 _lastAppendedLevel = 'thinking';
+            } else if (level === 'system' && line.startsWith('[spawn]')) {
+                // Spawn output — append to last spawn block or create new one
+                // (Issue #45). Keep block open while content is arriving.
+                _closeLastThinkingBlock(body);
+                const existingSpawnBlocks = body.querySelectorAll('.spawn-block');
+                let spawnEntryCount = 1;
+                if (existingSpawnBlocks.length > 0) {
+                    const lastCounter = existingSpawnBlocks[existingSpawnBlocks.length - 1].querySelector('.block-counter');
+                    if (lastCounter) spawnEntryCount = parseInt(lastCounter.textContent, 10) + 1;
+                }
+                _appendSpawnToDetail(body, line + '\n', wasAtBottom, logEntry.timestamp, spawnEntryCount);
+                _lastAppendedLevel = 'spawn';
             } else {
-                // Non-thinking entry: close the last thinking block if open,
+                // Non-thinking, non-spawn entry: close any open blocks,
                 // then append the new entry.
                 _closeLastThinkingBlock(body);
+                _closeLastSpawnBlock(body);
 
                 if (level === 'system') {
                     const msgEl = document.createElement('div');
@@ -1741,13 +1916,28 @@
                     }
                 }
 
+                // Accumulator for merging consecutive [spawn] lines into
+                // a collapsible spawn block (Issue #45).
+                let pendingSpawnLines = '';
+                let pendingSpawnTimestamp = null;
+                let pendingSpawnCount = 0;
+                function flushPendingSpawn() {
+                    if (pendingSpawnLines) {
+                        entriesHtml += buildSpawnBlockHTML(pendingSpawnLines, null, pendingSpawnTimestamp, pendingSpawnCount);
+                        pendingSpawnLines = '';
+                        pendingSpawnTimestamp = null;
+                        pendingSpawnCount = 0;
+                    }
+                }
+
                 entries.forEach((log) => {
                     const level = log.level || '';
 
                     // Use structured fields to determine event type.
                     if (level === 'tool' && log.tool_type) {
-                        // Flush pending thinking before tool processing
+                        // Flush pending thinking/spawn before tool processing
                         flushPendingThinking();
+                        flushPendingSpawn();
 
                         if (log.tool_type === 'start') {
                             if (currentToolBlock) {
@@ -1806,23 +1996,34 @@
 
                     if (level === 'thinking') {
                         // Accumulate consecutive thinking entries
+                        flushPendingSpawn();
                         pendingThinkingLines += log.line;
                         pendingThinkingCount++;
                         if (log.timestamp) pendingThinkingTimestamp = log.timestamp;
+                    } else if (level === 'system' && log.line.startsWith('[spawn]')) {
+                        // Spawn output — group consecutive [spawn] lines (Issue #45)
+                        flushPendingThinking();
+                        pendingSpawnLines += log.line + '\n';
+                        pendingSpawnCount++;
+                        if (log.timestamp) pendingSpawnTimestamp = log.timestamp;
                     } else if (level === 'system') {
                         flushPendingThinking();
+                        flushPendingSpawn();
                         entriesHtml += `<div class="log-msg system">${escapeHtml(log.line)}</div>`;
                     } else if (level === 'error') {
                         flushPendingThinking();
+                        flushPendingSpawn();
                         entriesHtml += `<div class="log-msg error">${escapeHtml(log.line)}</div>`;
                     } else {
                         flushPendingThinking();
+                        flushPendingSpawn();
                         entriesHtml += `<div class="log-msg guest"><div class="md-rendered">${renderMarkdown(log.line)}</div></div>`;
                     }
                 });
 
-                // Flush any remaining accumulated thinking
+                // Flush any remaining accumulated entries
                 flushPendingThinking();
+                flushPendingSpawn();
 
                 // Close any remaining open tool block
                 if (currentToolBlock) {
