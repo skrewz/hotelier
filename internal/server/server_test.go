@@ -3015,63 +3015,128 @@ func TestHandleTaskRerun_CancelledTask(t *testing.T) {
 	}
 }
 
-// TestHandleTaskTop_Success verifies that a PENDING task can be moved to
-// the top of the queue.
-func TestHandleTaskTop_Success(t *testing.T) {
+// TestHandleCreateTask_ValidPriority verifies that valid priority values
+// are accepted and returned in the response.
+func TestHandleCreateTask_ValidPriority(t *testing.T) {
 	srv := newTestServer(t)
 
-	// Create three tasks in order
-	for _, id := range []string{"task-1", "task-2", "task-3"} {
+	for _, priority := range []string{queue.PriorityFirefighter, queue.PriorityTeacher, queue.PriorityOrangutan} {
 		task := map[string]interface{}{
-			"id":     id,
-			"prompt": "Task " + id,
+			"id":       "task-priority-" + priority,
+			"prompt":   "Priority test",
+			"priority": priority,
 		}
 		body, _ := json.Marshal(task)
 		req := httptest.NewRequest(http.MethodPost, "/api/tasks", bytes.NewReader(body))
 		req.Header.Set("Content-Type", "application/json")
 		w := httptest.NewRecorder()
 		srv.HandleTasks(w, req)
+
+		if w.Code != http.StatusCreated {
+			t.Fatalf("priority %q: expected 201, got %d body: %s", priority, w.Code, w.Body.String())
+		}
+
+		var created queue.Task
+		if err := json.Unmarshal(w.Body.Bytes(), &created); err != nil {
+			t.Fatalf("priority %q: failed to unmarshal: %v", priority, err)
+		}
+		if created.Priority != priority {
+			t.Errorf("priority %q: expected %q, got %q", priority, priority, created.Priority)
+		}
+	}
+}
+
+// TestHandleCreateTask_InvalidPriority verifies that invalid priority values
+// are rejected.
+func TestHandleCreateTask_InvalidPriority(t *testing.T) {
+	srv := newTestServer(t)
+
+	task := map[string]interface{}{
+		"id":       "task-1",
+		"prompt":   "Priority test",
+		"priority": "🔥",
+	}
+	body, _ := json.Marshal(task)
+	req := httptest.NewRequest(http.MethodPost, "/api/tasks", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	srv.HandleTasks(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("expected 400 for invalid priority, got %d body: %s", w.Code, w.Body.String())
+	}
+}
+
+// TestHandleCreateTask_DefaultPriority verifies that tasks without a priority
+// default to orangutan.
+func TestHandleCreateTask_DefaultPriority(t *testing.T) {
+	srv := newTestServer(t)
+
+	task := map[string]interface{}{
+		"id":     "task-1",
+		"prompt": "Default priority test",
+	}
+	body, _ := json.Marshal(task)
+	req := httptest.NewRequest(http.MethodPost, "/api/tasks", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	srv.HandleTasks(w, req)
+
+	if w.Code != http.StatusCreated {
+		t.Fatalf("expected 201, got %d body: %s", w.Code, w.Body.String())
 	}
 
-	// Move task-3 to top
-	topReq := httptest.NewRequest(http.MethodPost, "/api/tasks/task-3/top", nil)
-	topW := httptest.NewRecorder()
-	srv.HandleTaskDetail(topW, topReq)
-
-	if topW.Code != http.StatusOK {
-		t.Fatalf("expected 200 for top, got %d body: %s", topW.Code, topW.Body.String())
+	var created queue.Task
+	if err := json.Unmarshal(w.Body.Bytes(), &created); err != nil {
+		t.Fatalf("failed to unmarshal: %v", err)
 	}
-
-	var result map[string]interface{}
-	if err := json.Unmarshal(topW.Body.Bytes(), &result); err != nil {
-		t.Fatalf("failed to unmarshal top response: %v", err)
+	if created.Priority != queue.PriorityOrangutan {
+		t.Errorf("expected default priority %q, got %q", queue.PriorityOrangutan, created.Priority)
 	}
-	if result["task_id"] != "task-3" {
-		t.Errorf("expected task_id task-3, got %v", result["task_id"])
-	}
+}
 
-	// Verify task-3 is now first in the queue
-	tasksRes := httptest.NewRequest(http.MethodGet, "/api/tasks", nil)
+// TestHandleGetTasks_IncludesPriority verifies that the tasks list includes
+// the priority field.
+func TestHandleGetTasks_IncludesPriority(t *testing.T) {
+	srv := newTestServer(t)
+
+	task := map[string]interface{}{
+		"id":       "task-1",
+		"prompt":   "Priority test",
+		"priority": queue.PriorityFirefighter,
+	}
+	body, _ := json.Marshal(task)
+	req := httptest.NewRequest(http.MethodPost, "/api/tasks", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	srv.HandleTasks(w, req)
+
+	// Get tasks
+	tasksReq := httptest.NewRequest(http.MethodGet, "/api/tasks", nil)
 	tasksW := httptest.NewRecorder()
-	srv.HandleTasks(tasksW, tasksRes)
+	srv.HandleTasks(tasksW, tasksReq)
 
 	var tasksData map[string]interface{}
 	if err := json.Unmarshal(tasksW.Body.Bytes(), &tasksData); err != nil {
 		t.Fatalf("failed to unmarshal tasks: %v", err)
 	}
 	taskList := tasksData["tasks"].([]interface{})
-	if taskList[0].(map[string]interface{})["id"] != "task-3" {
-		t.Errorf("expected task-3 first, got %v", taskList[0].(map[string]interface{})["id"])
+	taskMap := taskList[0].(map[string]interface{})
+
+	if taskMap["priority"] != queue.PriorityFirefighter {
+		t.Errorf("expected priority %q in task list, got %v", queue.PriorityFirefighter, taskMap["priority"])
 	}
 }
 
-// TestHandleTaskTop_NotPending verifies that non-pending tasks cannot be moved.
-func TestHandleTaskTop_NotPending(t *testing.T) {
+// TestHandleTaskRerun_PreservesPriority verifies that rerunning a task
+// preserves the original priority.
+func TestHandleTaskRerun_PreservesPriority(t *testing.T) {
 	srv := newTestServer(t)
 
 	task := map[string]interface{}{
-		"id":     "task-1",
-		"prompt": "Build a feature",
+		"id":       "task-1",
+		"prompt":   "Priority test",
+		"priority": queue.PriorityFirefighter,
 	}
 	body, _ := json.Marshal(task)
 	req := httptest.NewRequest(http.MethodPost, "/api/tasks", bytes.NewReader(body))
@@ -3079,69 +3144,35 @@ func TestHandleTaskTop_NotPending(t *testing.T) {
 	w := httptest.NewRecorder()
 	srv.HandleTasks(w, req)
 
-	// Assign the task so it's no longer pending
+	// Fail the task so it can be rerun
 	err := srv.TaskQueue().Assign("task-1", "guest-1")
 	if err != nil {
 		t.Fatalf("failed to assign task: %v", err)
 	}
-
-	// Try to move assigned task to top
-	topReq := httptest.NewRequest(http.MethodPost, "/api/tasks/task-1/top", nil)
-	topW := httptest.NewRecorder()
-	srv.HandleTaskDetail(topW, topReq)
-
-	if topW.Code != http.StatusConflict {
-		t.Errorf("expected 409 for non-pending task, got %d body: %s", topW.Code, topW.Body.String())
+	err = srv.TaskQueue().Start("task-1")
+	if err != nil {
+		t.Fatalf("failed to start task: %v", err)
 	}
-}
-
-// TestHandleTaskTop_NotFound verifies that moving a nonexistent task fails.
-func TestHandleTaskTop_NotFound(t *testing.T) {
-	srv := newTestServer(t)
-
-	topReq := httptest.NewRequest(http.MethodPost, "/api/tasks/nonexistent/top", nil)
-	topW := httptest.NewRecorder()
-	srv.HandleTaskDetail(topW, topReq)
-
-	if topW.Code != http.StatusNotFound {
-		t.Errorf("expected 404, got %d", topW.Code)
+	err = srv.TaskQueue().Fail("task-1", "test failure")
+	if err != nil {
+		t.Fatalf("failed to fail task: %v", err)
 	}
-}
 
-// TestHandleTaskTop_EmptyID verifies that empty task ID is rejected.
-func TestHandleTaskTop_EmptyID(t *testing.T) {
-	srv := newTestServer(t)
+	// Rerun
+	rerunReq := httptest.NewRequest(http.MethodPost, "/api/tasks/task-1/rerun", nil)
+	rerunW := httptest.NewRecorder()
+	srv.HandleTaskDetail(rerunW, rerunReq)
 
-	topReq := httptest.NewRequest(http.MethodPost, "/api/tasks//top", nil)
-	topW := httptest.NewRecorder()
-	srv.HandleTaskDetail(topW, topReq)
-
-	if topW.Code != http.StatusBadRequest {
-		t.Errorf("expected 400, got %d", topW.Code)
+	if rerunW.Code != http.StatusCreated {
+		t.Fatalf("expected 201 for rerun, got %d body: %s", rerunW.Code, rerunW.Body.String())
 	}
-}
 
-// TestHandleTaskTop_MethodNotAllowed verifies that GET is rejected.
-func TestHandleTaskTop_MethodNotAllowed(t *testing.T) {
-	srv := newTestServer(t)
-
-	task := map[string]interface{}{
-		"id":     "task-1",
-		"prompt": "Build a feature",
+	var rerunTask queue.Task
+	if err := json.Unmarshal(rerunW.Body.Bytes(), &rerunTask); err != nil {
+		t.Fatalf("failed to unmarshal rerun response: %v", err)
 	}
-	body, _ := json.Marshal(task)
-	req := httptest.NewRequest(http.MethodPost, "/api/tasks", bytes.NewReader(body))
-	req.Header.Set("Content-Type", "application/json")
-	w := httptest.NewRecorder()
-	srv.HandleTasks(w, req)
-
-	// GET should be rejected
-	topReq := httptest.NewRequest(http.MethodGet, "/api/tasks/task-1/top", nil)
-	topW := httptest.NewRecorder()
-	srv.HandleTaskDetail(topW, topReq)
-
-	if topW.Code != http.StatusMethodNotAllowed {
-		t.Errorf("expected 405, got %d", topW.Code)
+	if rerunTask.Priority != queue.PriorityFirefighter {
+		t.Errorf("expected priority %q preserved on rerun, got %q", queue.PriorityFirefighter, rerunTask.Priority)
 	}
 }
 

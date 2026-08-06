@@ -225,6 +225,7 @@
         .badge-completed { background: #052e16; color: #22c55e; }
         .badge-failed { background: #450a0a; color: #ef4444; }
         .badge-cancelled { background: #1c1917; color: #78716c; }
+        .badge-priority { background: #1e293b; color: #fbbf24; margin-left: 0.25rem; }
         .persona-badge { display: inline-block; padding: 0.125rem 0.375rem; border-radius: 0.25rem; font-size: 0.625rem; font-weight: 600; background: #1e1045; color: #c4b5fd; }
         .task-error { background: #1c0a0a; border: 1px solid #7f1d1d; border-radius: 0.375rem; padding: 0.75rem 1rem; margin-bottom: 1rem; font-size: 0.85rem; color: #fca5a5; line-height: 1.5; }
         .task-error-label { font-weight: 600; color: #ef4444; margin-bottom: 0.25rem; font-size: 0.75rem; text-transform: uppercase; letter-spacing: 0.05em; }
@@ -309,6 +310,20 @@
                     <div class="form-group">
                         <label>Tags (comma-separated, optional)</label>
                         <input type="text" id="task-tags" placeholder="business-default, android">
+                    </div>
+                    <div class="form-group">
+                        <label>Priority</label>
+                        <div style="display:flex;gap:0.5rem;">
+                            <label style="display:flex;align-items:center;gap:0.25rem;cursor:pointer;font-size:0.85rem;color:#e2e8f0;">
+                                <input type="radio" name="task-priority" value="firefighter">🧑‍🚒 Firefighter
+                            </label>
+                            <label style="display:flex;align-items:center;gap:0.25rem;cursor:pointer;font-size:0.85rem;color:#e2e8f0;">
+                                <input type="radio" name="task-priority" value="teacher">🧑‍🏫 Teacher
+                            </label>
+                            <label style="display:flex;align-items:center;gap:0.25rem;cursor:pointer;font-size:0.85rem;color:#e2e8f0;">
+                                <input type="radio" name="task-priority" value="orangutan" checked>🦧 Orangutan
+                            </label>
+                        </div>
                     </div>
                     <button class="btn" onclick="submitTask()">Submit Task</button>
                 </div>
@@ -582,15 +597,15 @@
                 }
                 const isCancellable = t.status !== 'COMPLETED' && t.status !== 'FAILED' && t.status !== 'CANCELLED';
                 const cancelBtn = isCancellable ? `<button class="btn btn-sm btn-danger" onclick="event.stopPropagation(); cancelTask('${t.id}')">✖</button>` : '';
-                const isPending = t.status === 'PENDING';
-                const topBtn = isPending ? `<button class="btn btn-sm btn-ghost" onclick="event.stopPropagation(); bringToTop('${t.id}')">🔝</button>` : '';
                 const isRerunnable = t.status === 'FAILED' || t.status === 'CANCELLED';
                 const rerunBtn = isRerunnable ? `<button class="btn btn-sm btn-ghost" onclick="event.stopPropagation(); rerunTask('${t.id}')">🔄</button>` : '';
-                const btnRow = (rerunBtn || topBtn || cancelBtn) ? `<div class="task-btn-row">${rerunBtn}${topBtn}${cancelBtn}</div>` : '';
+                const btnRow = (rerunBtn || cancelBtn) ? `<div class="task-btn-row">${rerunBtn}${cancelBtn}</div>` : '';
                 const logCount = t.log_count != null ? ` · ${t.log_count} log${t.log_count === 1 ? '' : 's'}` : '';
+                // Priority label shown only for PENDING tasks
+                const priorityLabel = t.status === 'PENDING' && t.priority ? `<span class="badge badge-priority" title="Priority">🔜${priorityToEmoji(t.priority)}</span>` : '';
                 const personaBadge = t.persona ? ` <span class="persona-badge" title="Persona: ${escapeHtml(t.persona)}">🧑 ${escapeHtml(t.persona)}</span>` : '';
                 return `<div class="task-item ${itemClass}${isActive}" onclick="selectTask('${t.id}')">
-                    <div class="task-id">${t.id} <span class="badge ${badgeClass}">${t.status}</span>${personaBadge}</div>
+                    <div class="task-id">${t.id} <span class="badge ${badgeClass}">${t.status}</span>${priorityLabel}${personaBadge}</div>
                     <div class="task-meta">${t.assigned_to ? '→ ' + t.assigned_to : 'unassigned'} · ${new Date(t.created_at).toLocaleString()}${logCount}</div>
                     <div class="task-prompt">${escapeHtml(t.prompt.substring(0, 120))}${t.prompt.length > 120 ? '...' : ''}</div>
                     ${errorHtml}
@@ -898,6 +913,16 @@
             return div.innerHTML;
         }
 
+// priorityToEmoji maps the API priority string to its display emoji.
+        // API values are plain English: "firefighter", "teacher", "orangutan".
+        function priorityToEmoji(priority) {
+            const map = {
+                'firefighter': '🧑‍🚒',
+                'teacher': '🧑‍🏫',
+                'orangutan': '🦧'
+            };
+            return map[priority] || priority;
+        }
         // getFirstLine extracts the first line of text, optionally truncated to maxLen chars.
         function getFirstLine(text, maxLen) {
             if (!text) return '';
@@ -983,6 +1008,28 @@
                         }
                     } else if (existingPersona) {
                         existingPersona.remove();
+                    }
+                }
+
+                // Update priority badge in header (add, remove, or keep)
+                // Priority badge only shown for PENDING tasks
+                const headerRow = document.querySelector('.task-detail-header > div:last-child');
+                if (headerRow) {
+                    const existingPriority = headerRow.querySelector('.badge-priority');
+                    const showPriority = task.status === 'PENDING' && task.priority;
+                    if (showPriority) {
+                        if (existingPriority) {
+                            existingPriority.textContent = `🔜${priorityToEmoji(task.priority)}`;
+                            existingPriority.title = `Priority`;
+                        } else {
+                            const span = document.createElement('span');
+                            span.className = 'badge badge-priority';
+                            span.title = 'Priority';
+                            span.textContent = `🔜${priorityToEmoji(task.priority)}`;
+                            headerRow.insertBefore(span, headerRow.firstChild);
+                        }
+                    } else if (existingPriority) {
+                        existingPriority.remove();
                     }
                 }
 
@@ -1187,7 +1234,7 @@
                         <div class="task-detail-meta">${task.assigned_to ? 'Guest: ' + escapeHtml(task.assigned_to) : 'Unassigned'} · ${logs.length} log entries</div>
                     </div>
                     <div style="display:flex;gap:0.5rem;align-items:center;">
-                        ${task.status === 'PENDING' ? `<button class="btn btn-sm btn-ghost" onclick="bringToTop('${task.id}')">🔝 Top</button>` : ''}
+                        ${task.status === 'PENDING' && task.priority ? `<span class="badge badge-priority" title="Priority">🔜${priorityToEmoji(task.priority)}</span>` : ''}
                         <button class="btn btn-sm btn-ghost" onclick="rerunTask('${task.id}')">🔄 Re-run</button>
                         ${task.status !== 'COMPLETED' && task.status !== 'FAILED' && task.status !== 'CANCELLED' ? `<button class="btn btn-sm btn-danger" onclick="cancelTask('${task.id}')">✖ Cancel</button>` : ''}
                         <button class="btn btn-sm btn-ghost" onclick="closeTaskDetail()">Close</button>
@@ -1232,6 +1279,8 @@
         async function submitTask() {
             const prompt = document.getElementById('task-prompt').value;
             const tags = document.getElementById('task-tags').value;
+            const priorityRadio = document.querySelector('input[name="task-priority"]:checked');
+            const priority = priorityRadio ? priorityRadio.value : 'orangutan';
 
             if (!prompt) {
                 alert('Prompt is required');
@@ -1240,7 +1289,8 @@
 
             const task = {
                 prompt: prompt,
-                tags: tags ? tags.split(',').map(s => s.trim()).filter(Boolean) : []
+                tags: tags ? tags.split(',').map(s => s.trim()).filter(Boolean) : [],
+                priority: priority
             };
 
             try {
@@ -1301,24 +1351,6 @@
             }
         }
 
-        // bringToTop moves a PENDING task to the front of the queue.
-        async function bringToTop(taskId) {
-            try {
-                const res = await fetch('/api/tasks/' + taskId + '/top', {
-                    method: 'POST',
-                });
-                if (!res.ok) {
-                    const errText = await res.text();
-                    alert('Failed to move task to top: ' + errText);
-                    return;
-                }
-                refresh();
-            } catch (e) {
-                console.error('bringToTop failed:', e);
-                alert('Failed to move task to top: ' + e.message);
-            }
-        }
-
         // WebSocket for live updates
         function connectWS() {
             const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
@@ -1355,10 +1387,6 @@
                         refresh();
                         // refresh() already calls patchTaskDetailMeta() for
                         // the active task, so no extra work needed here.
-                    } else if (msg.method === 'task.position_changed') {
-                        // A task's queue position changed (e.g. bring-to-top).
-                        // Re-render the task list to reflect the new order.
-                        refresh();
                     } else if (msg.method === 'task.log') {
                         // Parse params — params may be a string (JSON-encoded) or already an object
                         let params = {};

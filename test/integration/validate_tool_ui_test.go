@@ -2158,9 +2158,9 @@ const { chromium } = require('playwright');
   await takeScreenshot('13-failed-task-detail');
 
   // =====================================================================
-  // Phase 12: "Bring to top" button for PENDING tasks
+  // Phase 12: Priority badge for PENDING tasks
   // =====================================================================
-  console.log('=== Phase 12: Bring to top button ===');
+  console.log('=== Phase 12: Priority badge ===');
 
   // Navigate to Tasks tab
   await page.locator('.tab').filter({ hasText: 'Tasks' }).click();
@@ -2188,34 +2188,34 @@ const { chromium } = require('playwright');
   if (!pendingTaskVisible) fail('Pending task should be visible in task list');
   console.log('PASS: Pending task visible in list');
 
-  // Verify the "bring to top" button (🔝) is present on the pending task
-  // The button is inside .task-btn-row and has onclick containing "bringToTop"
-  const bringToTopBtnInList = await page.evaluate((pid) => {
+  // Verify the priority badge is present on the pending task in the list
+  // The badge has class "badge-priority" and shows 🔜{emoji}
+  const priorityBadgeInList = await page.evaluate((pid) => {
     const items = document.querySelectorAll('.task-item');
     for (const item of items) {
       if (item.textContent.includes(pid)) {
-        const btn = item.querySelector('button[onclick*="bringToTop"]');
-        if (btn) return { found: true, text: btn.textContent.trim() };
+        const badge = item.querySelector('.badge-priority');
+        if (badge) return { found: true, text: badge.textContent.trim(), title: badge.title };
       }
     }
     return { found: false };
   }, pendingTaskId);
-  if (!bringToTopBtnInList.found) fail('Bring to top button should be visible on pending task in list');
-  console.log('PASS: Bring to top button visible on pending task in list:', bringToTopBtnInList.text);
+  if (!priorityBadgeInList.found) fail('Priority badge should be visible on pending task in list');
+  console.log('PASS: Priority badge visible on pending task in list:', priorityBadgeInList.text);
 
-  // Verify the bring to top button is NOT present on non-pending tasks
-  const noBtnOnRunningTask = await page.evaluate((tid) => {
+  // Verify the priority badge is NOT present on non-pending tasks
+  const noBadgeOnRunningTask = await page.evaluate((tid) => {
     const items = document.querySelectorAll('.task-item');
     for (const item of items) {
       if (item.textContent.includes(tid)) {
-        const btn = item.querySelector('button[onclick*="bringToTop"]');
-        return btn === null;
+        const badge = item.querySelector('.badge-priority');
+        return badge === null;
       }
     }
     return true; // task not found, pass
   }, taskId);
-  if (!noBtnOnRunningTask) fail('Bring to top button should NOT be on non-pending tasks');
-  console.log('PASS: Bring to top button not present on running task');
+  if (!noBadgeOnRunningTask) fail('Priority badge should NOT be on non-pending tasks');
+  console.log('PASS: Priority badge not present on running task');
 
   // Click into the pending task to see detail view
   await page.evaluate((pid) => {
@@ -2229,42 +2229,24 @@ const { chromium } = require('playwright');
   }, pendingTaskId);
   await page.waitForSelector('.task-detail-header', { timeout: 5000 });
 
-  // Verify the "bring to top" button is also present in the task detail header
-  const bringToTopBtnInDetail = await page.evaluate(() => {
+  // Verify the priority badge is also present in the task detail header
+  const priorityBadgeInDetail = await page.evaluate(() => {
     const header = document.querySelector('.task-detail-header');
     if (!header) return { found: false };
-    const buttons = header.querySelectorAll('button');
-    for (const btn of buttons) {
-      if (btn.textContent.includes('Top')) {
-        return { found: true, text: btn.textContent.trim() };
-      }
-    }
+    const badge = header.querySelector('.badge-priority');
+    if (badge) return { found: true, text: badge.textContent.trim(), title: badge.title };
     return { found: false };
   });
-  if (!bringToTopBtnInDetail.found) fail('Bring to top button should be present in task detail header for pending task');
-  console.log('PASS: Bring to top button in detail header:', bringToTopBtnInDetail.text);
+  if (!priorityBadgeInDetail.found) fail('Priority badge should be present in task detail header for pending task');
+  console.log('PASS: Priority badge in detail header:', priorityBadgeInDetail.text);
 
-  // Click the "bring to top" button in detail view
-  await clickEl('button[onclick*="bringToTop"]');
-  await page.waitForTimeout(1000);
+  // Verify the priority badge is rendered with the expected format (🔜{emoji})
+  if (!priorityBadgeInDetail.text.startsWith('🔜')) {
+    fail('Priority badge should start with 🔜 prefix, got: ' + priorityBadgeInDetail.text);
+  }
+  console.log('PASS: Priority badge has correct format');
 
-  // Navigate back to task list to verify the task is now at the top
-  await page.locator('.tab').filter({ hasText: 'Tasks' }).click();
-  await page.waitForFunction(() => {
-    return document.getElementById('tab-tasks').style.display === 'block';
-  }, { timeout: 5000 });
-  await page.waitForTimeout(500);
-
-  // Verify the pending task is now the first visible task item
-  const pendingTaskIsFirst = await page.evaluate((pid) => {
-    const items = document.querySelectorAll('.task-item');
-    if (items.length === 0) return false;
-    return items[0].textContent.includes(pid);
-  }, pendingTaskId);
-  if (!pendingTaskIsFirst) fail('Pending task should be first in list after bring-to-top');
-  console.log('PASS: Pending task moved to top of queue');
-
-  await takeScreenshot('14-bring-to-top');
+  await takeScreenshot('12-priority-badge');
 
   console.log('All UI validation checks passed!');
   await browser.close();

@@ -3,6 +3,7 @@ package queue
 import (
 	"encoding/json"
 	"fmt"
+	"sort"
 	"sync"
 	"time"
 )
@@ -70,6 +71,53 @@ func (s *TaskStatus) UnmarshalJSON(data []byte) error {
 	return nil
 }
 
+// Priority levels — derived from Futurama "The Problem with Popplers".
+// Higher priority tasks are served first from the pending queue.
+//
+// API values are plain English strings. The UI maps these to emoji:
+//   - firefighter → 🧑‍🚒
+//   - teacher → 🧑‍🏫
+//   - orangutan → 🦧
+//
+// Reference: https://futurama.fandom.com/wiki/The_Problem_with_Popplers/Transcript
+const (
+	// PriorityFirefighter is the highest priority level. Display: 🧑‍🚒
+	PriorityFirefighter = "firefighter"
+
+	// PriorityTeacher is the medium priority level. Display: 🧑‍🏫
+	PriorityTeacher = "teacher"
+
+	// PriorityOrangutan is the lowest (default) priority level. Display: 🦧
+	PriorityOrangutan = "orangutan"
+)
+
+// validPriorities lists all accepted priority values in descending order
+// (highest priority first).
+var validPriorities = []string{PriorityFirefighter, PriorityTeacher, PriorityOrangutan}
+
+// priorityValue returns a numeric sort key for a priority string.
+// Lower values = higher priority (sorted ascending).
+func priorityValue(priority string) int {
+	for i, p := range validPriorities {
+		if p == priority {
+			return i
+		}
+	}
+	// Unknown priorities sort after all known ones (lowest priority).
+	return len(validPriorities)
+}
+
+// ValidatePriority returns true if the given priority string is one of the
+// recognised levels.
+func ValidatePriority(priority string) bool {
+	for _, p := range validPriorities {
+		if p == priority {
+			return true
+		}
+	}
+	return false
+}
+
 // Task represents a unit of work to be executed by a guest.
 type Task struct {
 	ID         string     `json:"id"`
@@ -77,6 +125,7 @@ type Task struct {
 	Tags       []string   `json:"tags"`
 	RepoRef    string     `json:"repo_ref,omitempty"` // git repository URL to clone (optional)
 	Persona    string     `json:"persona,omitempty"`  // persona name to apply (optional)
+	Priority   string     `json:"priority,omitempty"` // priority level: firefighter, teacher, or orangutan (default)
 	Status     TaskStatus `json:"status"`
 	CreatedAt  time.Time  `json:"created_at"`
 	AssignedTo string     `json:"assigned_to,omitempty"`
@@ -114,9 +163,13 @@ func (q *TaskQueue) Add(task *Task) error {
 
 	task.Status = TaskStatusPending
 	task.CreatedAt = time.Now()
+	// Default priority to orangutan if not set or invalid
+	if task.Priority == "" || !ValidatePriority(task.Priority) {
+		task.Priority = PriorityOrangutan
+	}
 	q.tasks[task.ID] = task
 	q.ordered = append(q.ordered, task)
-	q.logf("task added: %s (status: %s, tags: %v)", task.ID, task.Status, task.Tags)
+	q.logf("task added: %s (status: %s, tags: %v, priority: %s)", task.ID, task.Status, task.Tags, task.Priority)
 	return nil
 }
 
@@ -264,7 +317,8 @@ func (q *TaskQueue) SetResult(taskID, result string) error {
 	return nil
 }
 
-// GetPendingTasks returns all pending tasks.
+// GetPendingTasks returns all pending tasks, sorted by priority
+// (highest first) and then by creation time (FIFO within same priority).
 func (q *TaskQueue) GetPendingTasks() []*Task {
 	q.mu.RLock()
 	defer q.mu.RUnlock()
@@ -275,7 +329,7 @@ func (q *TaskQueue) GetPendingTasks() []*Task {
 			result = append(result, task)
 		}
 	}
-	return result
+	return q.sortPendingByPriority(result)
 }
 
 // GetTasksByStatus returns all tasks with the given status.
@@ -398,54 +452,47 @@ func (q *TaskQueue) validTransition(from, to TaskStatus) bool {
 	return false
 }
 
-// MoveToTop moves a pending task to the front of the queue.
-// Only PENDING tasks can be moved. Returns an error if the task
-// does not exist or is not in PENDING status.
-func (q *TaskQueue) MoveToTop(taskID string) error {
-	q.mu.Lock()
-	defer q.mu.Unlock()
-
-	task, exists := q.tasks[taskID]
-	if !exists {
-		return fmt.Errorf("task %s not found", taskID)
-	}
-
-	if task.Status != TaskStatusPending {
-		return fmt.Errorf("task %s is not pending (status: %s)", taskID, task.Status)
-	}
-
-	// Remove from current position in ordered list
-	for i, t := range q.ordered {
-		if t.ID == taskID {
-			q.ordered = append(q.ordered[:i], q.ordered[i+1:]...)
-			break
+// sortPendingByPriority sorts pending tasks by priority (highest first),
+// then by creation time (FIFO within same priority). The caller must hold
+// at least q.mu.RLock.
+func (q *TaskQueue) sortPendingByPriority(tasks []*Task) []*Task {
+	sort.SliceStable(tasks, func(i, j int) bool {
+		vi, vj := priorityValue(tasks[i].Priority), priorityValue(tasks[j].Priority)
+		if vi != vj {
+			return vi < vj // lower value = higher priority
 		}
-	}
-
-	// Prepend to ordered list
-	q.ordered = append([]*Task{task}, q.ordered...)
-	q.logf("task %s moved to top of queue", taskID)
-	return nil
+		return tasks[i].CreatedAt.Before(tasks[j].CreatedAt)
+	})
+	return tasks
 }
 
-// NextPendingTask returns the next pending task (FIFO).
+// NextPendingTask returns the next pending task, ordered by priority
+// (highest first) and then by creation time (FIFO within same priority).
 func (q *TaskQueue) NextPendingTask() *Task {
 	q.mu.RLock()
 	defer q.mu.RUnlock()
 
+	var pending []*Task
 	for _, task := range q.ordered {
 		if task.Status == TaskStatusPending {
-			return task
+			pending = append(pending, task)
 		}
 	}
-	return nil
+	if len(pending) == 0 {
+		return nil
+	}
+	q.sortPendingByPriority(pending)
+	return pending[0]
 }
 
-// NextPendingTaskForTags returns the next pending task that matches the required tags.
+// NextPendingTaskForTags returns the next pending task that matches the
+// required tags, ordered by priority (highest first) and then by creation
+// time (FIFO within same priority).
 func (q *TaskQueue) NextPendingTaskForTags(requiredTags []string) *Task {
 	q.mu.RLock()
 	defer q.mu.RUnlock()
 
+	var pending []*Task
 	for _, task := range q.ordered {
 		if task.Status != TaskStatusPending {
 			continue
@@ -453,9 +500,13 @@ func (q *TaskQueue) NextPendingTaskForTags(requiredTags []string) *Task {
 		if !q.matchesTags(task.Tags, requiredTags) {
 			continue
 		}
-		return task
+		pending = append(pending, task)
 	}
-	return nil
+	if len(pending) == 0 {
+		return nil
+	}
+	q.sortPendingByPriority(pending)
+	return pending[0]
 }
 
 // matchesTags checks if the task tags match all required tags.
