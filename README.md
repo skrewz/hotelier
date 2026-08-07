@@ -150,10 +150,10 @@ make image
 
 This uses `podman` to build the image. The build has two stages:
 
-1. **builder** — a `golang:1.25-bookworm` image that compiles the `hotelier` binary with `-trimpath` and version ldflags.
-2. **runtime** — a minimal `debian:12-slim` image with only `ca-certificates` and `git` installed (git is needed for guests to clone repos).
+1. **builder** — a `golang:1.26-trixie` image that compiles the `hotelier` binary with `CGO_ENABLED=0`, `-trimpath`, and `-ldflags "-s -w"`.
+2. **runtime** — a `scratch` image containing only the compiled binary, the `web/` static files, and the `/var/log/hotelier` directory.
 
-The resulting image runs as a non-root user (`hotelier`) on port 8080.
+The `scratch` image is the minimal possible base — it has no shell, no package manager, no DNS resolver, and no CA certificates. The server binary is statically linked so it runs without libc. This means the container cannot perform DNS lookups or TLS verification for outbound connections; it is suitable for serving the web UI and accepting WebSocket connections from guests on the local network.
 
 #### Run
 
