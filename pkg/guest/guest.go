@@ -47,9 +47,11 @@ type ExitDiagnostics struct {
 	// LastEventTypes are the types of the last N events received from pi.
 	// This helps identify where the process was when it exited.
 	LastEventTypes []string `json:"last_event_types,omitempty"`
-	// GuestEndReceived indicates whether pi sent a guest_end/agent_end event
-	// before exiting. False indicates an abnormal exit (crash, kill, etc.).
-	GuestEndReceived bool `json:"guest_end_received,omitempty"`
+	// SettledReceived indicates whether pi sent a settle event (agent_settled,
+	// or the legacy guest_end) before exiting. False indicates an abnormal
+	// exit (crash, kill, etc.). Note: agent_end does not count as settled —
+	// pi emits it before an automatic retry. See issue #161.
+	SettledReceived bool `json:"settled_received,omitempty"`
 }
 
 // TaskResult represents the result of a task execution.

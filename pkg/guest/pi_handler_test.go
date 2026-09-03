@@ -1559,3 +1559,116 @@ func TestPIHandler_PrepareTaskDir_UniquePaths(t *testing.T) {
 		t.Errorf("dir2 should have been removed")
 	}
 }
+
+// TestPIHandler_ExecuteTask_WaitsForAgentSettled is a behavioural regression
+// test for issue #161: when pi hits a 429 rate limit it emits agent_end
+// (willRetry=true) BEFORE auto_retry_start, then retries. The task must only
+// be marked complete on agent_settled, not on that intermediate agent_end.
+//
+// It uses a fake `pi` subprocess (a python script) that emits the exact 429
+// auto-retry event sequence, so it runs deterministically without a real pi
+// or network access. The fake pi emits text after the retry ("second-run-done");
+// if the handler wrongly settled on the first agent_end, that text would be
+// missing from the output.
+func TestPIHandler_ExecuteTask_WaitsForAgentSettled(t *testing.T) {
+	if _, err := exec.LookPath("python3"); err != nil {
+		t.Skip("python3 not installed, cannot run fake pi")
+	}
+
+	// Create a temp dir with a fake `pi` executable.
+	fakeBinDir, err := os.MkdirTemp("", "hotelier-fakepi-bin-*")
+	if err != nil {
+		t.Fatalf("create fake bin dir: %v", err)
+	}
+	defer os.RemoveAll(fakeBinDir)
+
+	// The first 10 stdout lines of a freshly-spawned pi client are captured by
+	// the SpawnOutput callback (as [spawn] logs) and NOT parsed as events. We
+	// emit 10 harmless queue_update lines first so the real 429 sequence below
+	// falls outside that window and is processed as events.
+	script := `#!/usr/bin/env python3
+import sys, time, json
+
+def emit(obj):
+    sys.stdout.write(json.dumps(obj) + "\n")
+    sys.stdout.flush()
+
+# Consume the first stdin line (the prompt, or an abort from a stop) so we
+# don't block the client, then emit the event sequence.
+try:
+    sys.stdin.readline()
+except Exception:
+    pass
+
+# 10 lines of noise to clear the SpawnOutput capture window.
+for _ in range(10):
+    emit({"type": "queue_update", "queue": []})
+
+# The 429 auto-retry sequence (processed as events).
+emit({"type": "agent_start"})
+emit({"type": "message_update", "assistantMessageEvent": {"type": "text_delta", "delta": "first-run "}})
+emit({"type": "agent_end", "willRetry": True})
+emit({"type": "auto_retry_start", "attempt": 1, "maxAttempts": 2, "delayMs": 100, "errorMessage": "429 rate_limit_error"})
+time.sleep(0.3)
+emit({"type": "agent_start"})
+emit({"type": "message_update", "assistantMessageEvent": {"type": "text_delta", "delta": "second-run-done"}})
+emit({"type": "agent_end", "willRetry": False})
+emit({"type": "auto_retry_end", "success": True, "attempt": 2})
+emit({"type": "agent_settled"})
+`
+	fakePi := filepath.Join(fakeBinDir, "pi")
+	if err := os.WriteFile(fakePi, []byte(script), 0o755); err != nil {
+		t.Fatalf("write fake pi: %v", err)
+	}
+
+	// Prepend the fake bin dir to PATH so exec.Command("pi") resolves to it.
+	origPath := os.Getenv("PATH")
+	t.Cleanup(func() { os.Setenv("PATH", origPath) })
+	os.Setenv("PATH", fakeBinDir+string(os.PathListSeparator)+origPath)
+
+	baseDir, err := os.MkdirTemp("", "hotelier-base-*")
+	if err != nil {
+		t.Fatalf("create base dir: %v", err)
+	}
+	defer os.RemoveAll(baseDir)
+
+	h := NewPIHandler(baseDir, "", "", "")
+
+	task := TaskAssignment{
+		TaskID: "test-waits-for-settled",
+		Prompt: "do the thing",
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+
+	result, err := h.ExecuteTask(ctx, task, func(entry LogEntry) error {
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("ExecuteTask returned error: %v", err)
+	}
+	if result == nil {
+		t.Fatal("ExecuteTask returned nil result")
+	}
+
+	// The task must complete successfully (pi settled).
+	if !result.Success {
+		t.Errorf("expected task to succeed, got success=%v error=%q", result.Success, result.Error)
+	}
+
+	// The output must contain text emitted AFTER the retry (post the first
+	// agent_end). If the handler settled on the first agent_end (the bug),
+	// this text would be missing.
+	if !strings.Contains(result.Output, "second-run-done") {
+		t.Errorf("expected output to contain post-retry text 'second-run-done' (task settled before agent_settled), got output=%q", result.Output)
+	}
+
+	// Diagnostics should record that pi settled.
+	if result.Diagnostics == nil {
+		t.Fatal("expected diagnostics to be attached")
+	}
+	if !result.Diagnostics.SettledReceived {
+		t.Error("expected SettledReceived to be true")
+	}
+}

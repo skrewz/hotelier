@@ -18,11 +18,11 @@ import (
 // captures all expected fields.
 func TestExitDiagnostics_StructuredFields(t *testing.T) {
 	diag := &ExitDiagnostics{
-		ExitCode:         42,
-		ExitError:        "exit status 42",
-		StderrLines:      []string{"line1", "line2"},
-		LastEventTypes:   []string{"text_delta", "tool_execution_start"},
-		GuestEndReceived: false,
+		ExitCode:        42,
+		ExitError:       "exit status 42",
+		StderrLines:     []string{"line1", "line2"},
+		LastEventTypes:  []string{"text_delta", "tool_execution_start"},
+		SettledReceived: false,
 	}
 
 	if diag.ExitCode != 42 {
@@ -37,8 +37,8 @@ func TestExitDiagnostics_StructuredFields(t *testing.T) {
 	if len(diag.LastEventTypes) != 2 {
 		t.Errorf("expected 2 event types, got %d", len(diag.LastEventTypes))
 	}
-	if diag.GuestEndReceived {
-		t.Error("expected GuestEndReceived to be false")
+	if diag.SettledReceived {
+		t.Error("expected SettledReceived to be false")
 	}
 }
 
@@ -66,8 +66,8 @@ func TestCaptureExitDiagnostics_NoClient(t *testing.T) {
 	if diag.ExitError != "" {
 		t.Errorf("expected empty ExitError, got %q", diag.ExitError)
 	}
-	if diag.GuestEndReceived {
-		t.Error("expected GuestEndReceived to be false")
+	if diag.SettledReceived {
+		t.Error("expected SettledReceived to be false")
 	}
 	if len(diag.StderrLines) != 0 {
 		t.Errorf("expected no stderr lines, got %d", len(diag.StderrLines))
@@ -77,9 +77,9 @@ func TestCaptureExitDiagnostics_NoClient(t *testing.T) {
 	}
 }
 
-// TestCaptureExitDiagnostics_GuestEndReceived verifies that the
-// guestEndReceived flag is correctly captured.
-func TestCaptureExitDiagnostics_GuestEndReceived(t *testing.T) {
+// TestCaptureExitDiagnostics_SettledReceived verifies that the
+// settledReceived flag is correctly captured.
+func TestCaptureExitDiagnostics_SettledReceived(t *testing.T) {
 	baseDir, err := os.MkdirTemp("", "hotelier-base-*")
 	if err != nil {
 		t.Fatalf("create temp dir: %v", err)
@@ -97,16 +97,16 @@ func TestCaptureExitDiagnostics_GuestEndReceived(t *testing.T) {
 		log:     log.New(io.Discard, "", 0),
 	}
 
-	// Test with guestEndReceived = true
+	// Test with settledReceived = true
 	diag := h.captureExitDiagnostics(true)
-	if !diag.GuestEndReceived {
-		t.Error("expected GuestEndReceived to be true")
+	if !diag.SettledReceived {
+		t.Error("expected SettledReceived to be true")
 	}
 
-	// Test with guestEndReceived = false
+	// Test with settledReceived = false
 	diag = h.captureExitDiagnostics(false)
-	if diag.GuestEndReceived {
-		t.Error("expected GuestEndReceived to be false")
+	if diag.SettledReceived {
+		t.Error("expected SettledReceived to be false")
 	}
 }
 
@@ -208,11 +208,11 @@ func TestTaskResult_IncludesDiagnostics(t *testing.T) {
 		Output:  "some output",
 		Error:   "pi crashed",
 		Diagnostics: &ExitDiagnostics{
-			ExitCode:         1,
-			ExitError:        "exit status 1",
-			StderrLines:      []string{"error: something went wrong"},
-			LastEventTypes:   []string{"text_delta"},
-			GuestEndReceived: false,
+			ExitCode:        1,
+			ExitError:       "exit status 1",
+			StderrLines:     []string{"error: something went wrong"},
+			LastEventTypes:  []string{"text_delta"},
+			SettledReceived: false,
 		},
 	}
 
@@ -222,8 +222,8 @@ func TestTaskResult_IncludesDiagnostics(t *testing.T) {
 	if result.Diagnostics.ExitCode != 1 {
 		t.Errorf("expected ExitCode 1, got %d", result.Diagnostics.ExitCode)
 	}
-	if result.Diagnostics.GuestEndReceived {
-		t.Error("expected GuestEndReceived to be false")
+	if result.Diagnostics.SettledReceived {
+		t.Error("expected SettledReceived to be false")
 	}
 }
 
@@ -261,7 +261,7 @@ func TestPIHandler_ExecuteTask_DiagnosticsOnNormalCompletion(t *testing.T) {
 		} else {
 			t.Logf("diagnostics: exit_code=%d, guest_end=%v, stderr_lines=%d, event_types=%d",
 				result.Diagnostics.ExitCode,
-				result.Diagnostics.GuestEndReceived,
+				result.Diagnostics.SettledReceived,
 				len(result.Diagnostics.StderrLines),
 				len(result.Diagnostics.LastEventTypes))
 		}
@@ -271,7 +271,7 @@ func TestPIHandler_ExecuteTask_DiagnosticsOnNormalCompletion(t *testing.T) {
 }
 
 // TestPIHandler_ExecuteTask_AbnormalExitDetected verifies that the
-// captureExitDiagnostics helper correctly captures the guestEndReceived
+// captureExitDiagnostics helper correctly captures the settledReceived
 // flag. The full ExecuteTask abnormal exit flow is harder to test
 // without a mock subprocess, but we verify the diagnostic capture logic.
 func TestPIHandler_ExecuteTask_AbnormalExitDetected(t *testing.T) {
@@ -295,8 +295,8 @@ func TestPIHandler_ExecuteTask_AbnormalExitDetected(t *testing.T) {
 	diag := h.captureExitDiagnostics(false)
 
 	// Verify abnormal exit is detected
-	if diag.GuestEndReceived {
-		t.Error("expected GuestEndReceived to be false for abnormal exit")
+	if diag.SettledReceived {
+		t.Error("expected SettledReceived to be false for abnormal exit")
 	}
 }
 

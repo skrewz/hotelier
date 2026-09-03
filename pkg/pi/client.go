@@ -586,9 +586,20 @@ func ExtractThinkingDelta(event Event) string {
 	return ""
 }
 
-// IsGuestEnd checks if the event is a guest completion event.
-func IsGuestEnd(event Event) bool {
-	return event.Type == "guest_end" || event.Type == "agent_end"
+// IsSettled reports whether the event indicates the pi agent run has fully
+// settled — that is, pi will not continue automatically via a retry,
+// compaction retry, or queued follow-up message.
+//
+// Tasks must only be marked complete on this event. `agent_end` fires for
+// each low-level run and is emitted with willRetry=true BEFORE an automatic
+// retry (e.g. after a 429 rate limit), so it must NOT settle the task —
+// settling on it would mark the task complete while pi is about to retry.
+// See issue #161 and the pi RPC docs (agent_settled).
+//
+// The legacy `guest_end` event is still treated as settled for compatibility
+// with older pi versions that predate `agent_settled`.
+func IsSettled(event Event) bool {
+	return event.Type == "agent_settled" || event.Type == "guest_end"
 }
 
 // FinalText extracts the final assistant message text from an guest_end event.

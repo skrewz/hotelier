@@ -259,12 +259,15 @@ func (h *PIHandler) ExecuteTask(ctx context.Context, task TaskAssignment, sendLo
 		return lastActivity
 	}
 
-	// Track whether pi sent a guest_end/agent_end event before exiting.
-	// If not, the process crashed or was killed — an abnormal exit.
-	// Ordering: goroutine sets guestEndReceived → returns → deferred close(done)
-	// fires → main loop receives on done → reads guestEndReceived.
+	// Track whether pi sent a settle event (agent_settled, or the legacy
+	// guest_end) before exiting. If not, the process crashed or was killed —
+	// an abnormal exit. Note: agent_end does NOT count — pi emits it with
+	// willRetry=true before an automatic retry (e.g. after a 429), so the run
+	// is not over yet. See issue #161.
+	// Ordering: goroutine sets settledReceived → returns → deferred close(done)
+	// fires → main loop receives on done → reads settledReceived.
 	// The channel close provides the happens-before guarantee.
-	var guestEndReceived bool
+	var settledReceived bool
 
 	go func() {
 		defer close(done)
@@ -278,9 +281,10 @@ func (h *PIHandler) ExecuteTask(ctx context.Context, task TaskAssignment, sendLo
 				h.log.Printf("[PI] event #%d: type=%s", eventCount, event.Type)
 			}
 
-			if pi.IsGuestEnd(event) {
-				// Mark that pi completed normally.
-				guestEndReceived = true
+			if pi.IsSettled(event) {
+				// Mark that pi settled — the run is truly over and will not
+				// continue automatically (no pending retry/compaction/follow-up).
+				settledReceived = true
 				// Text deltas have already been streamed via sendLog.
 				// No need to re-send the final text — it would duplicate.
 				return
@@ -394,12 +398,12 @@ func (h *PIHandler) ExecuteTask(ctx context.Context, task TaskAssignment, sendLo
 			idleCheck.Stop()
 
 			// Capture exit diagnostics
-			diagnostics := h.captureExitDiagnostics(guestEndReceived)
+			diagnostics := h.captureExitDiagnostics(settledReceived)
 
-			// If pi did not send guest_end, it crashed or was killed.
+			// If pi did not settle, it crashed or was killed.
 			// Mark the task as failed with diagnostic information.
-			if !guestEndReceived {
-				h.log.Printf("[PI] task %s: pi exited without guest_end (abnormal exit)", task.TaskID)
+			if !settledReceived {
+				h.log.Printf("[PI] task %s: pi exited without settling (abnormal exit)", task.TaskID)
 				h.log.Printf("[PI] exit code: %d, exit error: %v", diagnostics.ExitCode, diagnostics.ExitError)
 				if len(diagnostics.StderrLines) > 0 {
 					start := max(0, len(diagnostics.StderrLines)-3)
@@ -432,7 +436,7 @@ func (h *PIHandler) ExecuteTask(ctx context.Context, task TaskAssignment, sendLo
 					TaskID:      task.TaskID,
 					Success:     false,
 					Output:      output.String(),
-					Error:       "pi subprocess exited without completing (no guest_end received)",
+					Error:       "pi subprocess exited without settling (no agent_settled received)",
 					Diagnostics: diagnostics,
 				}, nil
 			}
@@ -450,7 +454,7 @@ func (h *PIHandler) ExecuteTask(ctx context.Context, task TaskAssignment, sendLo
 			_ = h.client.Abort()
 
 			// Capture diagnostics even on cancellation
-			diagnostics := h.captureExitDiagnostics(guestEndReceived)
+			diagnostics := h.captureExitDiagnostics(settledReceived)
 			return &TaskResult{
 				TaskID:      task.TaskID,
 				Success:     false,
@@ -464,7 +468,7 @@ func (h *PIHandler) ExecuteTask(ctx context.Context, task TaskAssignment, sendLo
 				_ = h.client.Abort()
 
 				// Capture diagnostics even on idle timeout
-				diagnostics := h.captureExitDiagnostics(guestEndReceived)
+				diagnostics := h.captureExitDiagnostics(settledReceived)
 				return &TaskResult{
 					TaskID:      task.TaskID,
 					Success:     false,
@@ -805,9 +809,9 @@ func randomHexSuffix(n int) (string, error) {
 // at exit time. It captures the exit code, exit error, stderr lines, and
 // the last event types received. This data is used for troubleshooting
 // failed or abnormal task completions.
-func (h *PIHandler) captureExitDiagnostics(guestEndReceived bool) *ExitDiagnostics {
+func (h *PIHandler) captureExitDiagnostics(settledReceived bool) *ExitDiagnostics {
 	diag := &ExitDiagnostics{}
-	diag.GuestEndReceived = guestEndReceived
+	diag.SettledReceived = settledReceived
 
 	// Capture exit code
 	if h.client != nil {

@@ -233,6 +233,75 @@ func TestExtractTextDelta(t *testing.T) {
 	}
 }
 
+// TestIsSettled verifies which pi events indicate the agent run has fully
+// settled. This is the core of issue #161: a task must only be marked
+// complete when pi will not continue automatically. `agent_end` fires for
+// each low-level run and is emitted with willRetry=true BEFORE an automatic
+// retry (e.g. after a 429 rate limit), so it must NOT settle the task. Only
+// `agent_settled` (and the legacy `guest_end` for older pi versions) do.
+func TestIsSettled(t *testing.T) {
+	tests := []struct {
+		name     string
+		event    Event
+		expected bool
+	}{
+		{
+			name:     "agent_settled settles the task",
+			event:    Event{Type: "agent_settled"},
+			expected: true,
+		},
+		{
+			name:     "legacy guest_end still settles the task",
+			event:    Event{Type: "guest_end"},
+			expected: true,
+		},
+		{
+			name:     "agent_end with willRetry true must NOT settle (429 retry)",
+			event:    Event{Type: "agent_end"},
+			expected: false,
+		},
+		{
+			name:     "agent_end with willRetry false must NOT settle (agent_settled follows)",
+			event:    Event{Type: "agent_end"},
+			expected: false,
+		},
+		{
+			name:     "agent_start does not settle",
+			event:    Event{Type: "agent_start"},
+			expected: false,
+		},
+		{
+			name:     "auto_retry_start does not settle",
+			event:    Event{Type: "auto_retry_start"},
+			expected: false,
+		},
+		{
+			name:     "auto_retry_end does not settle",
+			event:    Event{Type: "auto_retry_end"},
+			expected: false,
+		},
+		{
+			name:     "message_update does not settle",
+			event:    Event{Type: "message_update"},
+			expected: false,
+		},
+		{
+			name:     "empty event does not settle",
+			event:    Event{},
+			expected: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := IsSettled(tt.event)
+			if got != tt.expected {
+				t.Errorf("IsSettled(%q) = %v, want %v", tt.event.Type, got, tt.expected)
+			}
+		})
+	}
+}
+
 // TestPiClient_Stop_LogsForceKill verifies that Stop() logs detailed
 // information when force killing the subprocess. This is a regression test
 // for issue #10 where the force kill path produced minimal logging.
