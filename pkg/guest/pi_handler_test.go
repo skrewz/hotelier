@@ -1672,3 +1672,33 @@ emit({"type": "agent_settled"})
 		t.Error("expected SettledReceived to be true")
 	}
 }
+
+// TestPIHandler_BuildPrompt verifies that the prompt passed to pi is the
+// user's prompt verbatim. Task tags are used for guest routing only and
+// must not be injected into the prompt — the "Required tags" phrasing
+// confused implementing agents (issue #162).
+func TestPIHandler_BuildPrompt(t *testing.T) {
+	h := NewPIHandler("/tmp", "", "", "")
+
+	t.Run("no tags", func(t *testing.T) {
+		task := TaskAssignment{TaskID: "t1", Prompt: "Do the thing"}
+		if got := h.buildPrompt(task); got != "Do the thing" {
+			t.Errorf("buildPrompt() = %q, want %q", got, "Do the thing")
+		}
+	})
+
+	t.Run("tags not injected", func(t *testing.T) {
+		task := TaskAssignment{
+			TaskID: "t2",
+			Prompt: "Do the thing",
+			Tags:   []string{"gpu", "fast"},
+		}
+		got := h.buildPrompt(task)
+		if got != "Do the thing" {
+			t.Errorf("buildPrompt() = %q, want %q (tags must not appear in the prompt)", got, "Do the thing")
+		}
+		if strings.Contains(got, "Required tags") {
+			t.Errorf("buildPrompt() must not contain the confusing \"Required tags\" phrasing, got %q", got)
+		}
+	})
+}

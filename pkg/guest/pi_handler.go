@@ -844,18 +844,11 @@ func (h *PIHandler) captureExitDiagnostics(settledReceived bool) *ExitDiagnostic
 	return diag
 }
 
-// buildPrompt constructs the prompt for pi with context.
-// The user's prompt is always placed first so that template commands
-// (e.g. /repo-ideation) start at the top of the message and are
-// expanded by pi.  Context tidbits are appended after.
+// buildPrompt constructs the prompt for pi.
+// The user's prompt is passed through verbatim so that template commands
+// (e.g. /repo-ideation) start at the top of the message and are expanded
+// by pi. Task tags are used for guest routing only and are deliberately
+// not injected into the prompt (issue #162).
 func (h *PIHandler) buildPrompt(task TaskAssignment) string {
-	var parts []string
-
-	parts = append(parts, task.Prompt)
-
-	if len(task.Tags) > 0 {
-		parts = append(parts, fmt.Sprintf("Required tags: %s", strings.Join(task.Tags, ", ")))
-	}
-
-	return strings.Join(parts, "\n\n")
+	return task.Prompt
 }
