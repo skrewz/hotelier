@@ -43,6 +43,35 @@ func TestPIHandler_Lifecycle(t *testing.T) {
 	}
 }
 
+// TestPIHandler_Start_CreatesMissingWorkDir verifies that Start creates the
+// base working directory when it does not exist. Regression test for guest
+// spin-up failing with "chdir /tmp/hotelier: no such file or directory"
+// after a reboot clears /tmp.
+func TestPIHandler_Start_CreatesMissingWorkDir(t *testing.T) {
+	if _, err := exec.LookPath("pi"); err != nil {
+		t.Skip("pi not installed")
+	}
+
+	workDir := filepath.Join(t.TempDir(), "hotelier", "missing")
+	if _, err := os.Stat(workDir); !os.IsNotExist(err) {
+		t.Fatalf("expected workDir to not exist, got err=%v", err)
+	}
+
+	h := NewPIHandler(workDir, "", "", "")
+	if err := h.Start(context.Background()); err != nil {
+		t.Fatalf("start failed: %v", err)
+	}
+	defer h.Stop(context.Background())
+
+	info, err := os.Stat(workDir)
+	if err != nil {
+		t.Fatalf("workDir should exist after Start: %v", err)
+	}
+	if !info.IsDir() {
+		t.Fatal("workDir should be a directory")
+	}
+}
+
 // TestPIHandler_StopActuallyKillsProcess verifies that Stop() causes the
 // pi subprocess to actually exit within a reasonable time. This is a
 // regression test for the case where closing stdin doesn't terminate pi

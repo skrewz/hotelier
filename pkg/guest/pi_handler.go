@@ -58,7 +58,13 @@ func NewPIHandlerDebug(cwd string, provider, model, thinkingLevel string, debug 
 }
 
 // Start initializes the pi RPC subprocess.
+// It creates the base working directory first, since the pi subprocess is
+// started with it as its CWD and os/exec fails with a chdir error if the
+// directory does not exist (e.g. /tmp cleared by a reboot).
 func (h *PIHandler) Start(ctx context.Context) error {
+	if err := os.MkdirAll(h.baseCWD, 0o755); err != nil {
+		return fmt.Errorf("create workdir %s: %w", h.baseCWD, err)
+	}
 	if err := h.client.Start(ctx); err != nil {
 		return fmt.Errorf("start pi client: %w", err)
 	}
