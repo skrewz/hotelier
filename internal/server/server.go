@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
@@ -1706,7 +1707,43 @@ func (s *Server) HandleLogEntry(w http.ResponseWriter, r *http.Request) {
 			"count":   len(entries),
 		})
 
+	case 3:
+		// /api/logs/:date/:task/download → download the raw JSONL log file
+		if parts[2] == "download" {
+			date, taskID := parts[0], parts[1]
+			if date == "" || taskID == "" {
+				http.Error(w, "date and task id required", http.StatusBadRequest)
+				return
+			}
+			s.handleLogDownload(w, date, taskID)
+			return
+		}
+		http.Error(w, "not found", http.StatusNotFound)
+		return
+
 	default:
 		http.Error(w, "not found", http.StatusNotFound)
+	}
+}
+
+// handleLogDownload serves the raw JSONL log file for a task as a
+// downloadable attachment (Issue #6).
+func (s *Server) handleLogDownload(w http.ResponseWriter, date, taskID string) {
+	raw, err := s.diskLogStore.ReadRawJSONL(date, taskID)
+	if err != nil {
+		if errors.Is(err, logstore.ErrLogNotFound) {
+			http.Error(w, "log not found", http.StatusNotFound)
+			return
+		}
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	// Override the JSON Content-Type set at the top of HandleLogEntry.
+	w.Header().Set("Content-Type", "application/x-ndjson")
+	w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=\"%s.jsonl\"", taskID))
+	w.WriteHeader(http.StatusOK)
+	if _, err := w.Write([]byte(raw)); err != nil {
+		log.Printf("write log download for %s: %v", taskID, err)
 	}
 }

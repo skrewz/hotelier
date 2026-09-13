@@ -1861,6 +1861,9 @@ const { chromium } = require('playwright');
       return content ? content.textContent.substring(0, 100) : '';
     });
 
+    // Download button in the log breadcrumb (Issue #6)
+    const downloadBtn = document.querySelector('.log-breadcrumb .download-btn');
+
     return {
       entryCount: entries.length,
       systemMsgCount: systemMsgs.length,
@@ -1877,6 +1880,8 @@ const { chromium } = require('playwright');
       hasToolMarkersOutsideBlocks,
       thinkingBlockCount: thinkingBlocks.length,
       thinkingBlockContents,
+      hasDownloadBtn: downloadBtn !== null,
+      downloadBtnOnclick: downloadBtn ? (downloadBtn.getAttribute('onclick') || '') : '',
     };
   });
 
@@ -1903,6 +1908,9 @@ const { chromium } = require('playwright');
     // entries separated by non-thinking entries get separate blocks.
     { name: 'thinking blocks present in log entries view', pass: logEntryResult.thinkingBlockCount > 0 },
     { name: 'thinking blocks have non-empty content', pass: logEntryResult.thinkingBlockContents.every(c => c.length > 0) },
+    // --- Download button in log breadcrumb (Issue #6) ---
+    { name: 'download button present in log breadcrumb', pass: logEntryResult.hasDownloadBtn },
+    { name: 'download button calls downloadLog()', pass: logEntryResult.downloadBtnOnclick.includes('downloadLog') },
     // Operational system messages in log entries view
     { name: 'operational message: Executing task', pass: logEntryResult.systemMsgTexts.some(t => t.includes('Executing task')) },
     { name: 'operational message: Cloning', pass: logEntryResult.systemMsgTexts.some(t => t.includes('Cloning')) },

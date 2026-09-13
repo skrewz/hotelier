@@ -15,6 +15,7 @@ package logstore
 import (
 	"bufio"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -25,6 +26,9 @@ import (
 
 	"github.com/dsnet/compress/bzip2"
 )
+
+// ErrLogNotFound is returned when no log file exists for the requested task.
+var ErrLogNotFound = errors.New("log file not found")
 
 // Entry represents a single log line persisted to disk.
 // For tool call events, the Line field contains the original formatted
@@ -313,24 +317,78 @@ func (s *LogStore) ReadLogs(date, taskID string) ([]Entry, error) {
 	return entries, nil
 }
 
-// readLogFile reads all entries from a log file.
-func readLogFile(path string, compressed bool) ([]Entry, error) {
+// ReadRawJSONL reads the raw JSONL content from a task's log file.
+// Returns the decompressed JSONL as a string. Supports both compressed
+// (.bz2) and uncompressed (.jsonl) formats for backward compatibility;
+// compressed files are preferred. Returns ErrLogNotFound when neither
+// file exists.
+func (s *LogStore) ReadRawJSONL(date, taskID string) (string, error) {
+	// Try compressed file first
+	bz2Path := filepath.Join(s.dir, date, taskID, "logs.jsonl.bz2")
+	data, err := readRawFile(bz2Path, true)
+	if err == nil && len(data) > 0 {
+		return string(data), nil
+	}
+
+	// Fall back to uncompressed file
+	jsonlPath := filepath.Join(s.dir, date, taskID, "logs.jsonl")
+	data, err = readRawFile(jsonlPath, false)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return "", ErrLogNotFound
+		}
+		return "", fmt.Errorf("read log file %s: %w", jsonlPath, err)
+	}
+
+	return string(data), nil
+}
+
+// openLogFile opens a log file and optionally wraps it in a bzip2 reader.
+// Returns an io.ReadCloser that the caller must close.
+func openLogFile(path string, compressed bool) (io.ReadCloser, error) {
 	f, err := os.Open(path)
 	if err != nil {
 		return nil, err
 	}
-	defer f.Close()
-
-	var reader io.Reader = f
-	if compressed {
-		r, err := bzip2.NewReader(f, nil)
-		if err != nil {
-			return nil, fmt.Errorf("create bzip2 reader: %w", err)
-		}
-		reader = r
+	if !compressed {
+		return f, nil
 	}
+	r, err := bzip2.NewReader(f, nil)
+	if err != nil {
+		f.Close()
+		return nil, fmt.Errorf("create bzip2 reader: %w", err)
+	}
+	return &compressReadCloser{Reader: r, closer: f}, nil
+}
 
-	data, err := io.ReadAll(reader)
+// compressReadCloser pairs a decompression reader with the underlying
+// file's Closer, so closing the returned ReadCloser releases the file.
+type compressReadCloser struct {
+	io.Reader
+	closer io.Closer
+}
+
+func (c *compressReadCloser) Close() error { return c.closer.Close() }
+
+// readRawFile reads the raw (decompressed) bytes from a log file.
+func readRawFile(path string, compressed bool) ([]byte, error) {
+	rc, err := openLogFile(path, compressed)
+	if err != nil {
+		return nil, err
+	}
+	defer rc.Close()
+	return io.ReadAll(rc)
+}
+
+// readLogFile reads all entries from a log file.
+func readLogFile(path string, compressed bool) ([]Entry, error) {
+	rc, err := openLogFile(path, compressed)
+	if err != nil {
+		return nil, err
+	}
+	defer rc.Close()
+
+	data, err := io.ReadAll(rc)
 	if err != nil {
 		return nil, fmt.Errorf("read log file %s: %w", path, err)
 	}
