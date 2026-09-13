@@ -12,13 +12,17 @@ import (
 	"encoding/pem"
 	"fmt"
 	"math/big"
+	"net"
+	"net/http"
 	"os"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	"hotelier/internal/server"
 	"hotelier/pkg/config"
+	"hotelier/pkg/queue"
 	"hotelier/pkg/rpc"
 )
 
@@ -875,36 +879,10 @@ func TestGuest_DuplicateTaskAssignmentIgnored(t *testing.T) {
 	g.currentTaskID = "task-already-running"
 	g.mu.Unlock()
 
-	// Register the task.assign handler (normally done in Register())
 	taskID := "task-already-running"
-	g.hub.RegisterNotificationHandler("task.assign", func(method string, params json.RawMessage) {
-		g.log.Printf("[RPC] received notification: %s", method)
-		var task TaskAssignment
-		if err := json.Unmarshal(params, &task); err != nil {
-			g.log.Printf("[RPC] failed to parse task.assign params: %v", err)
-			return
-		}
 
-		// Deduplicate: if the guest is already running this exact task,
-		// ignore the duplicate assignment.
-		g.mu.Lock()
-		if g.currentTaskID == task.TaskID {
-			g.mu.Unlock()
-			g.log.Printf("[RPC] ignoring duplicate task.assign for %s (already running)", task.TaskID)
-			return
-		}
-		g.mu.Unlock()
-
-		g.log.Printf("[RPC] dispatching task %s to execution", task.TaskID)
-		select {
-		case g.taskCh <- task:
-			g.log.Printf("[RPC] task %s queued on guest for execution", task.TaskID)
-		default:
-			g.log.Printf("[RPC] task queue full, dropping task %s", task.TaskID)
-		}
-	})
-
-	// Simulate receiving a duplicate task.assign notification
+	// Simulate receiving a duplicate task.assign notification. The handler
+	// is registered in New() (see registerNotificationHandlers).
 	params, _ := json.Marshal(TaskAssignment{
 		TaskID: taskID,
 		Prompt: "Some prompt",
@@ -1108,27 +1086,8 @@ func TestGuest_DifferentTaskAssignmentQueued(t *testing.T) {
 	g.currentTaskID = "task-current"
 	g.mu.Unlock()
 
-	// Register the task.assign handler
-	g.hub.RegisterNotificationHandler("task.assign", func(method string, params json.RawMessage) {
-		var task TaskAssignment
-		if err := json.Unmarshal(params, &task); err != nil {
-			return
-		}
-
-		g.mu.Lock()
-		if g.currentTaskID == task.TaskID {
-			g.mu.Unlock()
-			return
-		}
-		g.mu.Unlock()
-
-		select {
-		case g.taskCh <- task:
-		default:
-		}
-	})
-
-	// Send a task.assign for a *different* task
+	// Send a task.assign for a *different* task. The handler is registered
+	// in New() (see registerNotificationHandlers).
 	params, _ := json.Marshal(TaskAssignment{
 		TaskID: "task-different",
 		Prompt: "Another prompt",
@@ -1146,5 +1105,133 @@ func TestGuest_DifferentTaskAssignmentQueued(t *testing.T) {
 		}
 	default:
 		t.Error("expected different task assignment to be queued, but task was not queued")
+	}
+}
+
+// TestGuest_NotificationHandlersRegisteredAtConstruction verifies that the
+// task.assign and task.cancel notification handlers are registered when the
+// guest is constructed — before any Connect() or Register() call. The server
+// pushes task.assign while handling guest.register (before the response), and
+// the read loop dispatches notifications as soon as they are read, so the
+// handlers must already be in place by the time the first message arrives.
+// See issue #168.
+func TestGuest_NotificationHandlersRegisteredAtConstruction(t *testing.T) {
+	g := newTestGuest(t)
+
+	// No Connect()/Register() — the task.assign handler must already exist
+	// and must queue the assignment on taskCh.
+	params, _ := json.Marshal(TaskAssignment{TaskID: "task-1", Prompt: "p"})
+	if !g.hub.InvokeNotificationHandler("task.assign", params) {
+		t.Fatal("expected task.assign handler to be registered at construction")
+	}
+	select {
+	case task := <-g.taskCh:
+		if task.TaskID != "task-1" {
+			t.Errorf("expected task-1 queued, got %s", task.TaskID)
+		}
+	default:
+		t.Error("expected task.assign to be queued on taskCh")
+	}
+
+	// Malformed params must not panic and must not queue anything.
+	g.hub.InvokeNotificationHandler("task.assign", json.RawMessage(`{not json`))
+	select {
+	case <-g.taskCh:
+		t.Error("expected malformed task.assign to be dropped, but a task was queued")
+	default:
+	}
+
+	// The task.cancel handler must also be registered. Invoking it while
+	// g.client is nil must not panic (no connection exists yet) — it simply
+	// skips the guest.cancelled confirmation.
+	if !g.hub.InvokeNotificationHandler("task.cancel", json.RawMessage(`{"task_id":"task-1"}`)) {
+		t.Fatal("expected task.cancel handler to be registered at construction")
+	}
+
+	// Queue full: fill the buffer, then verify a further assignment is
+	// dropped rather than blocking the read loop.
+	for i := 0; i < cap(g.taskCh); i++ {
+		g.taskCh <- TaskAssignment{TaskID: fmt.Sprintf("fill-%d", i)}
+	}
+	g.hub.InvokeNotificationHandler("task.assign", params) // must not block
+	if len(g.taskCh) != cap(g.taskCh) {
+		t.Errorf("expected queue to stay full (%d), got %d — dropped task may have been queued", cap(g.taskCh), len(g.taskCh))
+	}
+}
+
+// TestGuest_TaskAssignedDuringRegistration_IsReceived reproduces issue #168
+// end to end: a pending task exists before the guest connects, so the server
+// pushes task.assign while handling guest.register (before the response is
+// written). The guest must receive and queue the assignment. Before the fix,
+// the notification was dispatched by the read loop before Register() had a
+// chance to register the handler, and was dropped with
+// "no handler registered".
+func TestGuest_TaskAssignedDuringRegistration_IsReceived(t *testing.T) {
+	// Start a real server with a real WebSocket listener.
+	cfg := config.ServerConfig{
+		Host:      "127.0.0.1",
+		Port:      0,
+		MaxGuests: 0,
+	}
+	srv := server.New(cfg)
+	hub := srv.Hub()
+	go hub.Run()
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/ws", srv.HandleWebSocket)
+
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	go func() { _ = http.Serve(ln, mux) }()
+	t.Cleanup(func() { _ = ln.Close() })
+
+	port := ln.Addr().(*net.TCPAddr).Port
+	wsURL := fmt.Sprintf("ws://127.0.0.1:%d/ws", port)
+
+	// Queue a pending task before the guest connects. The server will push
+	// it during guest.register handling.
+	taskID := fmt.Sprintf("task-168-%d", time.Now().UnixNano())
+	if err := srv.TaskQueue().Add(&queue.Task{
+		ID:     taskID,
+		Prompt: "assigned during registration",
+		Tags:   []string{"test"},
+	}); err != nil {
+		t.Fatalf("add task: %v", err)
+	}
+
+	// Connect a real guest over WebSocket.
+	gcfg := config.GuestConfig{
+		Name:              "Issue 168 Guest",
+		Tags:              []string{"test"},
+		URL:               wsURL,
+		HeartbeatInterval: 1,
+	}
+	g := New(gcfg, func(ctx context.Context, task TaskAssignment, _ LogCallback) (*TaskResult, error) {
+		return &TaskResult{TaskID: task.TaskID, Success: true, Output: "ok"}, nil
+	})
+	t.Cleanup(func() {
+		g.Stop()
+		if g.client != nil {
+			g.client.Close()
+		}
+	})
+
+	if err := g.Connect(); err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	if err := g.Register(); err != nil {
+		t.Fatalf("register: %v", err)
+	}
+
+	// The task.assign pushed during registration must have been received.
+	select {
+	case task := <-g.taskCh:
+		if task.TaskID != taskID {
+			t.Errorf("expected %s queued, got %s", taskID, task.TaskID)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("task.assign was not received by the guest (dropped before handler registration?)")
 	}
 }

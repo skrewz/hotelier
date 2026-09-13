@@ -124,7 +124,7 @@ func New(cfg config.GuestConfig, handler Handler) *Guest {
 		logger.Printf(format, args...)
 	})
 
-	return &Guest{
+	g := &Guest{
 		id:       id,
 		name:     cfg.Name,
 		tags:     cfg.Tags,
@@ -137,6 +137,87 @@ func New(cfg config.GuestConfig, handler Handler) *Guest {
 		callResp: make(chan *rpc.JSONRPCMessage, 1),
 		taskCh:   make(chan TaskAssignment, 16),
 	}
+
+	// Register the notification handlers at construction time, before any
+	// connection exists. The server pushes task.assign while handling
+	// guest.register (before the response is written), and the read loop
+	// dispatches notifications as soon as they are read — so the handlers
+	// must already be in place by the time the first message arrives.
+	// Registering them in Register() (after the guest.register round-trip)
+	// meant the assignment was deterministically dropped with
+	// "no handler registered". See issue #168.
+	g.registerNotificationHandlers()
+
+	return g
+}
+
+// registerNotificationHandlers registers the handlers for server-initiated
+// notifications (task.assign, task.cancel). They are registered in New() so
+// that no notification can arrive before a handler exists, on first connect
+// or on reconnect alike.
+func (g *Guest) registerNotificationHandlers() {
+	// Handler for server-initiated task.assign notifications
+	g.hub.RegisterNotificationHandler("task.assign", func(method string, params json.RawMessage) {
+		g.log.Printf("[RPC] received notification: %s", method)
+		var task TaskAssignment
+		if err := json.Unmarshal(params, &task); err != nil {
+			g.log.Printf("[RPC] failed to parse task.assign params: %v", err)
+			return
+		}
+
+		// Deduplicate: if the guest is already running this exact task,
+		// ignore the duplicate assignment. This can happen when the guest
+		// reconnects and the server re-sends an assignment it already has.
+		g.mu.Lock()
+		if g.currentTaskID == task.TaskID {
+			g.mu.Unlock()
+			g.log.Printf("[RPC] ignoring duplicate task.assign for %s (already running)", task.TaskID)
+			return
+		}
+		g.mu.Unlock()
+
+		g.log.Printf("[RPC] dispatching task %s to execution", task.TaskID)
+		select {
+		case g.taskCh <- task:
+			g.log.Printf("[RPC] task %s queued on guest for execution", task.TaskID)
+		default:
+			g.log.Printf("[RPC] task queue full, dropping task %s", task.TaskID)
+		}
+	})
+
+	// Handler for task.cancel notifications
+	g.hub.RegisterNotificationHandler("task.cancel", func(method string, params json.RawMessage) {
+		g.log.Printf("[RPC] received notification: %s", method)
+		var cancel TaskCancel
+		if err := json.Unmarshal(params, &cancel); err != nil {
+			g.log.Printf("[RPC] failed to parse task.cancel params: %v", err)
+			return
+		}
+		g.log.Printf("[RPC] task %s cancelled: %s", cancel.TaskID, cancel.Reason)
+
+		// Cancel the running task's context, which will abort the pi subprocess.
+		// This is the mechanism the server uses to kill a silent guest's task.
+		g.mu.Lock()
+		if g.cancel != nil {
+			g.cancel()
+			g.cancel = nil
+		}
+		g.mu.Unlock()
+
+		// Confirm cancellation to the server. The guest is the authority on
+		// whether the task was actually stopped. The client may be nil while
+		// no connection exists (the handlers now live from construction
+		// time); skip the confirmation rather than panic.
+		if g.client == nil {
+			g.log.Printf("[RPC] no connection, skipping guest.cancelled confirmation for %s", cancel.TaskID)
+			return
+		}
+		_, _ = g.client.Call("guest.cancelled", map[string]interface{}{
+			"task_id":  cancel.TaskID,
+			"guest_id": g.id,
+			"reason":   cancel.Reason,
+		})
+	})
 }
 
 // Connect connects the guest to the Check-In Host.
@@ -195,7 +276,10 @@ func (g *Guest) resetConn() {
 	g.connLost = make(chan struct{})
 }
 
-// Register registers the guest with the Check-In Host.
+// Register registers the guest with the Check-In Host. The notification
+// handlers (task.assign, task.cancel) are already registered in New() — see
+// registerNotificationHandlers — so that a task.assign pushed while this
+// call is in flight is not dropped. See issue #168.
 func (g *Guest) Register() error {
 	params := map[string]interface{}{
 		"id":   g.id,
@@ -207,63 +291,6 @@ func (g *Guest) Register() error {
 	if err != nil {
 		return fmt.Errorf("register: %w", err)
 	}
-
-	// Register handler for server-initiated task.assign notifications
-	g.hub.RegisterNotificationHandler("task.assign", func(method string, params json.RawMessage) {
-		g.log.Printf("[RPC] received notification: %s", method)
-		var task TaskAssignment
-		if err := json.Unmarshal(params, &task); err != nil {
-			g.log.Printf("[RPC] failed to parse task.assign params: %v", err)
-			return
-		}
-
-		// Deduplicate: if the guest is already running this exact task,
-		// ignore the duplicate assignment. This can happen when the guest
-		// reconnects and the server re-sends an assignment it already has.
-		g.mu.Lock()
-		if g.currentTaskID == task.TaskID {
-			g.mu.Unlock()
-			g.log.Printf("[RPC] ignoring duplicate task.assign for %s (already running)", task.TaskID)
-			return
-		}
-		g.mu.Unlock()
-
-		g.log.Printf("[RPC] dispatching task %s to execution", task.TaskID)
-		select {
-		case g.taskCh <- task:
-			g.log.Printf("[RPC] task %s queued on guest for execution", task.TaskID)
-		default:
-			g.log.Printf("[RPC] task queue full, dropping task %s", task.TaskID)
-		}
-	})
-
-	// Register handler for task.cancel notifications
-	g.hub.RegisterNotificationHandler("task.cancel", func(method string, params json.RawMessage) {
-		g.log.Printf("[RPC] received notification: %s", method)
-		var cancel TaskCancel
-		if err := json.Unmarshal(params, &cancel); err != nil {
-			g.log.Printf("[RPC] failed to parse task.cancel params: %v", err)
-			return
-		}
-		g.log.Printf("[RPC] task %s cancelled: %s", cancel.TaskID, cancel.Reason)
-
-		// Cancel the running task's context, which will abort the pi subprocess.
-		// This is the mechanism the server uses to kill a silent guest's task.
-		g.mu.Lock()
-		if g.cancel != nil {
-			g.cancel()
-			g.cancel = nil
-		}
-		g.mu.Unlock()
-
-		// Confirm cancellation to the server. The guest is the authority on
-		// whether the task was actually stopped.
-		_, _ = g.client.Call("guest.cancelled", map[string]interface{}{
-			"task_id":  cancel.TaskID,
-			"guest_id": g.id,
-			"reason":   cancel.Reason,
-		})
-	})
 
 	g.log.Printf("registered with tags: %v", g.tags)
 	return nil
