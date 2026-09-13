@@ -1731,3 +1731,113 @@ func TestPIHandler_BuildPrompt(t *testing.T) {
 		}
 	})
 }
+
+// TestPIHandler_ExecPathPreservedAcrossRestarts verifies that the pi
+// executable resolved at construction time is reused for restarts and
+// per-task resets, even when PATH no longer contains pi. This is the
+// regression test for issue #33: the restart attempt failed with
+// 'exec: "pi": executable file not found in $PATH' because it re-resolved
+// pi via PATH instead of reusing the binary that was successfully
+// launched at guest startup.
+func TestPIHandler_ExecPathPreservedAcrossRestarts(t *testing.T) {
+	if _, err := exec.LookPath("python3"); err != nil {
+		t.Skip("python3 not installed, cannot run fake pi")
+	}
+
+	// Fake pi in a temp bin dir; it records its own launch path (argv[0])
+	// in a marker file so we can verify which binary each spawn used.
+	binDir, err := os.MkdirTemp("", "hotelier-fakepi-restart-*")
+	if err != nil {
+		t.Fatalf("create fake bin dir: %v", err)
+	}
+	defer os.RemoveAll(binDir)
+	marker := filepath.Join(binDir, "marker")
+	// Use the absolute python3 path in the shebang so the fake pi works
+	// regardless of how PATH is manipulated below.
+	python3, err := exec.LookPath("python3")
+	if err != nil {
+		t.Fatalf("locate python3: %v", err)
+	}
+	script := "#!" + python3 + "\n" + `import os, sys
+
+marker = os.environ.get("FAKE_PI_MARKER")
+if marker:
+    with open(marker, "a") as f:
+        f.write(sys.argv[0] + "\n")
+
+# Stay alive until stdin is closed.
+for _ in sys.stdin:
+    pass
+`
+	fakePi := filepath.Join(binDir, "pi")
+	if err := os.WriteFile(fakePi, []byte(script), 0o755); err != nil {
+		t.Fatalf("write fake pi: %v", err)
+	}
+
+	origMarker := os.Getenv("FAKE_PI_MARKER")
+	t.Cleanup(func() { os.Setenv("FAKE_PI_MARKER", origMarker) })
+	os.Setenv("FAKE_PI_MARKER", marker)
+
+	// Put the fake bin dir on PATH so construction resolves the fake pi.
+	origPath := os.Getenv("PATH")
+	t.Cleanup(func() { os.Setenv("PATH", origPath) })
+	os.Setenv("PATH", binDir+string(os.PathListSeparator)+origPath)
+
+	baseDir, err := os.MkdirTemp("", "hotelier-base-*")
+	if err != nil {
+		t.Fatalf("create base dir: %v", err)
+	}
+	defer os.RemoveAll(baseDir)
+
+	h := NewPIHandler(baseDir, "", "", "")
+	ctx := context.Background()
+
+	// Initial spawn — resolves the fake pi via PATH at construction time.
+	if err := h.Start(ctx); err != nil {
+		t.Fatalf("initial start failed: %v", err)
+	}
+
+	// Reproduce the issue #33 scenario: PATH no longer contains pi.
+	os.Setenv("PATH", origPath)
+
+	// Simulate the pi subprocess dying between tasks.
+	h.Stop(ctx)
+	if h.IsRunning() {
+		t.Fatal("client should not be running after Stop")
+	}
+
+	// The restart must succeed using the executable pinned at
+	// construction time, not a fresh PATH lookup.
+	if err := h.restartClient(ctx); err != nil {
+		t.Fatalf("restartClient failed after PATH change: %v", err)
+	}
+	defer h.Stop(ctx)
+
+	// The per-task reset must use the pinned executable too.
+	if err := h.resetClient(ctx, baseDir, "test-task", func(LogEntry) error { return nil }); err != nil {
+		t.Fatalf("resetClient failed after PATH change: %v", err)
+	}
+
+	// All three spawns (initial, restart, reset) must have used the fake
+	// pi — proving the resolved path was preserved, not re-resolved.
+	deadline := time.Now().Add(2 * time.Second)
+	var lines []string
+	for time.Now().Before(deadline) {
+		data, err := os.ReadFile(marker)
+		if err == nil {
+			lines = strings.Split(strings.TrimSpace(string(data)), "\n")
+			if len(lines) >= 3 {
+				break
+			}
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	if len(lines) < 3 {
+		t.Fatalf("expected 3 spawn records in marker, got %d: %q", len(lines), lines)
+	}
+	for i, line := range lines {
+		if line != fakePi {
+			t.Errorf("spawn %d used %q, want the pinned fake pi %q", i+1, line, fakePi)
+		}
+	}
+}

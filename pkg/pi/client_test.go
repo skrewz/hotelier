@@ -4,7 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"log"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -649,6 +651,122 @@ func TestPiClient_Start_LogsEnvVarNames(t *testing.T) {
 	}
 	if strings.Contains(logOutput, "beta-value") {
 		t.Errorf("security leak: env var value found in log output:\n%s", logOutput)
+	}
+}
+
+// writeFakePi creates a fake `pi` executable in a fresh temp bin dir.
+// The fake pi appends its own argv[0] to the marker file (path taken from
+// the FAKE_PI_MARKER env var) at startup, then stays alive until stdin is
+// closed. Returns the marker file path and the fake pi path.
+func writeFakePi(t *testing.T, dirPattern string) (string, string) {
+	t.Helper()
+	binDir, err := os.MkdirTemp("", dirPattern)
+	if err != nil {
+		t.Fatalf("create fake bin dir: %v", err)
+	}
+	marker := filepath.Join(binDir, "marker")
+	// Use the absolute python3 path in the shebang: the test may run with
+	// a stripped-down PATH where `env` cannot locate python3.
+	python3, err := exec.LookPath("python3")
+	if err != nil {
+		t.Fatalf("locate python3: %v", err)
+	}
+	script := "#!" + python3 + "\n" + `import os, sys
+
+marker = os.environ.get("FAKE_PI_MARKER")
+if marker:
+    with open(marker, "a") as f:
+        f.write(sys.argv[0] + "\n")
+
+# Stay alive until stdin is closed.
+for _ in sys.stdin:
+    pass
+`
+	fakePi := filepath.Join(binDir, "pi")
+	if err := os.WriteFile(fakePi, []byte(script), 0o755); err != nil {
+		t.Fatalf("write fake pi: %v", err)
+	}
+	return marker, fakePi
+}
+
+// waitForMarker waits until the marker file contains the expected number
+// of lines, polling for up to 2 seconds.
+func waitForMarker(t *testing.T, marker string, wantLines int) []string {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		data, err := os.ReadFile(marker)
+		if err == nil {
+			lines := strings.Split(strings.TrimSpace(string(data)), "\n")
+			if len(lines) >= wantLines {
+				return lines
+			}
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	t.Fatalf("marker file %s did not reach %d lines within 2s", marker, wantLines)
+	return nil
+}
+
+// TestPiClient_Start_UsesExecPath verifies that Start() launches the
+// executable given in ExecPath even when "pi" is not resolvable via PATH.
+// This is the mechanism that lets the guest pin the pi binary resolved at
+// startup for all subsequent spawns (issue #33).
+func TestPiClient_Start_UsesExecPath(t *testing.T) {
+	if _, err := exec.LookPath("python3"); err != nil {
+		t.Skip("python3 not installed, cannot run fake pi")
+	}
+
+	marker, fakePi := writeFakePi(t, "hotelier-fakepi-execpath-*")
+	defer os.RemoveAll(filepath.Dir(marker))
+
+	origMarker := os.Getenv("FAKE_PI_MARKER")
+	t.Cleanup(func() { os.Setenv("FAKE_PI_MARKER", origMarker) })
+	os.Setenv("FAKE_PI_MARKER", marker)
+
+	// Point PATH at an empty dir so bare "pi" cannot be resolved.
+	// The client must rely on ExecPath.
+	emptyDir, err := os.MkdirTemp("", "hotelier-empty-bin-*")
+	if err != nil {
+		t.Fatalf("create empty bin dir: %v", err)
+	}
+	defer os.RemoveAll(emptyDir)
+	origPath := os.Getenv("PATH")
+	t.Cleanup(func() { os.Setenv("PATH", origPath) })
+	os.Setenv("PATH", emptyDir)
+
+	var logBuf strings.Builder
+	c := NewClient(PiClientConfig{
+		CWD:      emptyDir,
+		Log:      newTestLogger(&logBuf),
+		ExecPath: fakePi,
+	})
+	if err := c.Start(context.Background()); err != nil {
+		t.Fatalf("start with ExecPath failed: %v", err)
+	}
+	defer c.Stop(context.Background())
+
+	lines := waitForMarker(t, marker, 1)
+	if lines[0] != fakePi {
+		t.Errorf("expected fake pi %q to be launched, got %q", fakePi, lines[0])
+	}
+}
+
+// TestPiClient_Start_ExecPathNotFound verifies that Start() returns a clear
+// error when ExecPath is set but points to a missing file.
+func TestPiClient_Start_ExecPathNotFound(t *testing.T) {
+	var logBuf strings.Builder
+	c := NewClient(PiClientConfig{
+		CWD:      "/tmp",
+		Log:      newTestLogger(&logBuf),
+		ExecPath: "/nonexistent/hotelier-test/pi",
+	})
+	err := c.Start(context.Background())
+	if err == nil {
+		t.Fatal("expected error starting with nonexistent ExecPath, got nil")
+	}
+	if !strings.Contains(err.Error(), "start pi") {
+		t.Errorf("expected 'start pi' in error, got: %v", err)
 	}
 }
 
