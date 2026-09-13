@@ -485,35 +485,30 @@ func TestPiClient_IsRunning_AfterStop(t *testing.T) {
 }
 
 // TestPiClient_IsRunning_DetectsCrashedProcess verifies that IsRunning
-// detects a process that has crashed on its own (ProcessState is non-nil
-// but Stop() was not called). This is a regression test for issue #24
-// where IsRunning() only checked the `started` flag and did not detect
-// a crashed subprocess.
+// detects a process that has crashed on its own (the process state is
+// recorded but Stop() was not called). This is a regression test for
+// issue #24 where IsRunning() only checked the `started` flag and did not
+// detect a crashed subprocess.
 func TestPiClient_IsRunning_DetectsCrashedProcess(t *testing.T) {
-	// We simulate a crashed process by creating a client, starting a
-	// short-lived command (not pi), and then checking IsRunning after
-	// the command exits.
+	// We simulate a crashed process by starting a short-lived command
+	// (not pi) and letting the wait goroutine record its exit, exactly
+	// as it would for a real pi subprocess.
 	c := NewClient(PiClientConfig{CWD: "/tmp"})
 
-	// Manually set up the internal state to simulate a crashed process.
-	// We use a command that exits immediately.
 	c.cmd = exec.Command("true") // exits immediately with 0
-	c.started = true
-
-	// Start the command so ProcessState gets populated
-	_ = c.cmd.Run() // blocks until "true" exits
-
-	// Now ProcessState should be non-nil (process exited)
-	if c.cmd.ProcessState == nil {
-		t.Fatal("expected ProcessState to be set after cmd.Run()")
+	if err := c.cmd.Start(); err != nil {
+		t.Fatalf("start command: %v", err)
 	}
+	c.started = true
+	go c.waitProcess()
 
-	// Record the state the same way the Wait() goroutine does in the
-	// real flow (it copies cmd.ProcessState into processState under mu
-	// after Wait returns).
-	c.mu.Lock()
-	c.processState = c.cmd.ProcessState
-	c.mu.Unlock()
+	// Wait for the exit to be recorded.
+	<-c.processExited
+
+	// Now the process state should be non-nil (process exited)
+	if c.GetProcessState() == nil {
+		t.Fatal("expected process state to be set after the process exited")
+	}
 
 	// IsRunning should detect the dead process
 	if c.IsRunning() {
@@ -523,6 +518,44 @@ func TestPiClient_IsRunning_DetectsCrashedProcess(t *testing.T) {
 	// After IsRunning detects the crash, started should be cleared
 	if c.started {
 		t.Error("started should be cleared after IsRunning detects dead process")
+	}
+}
+
+// TestPiClient_ProcessStateReadersConcurrentWithExit hammers the
+// process-state readers (IsRunning, GetProcessState, GetExitCode) while the
+// subprocess is alive and then exits, so the issue #47 data race —
+// cmd.Wait() writing cmd.ProcessState in the wait goroutine while the
+// readers read it — is reliably detected under `go test -race`.
+func TestPiClient_ProcessStateReadersConcurrentWithExit(t *testing.T) {
+	c := NewClient(PiClientConfig{CWD: "/tmp"})
+
+	// Use a short-lived process so the exit (and the ProcessState write in
+	// cmd.Wait()) happens while the readers are running.
+	c.cmd = exec.Command("sh", "-c", "sleep 0.5")
+	if err := c.cmd.Start(); err != nil {
+		t.Fatalf("start command: %v", err)
+	}
+	c.started = true
+	go c.waitProcess()
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		c.IsRunning()
+		c.GetProcessState()
+		c.GetExitCode()
+	}
+
+	// Wait for the exit to be recorded.
+	<-c.processExited
+
+	if c.IsRunning() {
+		t.Error("IsRunning() should be false after the process exited")
+	}
+	if c.GetProcessState() == nil {
+		t.Error("GetProcessState() should be non-nil after the process exited")
+	}
+	if code := c.GetExitCode(); code != 0 {
+		t.Errorf("GetExitCode() = %d, want 0", code)
 	}
 }
 

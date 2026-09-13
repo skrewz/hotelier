@@ -68,11 +68,16 @@ type PiClient struct {
 	waitOnce sync.Once
 	// waitErr holds the exit error from cmd.Wait().
 	waitErr error
-	// processState holds the subprocess exit state, populated by the Wait()
-	// goroutines after cmd.Wait() returns and published under mu. Reading
-	// cmd.ProcessState directly races with cmd.Wait() (see
-	// TestProcessStateAccessorsRaceFree).
+	// processState holds the exit state captured from cmd.ProcessState
+	// under c.mu once cmd.Wait() returns. cmd.Wait() writes to
+	// cmd.ProcessState in the wait goroutine, which is not safe to read
+	// concurrently, so all reader methods use this protected copy.
+	// See issue #47.
 	processState *os.ProcessState
+	// processExited is closed once cmd.Wait() has returned and the exit
+	// state has been recorded. Stop() waits on it instead of calling
+	// cmd.Wait() itself. See issue #47.
+	processExited chan struct{}
 	// stderrLines captures the last N lines of stderr output for diagnostics.
 	stderrLines   []string
 	stderrLinesMu sync.Mutex
@@ -123,6 +128,7 @@ func NewClient(cfg PiClientConfig) *PiClient {
 		env:           cfg.Env,
 		eventCh:       make(chan Event, 256),
 		doneCh:        make(chan struct{}),
+		processExited: make(chan struct{}),
 	}
 	if cfg.SpawnOutput != nil {
 		c.spawnOutput = &cfg.SpawnOutput
@@ -184,20 +190,12 @@ func (c *PiClient) Start(ctx context.Context) error {
 	c.stderr = stderr
 	c.started = true
 
-	// Wait for the process to exit so ProcessState is populated.
+	// Wait for the process to exit so the process state is populated.
 	// This runs regardless of whether Stop() is called, ensuring
 	// IsRunning() can detect a crashed subprocess.
-	// waitOnce ensures Wait() is called exactly once even if Stop()
+	// waitProcess ensures Wait() is called exactly once even if Stop()
 	// also tries to wait.
-	go func() {
-		c.waitOnce.Do(func() {
-			waitErr := c.cmd.Wait()
-			c.mu.Lock()
-			c.waitErr = waitErr
-			c.processState = c.cmd.ProcessState
-			c.mu.Unlock()
-		})
-	}()
+	go c.waitProcess()
 
 	// Start reading stdout events
 	go c.readEvents()
@@ -227,32 +225,15 @@ func (c *PiClient) Stop(ctx context.Context) error {
 	// Wait for process to exit, with a fallback kill if it doesn't exit gracefully.
 	// pi is a persistent RPC server; closing stdin usually causes it to exit,
 	// but in some cases (e.g., plan mode, extension dialogs) it may hang.
-	// waitOnce ensures Wait() is called exactly once — the goroutine in Start()
-	// may have already called it if the process exited on its own.
-	done := make(chan error, 1)
-	go func() {
-		c.waitOnce.Do(func() {
-			waitErr := c.cmd.Wait()
-			done <- waitErr
-			c.mu.Lock()
-			c.processState = c.cmd.ProcessState
-			c.mu.Unlock()
-		})
-		// If waitOnce was already called (process exited on its own),
-		// signal done so we don't block forever.
-		select {
-		case done <- nil:
-		default:
-		}
-	}()
-
+	// The wait goroutine started by Start() owns cmd.Wait(); processExited
+	// is closed once it has returned, so Stop never calls Wait() itself.
 	select {
-	case err := <-done:
+	case <-c.processExited:
 		c.mu.Lock()
 		c.started = false
 		close(c.doneCh)
 		c.mu.Unlock()
-		if err != nil {
+		if err := c.GetExitError(); err != nil {
 			c.log.Printf("pi subprocess exited: %v", err)
 		} else {
 			c.log.Printf("pi subprocess stopped cleanly")
@@ -265,22 +246,8 @@ func (c *PiClient) Stop(ctx context.Context) error {
 		if killErr != nil {
 			c.log.Printf("pi subprocess kill failed: %v", killErr)
 		}
-		// Wait for the process after kill — waitOnce ensures this is safe.
-		killDone := make(chan error, 1)
-		go func() {
-			c.waitOnce.Do(func() {
-				waitErr := c.cmd.Wait()
-				killDone <- waitErr
-				c.mu.Lock()
-				c.processState = c.cmd.ProcessState
-				c.mu.Unlock()
-			})
-			select {
-			case killDone <- nil:
-			default:
-			}
-		}()
-		<-killDone
+		// Wait for the process to exit after the kill.
+		<-c.processExited
 		c.log.Printf("pi subprocess force killed")
 		c.mu.Lock()
 		c.started = false
@@ -288,6 +255,21 @@ func (c *PiClient) Stop(ctx context.Context) error {
 		c.mu.Unlock()
 		return fmt.Errorf("pi subprocess killed after timeout")
 	}
+}
+
+// waitProcess ensures cmd.Wait() is called exactly once and records the
+// exit error and process state under c.mu. cmd.Wait() writes to
+// c.cmd.ProcessState, which must not be read concurrently, so the state is
+// captured here into c.processState for the reader methods. See issue #47.
+func (c *PiClient) waitProcess() {
+	c.waitOnce.Do(func() {
+		waitErr := c.cmd.Wait()
+		c.mu.Lock()
+		c.waitErr = waitErr
+		c.processState = c.cmd.ProcessState
+		close(c.processExited)
+		c.mu.Unlock()
+	})
 }
 
 // Prompt sends a user prompt to pi and streams events back.
@@ -310,7 +292,7 @@ func (c *PiClient) Subscribe() <-chan Event {
 
 // IsRunning returns whether the pi subprocess is running.
 // It checks both the started flag and the actual process state.
-// If the process has exited (ProcessState is non-nil), it returns false
+// If the process has exited (processState is non-nil), it returns false
 // even if started was true — the process may have crashed on its own.
 func (c *PiClient) IsRunning() bool {
 	c.mu.Lock()
@@ -319,7 +301,7 @@ func (c *PiClient) IsRunning() bool {
 		return false
 	}
 	// Process has exited (crashed or otherwise) — mark as not running.
-	// processState is set by the Wait() goroutines when the process exits.
+	// processState is set by the wait goroutine when the process exits.
 	if c.processState != nil {
 		c.started = false
 		return false
