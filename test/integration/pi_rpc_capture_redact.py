@@ -141,6 +141,11 @@ def run_rpc_capture():
 
         log("INFO", f"Starting pi RPC, capture \u2192 {CAPTURE_FILE}", f)
 
+        # Create the edit target file the prompt refers to, so the agent
+        # has something concrete to edit with the edit tool.
+        with open("/tmp/pi-rpc-edit-target.txt", "w") as tf:
+            tf.write('def greet(name):\n    return "hello " + name\n')
+
         # Start pi in RPC mode with no session persistence, using the
         # isolated HOME (compaction.keepRecentTokens override).
         proc = subprocess.Popen(
@@ -273,7 +278,10 @@ def redact_capture(offset):
 
 
     # Capture file path - replace with generic placeholder
-    content = re.sub(r"/tmp/pi-rpc-capture\.log", "/tmp/example-capture.log", content)
+    content = re.sub(r"/tmp/pi-rpc-capture(-\w+)?\.log", "/tmp/example-capture.log", content)
+
+    # Edit target file path - replace with generic placeholder
+    content = re.sub(r"/tmp/pi-rpc-edit-target\.txt", "/tmp/example-edit-target.txt", content)
 
     # PID - replace with generic placeholder
     content = re.sub(r'PID:\s*\d+', 'PID: 12345', content)

@@ -22,16 +22,17 @@ import (
 // For tool call events, structured fields (ToolType, ToolName, etc.)
 // carry the machine-readable data alongside the formatted Line string.
 type LogEntry struct {
-	TaskID     string    `json:"task_id"`
-	Line       string    `json:"line"`
-	Level      string    `json:"level,omitempty"`
-	Timestamp  time.Time `json:"timestamp,omitempty"`
-	ToolType   string    `json:"tool_type,omitempty"`   // "start", "output", "end"
-	ToolName   string    `json:"tool_name,omitempty"`   // e.g. "bash", "read"
-	ToolID     string    `json:"tool_id,omitempty"`     // unique tool call identifier
-	ToolArgs   string    `json:"tool_args,omitempty"`   // arguments/parameters
-	ToolOutput string    `json:"tool_output,omitempty"` // captured output
-	ToolError  bool      `json:"tool_error,omitempty"`  // true if tool ended with error
+	TaskID       string    `json:"task_id"`
+	Line         string    `json:"line"`
+	Level        string    `json:"level,omitempty"`
+	Timestamp    time.Time `json:"timestamp,omitempty"`
+	ToolType     string    `json:"tool_type,omitempty"`      // "start", "output", "end"
+	ToolName     string    `json:"tool_name,omitempty"`      // e.g. "bash", "read"
+	ToolID       string    `json:"tool_id,omitempty"`        // unique tool call identifier
+	ToolArgs     string    `json:"tool_args,omitempty"`      // arguments/parameters
+	ToolArgsJSON string    `json:"tool_args_json,omitempty"` // raw argument JSON (for UI diff rendering, issue #2)
+	ToolOutput   string    `json:"tool_output,omitempty"`    // captured output
+	ToolError    bool      `json:"tool_error,omitempty"`     // true if tool ended with error
 	// Compaction fields (level "compaction"): context compaction events
 	// emitted by pi (compaction_start / compaction_end).
 	CompactionType         string `json:"compaction_type,omitempty"`          // "start", "end"

@@ -28,14 +28,15 @@ import (
 // testLogEntry represents a single log entry used across both the RPC and
 // Playwright validation paths.
 type testLogEntry struct {
-	line       string
-	level      string
-	toolType   string // "start", "output", "end"
-	toolName   string // e.g. "bash", "read"
-	toolID     string // unique tool call identifier
-	toolArgs   string // arguments/parameters
-	toolOutput string // captured output
-	toolError  bool   // true if tool ended with error
+	line         string
+	level        string
+	toolType     string // "start", "output", "end"
+	toolName     string // e.g. "bash", "read"
+	toolID       string // unique tool call identifier
+	toolArgs     string // arguments/parameters (display string, mirrors pi.ToolArgs)
+	toolArgsJSON string // raw argument JSON (mirrors LogEntry.ToolArgsJSON, issue #2)
+	toolOutput   string // captured output
+	toolError    bool   // true if tool ended with error
 	// compaction fields (level "compaction")
 	compactionType         string // "start", "end"
 	compactionReason       string // "manual", "threshold", "overflow"
@@ -43,6 +44,60 @@ type testLogEntry struct {
 	compactionTokensBefore int    // context size before (end)
 	compactionTokensAfter  int    // estimated size after (end)
 	compactionError        bool   // true if compaction failed
+}
+
+// displayToolArgs mirrors pi.ToolArgs: extracts the display string the guest
+// puts in the tool_args field (command / content / path / raw JSON fallback).
+func displayToolArgs(args any) string {
+	if args == nil {
+		return ""
+	}
+	raw, err := json.Marshal(args)
+	if err != nil {
+		return ""
+	}
+	var m map[string]any
+	if err := json.Unmarshal(raw, &m); err != nil {
+		return string(raw)
+	}
+	if cmd, ok := m["command"].(string); ok {
+		return cmd
+	}
+	if content, ok := m["content"].(string); ok {
+		return content
+	}
+	if path, ok := m["path"].(string); ok {
+		return "path: " + path
+	}
+	return string(raw)
+}
+
+// textToolResult mirrors pi.ToolResult: concatenates the text content items
+// of a tool result.
+func textToolResult(result any) string {
+	if result == nil {
+		return ""
+	}
+	raw, err := json.Marshal(result)
+	if err != nil {
+		return ""
+	}
+	var r struct {
+		Content []struct {
+			Type string `json:"type"`
+			Text string `json:"text"`
+		} `json:"content"`
+	}
+	if err := json.Unmarshal(raw, &r); err != nil {
+		return ""
+	}
+	var text string
+	for _, c := range r.Content {
+		if c.Type == "text" {
+			text += c.Text
+		}
+	}
+	return text
 }
 
 // piRPCEvent captures the top-level type field from a Pi RPC wire event.
@@ -131,13 +186,15 @@ func parsePiRPCCapture(filePath string) ([]testLogEntry, error) {
 				continue
 			}
 			argsJSON, _ := json.Marshal(toolEvt.Args)
+			displayArgs := displayToolArgs(toolEvt.Args)
 			entries = append(entries, testLogEntry{
-				line:     fmt.Sprintf("[TOOL_START] %s: %s (id: %s)", toolEvt.ToolName, string(argsJSON), toolEvt.ToolCallID),
-				level:    "tool",
-				toolType: "start",
-				toolName: toolEvt.ToolName,
-				toolID:   toolEvt.ToolCallID,
-				toolArgs: string(argsJSON),
+				line:         fmt.Sprintf("[TOOL_START] %s: %s (id: %s)", toolEvt.ToolName, displayArgs, toolEvt.ToolCallID),
+				level:        "tool",
+				toolType:     "start",
+				toolName:     toolEvt.ToolName,
+				toolID:       toolEvt.ToolCallID,
+				toolArgs:     displayArgs,
+				toolArgsJSON: string(argsJSON),
 			})
 
 		case "tool_execution_end":
@@ -145,39 +202,24 @@ func parsePiRPCCapture(filePath string) ([]testLogEntry, error) {
 			if err := json.Unmarshal([]byte(payload), &toolEvt); err != nil {
 				continue
 			}
-			resultJSON, _ := json.Marshal(toolEvt.Result)
+			// The guest sends the extracted text (pi.ToolResult), not the raw
+			// result JSON.
+			resultText := textToolResult(toolEvt.Result)
 			entries = append(entries, testLogEntry{
-				line:       fmt.Sprintf("[TOOL_END] %s (id: %s): %s", toolEvt.ToolName, toolEvt.ToolCallID, string(resultJSON)),
+				line:       fmt.Sprintf("[TOOL_END] %s (id: %s): %s", toolEvt.ToolName, toolEvt.ToolCallID, resultText),
 				level:      "tool",
 				toolType:   "end",
 				toolName:   toolEvt.ToolName,
 				toolID:     toolEvt.ToolCallID,
-				toolOutput: string(resultJSON),
+				toolOutput: resultText,
 				toolError:  toolEvt.IsError,
 			})
 
-		case "tool_execution_update":
-			var toolEvt piToolExecEvent
-			if err := json.Unmarshal([]byte(payload), &toolEvt); err != nil {
-				continue
-			}
-			// Only emit output entries when there's actual content
-			var partialResult any
-			if err := json.Unmarshal([]byte(payload), &struct {
-				PartialResult any `json:"partialResult"`
-			}{PartialResult: &partialResult}); err == nil && partialResult != nil {
-				resultJSON, _ := json.Marshal(partialResult)
-				if string(resultJSON) != "{}" && string(resultJSON) != "null" {
-					entries = append(entries, testLogEntry{
-						line:       fmt.Sprintf("[TOOL_OUTPUT] %s (id: %s): %s", toolEvt.ToolName, toolEvt.ToolCallID, string(resultJSON)),
-						level:      "tool",
-						toolType:   "output",
-						toolName:   toolEvt.ToolName,
-						toolID:     toolEvt.ToolCallID,
-						toolOutput: string(resultJSON),
-					})
-				}
-			}
+		// NOTE: tool_execution_update events are intentionally not converted
+		// into log entries. The guest extracts output via pi.ToolResult, which
+		// reads the "result" field — absent on update events (they carry
+		// "partialResult") — so production never emits [TOOL_OUTPUT] entries
+		// for them.
 
 		case "message_update":
 			var msgEvt piMessageUpdateEvent
@@ -310,6 +352,18 @@ func testLogEntriesCompaction(taskID string) []testLogEntry {
 	)
 }
 
+// testLogEntriesEdit returns log entries for the edit-tool flow (issue #2),
+// parsed from a real Pi RPC capture of a run that read and then edited a
+// file. The capture contains a read tool call and an edit tool call whose
+// args carry oldText/newText for the UI diff renderer.
+func testLogEntriesEdit(taskID string) []testLogEntry {
+	return loadCaptureEntries(
+		"test/integration/pi_rpc_capture_edit_redacted.log",
+		taskID,
+		"Edit /tmp/example-edit-target.txt: change the word 'hello' to 'goodbye' in the return statement. Do not do anything else.",
+	)
+}
+
 // sendLogEntries sends a slice of log entries to the server via guest.log RPC.
 func sendLogEntries(t *testing.T, guestWS *websocket.Conn, taskID string, entries []testLogEntry) {
 	t.Helper()
@@ -322,6 +376,7 @@ func sendLogEntries(t *testing.T, guestWS *websocket.Conn, taskID string, entrie
 			"tool_name":                entry.toolName,
 			"tool_id":                  entry.toolID,
 			"tool_args":                entry.toolArgs,
+			"tool_args_json":           entry.toolArgsJSON,
 			"tool_output":              entry.toolOutput,
 			"tool_error":               entry.toolError,
 			"compaction_type":          entry.compactionType,
@@ -360,10 +415,17 @@ func flushAccumulator(t *testing.T, srv *server.Server) {
 		srv.LogStore().Add(e)
 		if ds := srv.DiskLogStore(); ds != nil {
 			_ = ds.Append(logstore.Entry{
-				TaskID:    e.TaskID,
-				Line:      e.Line,
-				Level:     e.Level,
-				Timestamp: e.Timestamp,
+				TaskID:       e.TaskID,
+				Line:         e.Line,
+				Level:        e.Level,
+				Timestamp:    e.Timestamp,
+				ToolType:     e.ToolType,
+				ToolName:     e.ToolName,
+				ToolID:       e.ToolID,
+				ToolArgs:     e.ToolArgs,
+				ToolArgsJSON: e.ToolArgsJSON,
+				ToolOutput:   e.ToolOutput,
+				ToolError:    e.ToolError,
 			})
 		}
 	})
@@ -596,7 +658,34 @@ func TestValidateToolUI(t *testing.T) {
 	flushAccumulator(t, srv)
 	t.Logf("Compaction task created: %s", compactionTaskID)
 
-	validateUI(t, baseURL, taskID, compactionTaskID, failedTaskID, completedTaskID, pendingTaskID, failureReason, projectRoot)
+	// Step 4g: Create a completed task whose run used the edit tool, to
+	// verify inline diff rendering (issue #2). Log entries are sent via
+	// guest.log RPC from a real Pi RPC capture containing a read and an
+	// edit tool call.
+	editTaskID := fmt.Sprintf("ui-test-edit-task-%d", time.Now().UnixNano())
+	editTask := &queue.Task{
+		ID:     editTaskID,
+		Prompt: "Edit /tmp/example-edit-target.txt: change the word 'hello' to 'goodbye' in the return statement. Do not do anything else.",
+		Tags:   []string{"business-default"},
+	}
+	if err := srv.TaskQueue().Add(editTask); err != nil {
+		t.Fatalf("add edit task: %v", err)
+	}
+	if err := srv.TaskQueue().Assign(editTaskID, "ui-test-guest"); err != nil {
+		t.Fatalf("assign edit task: %v", err)
+	}
+	if err := srv.TaskQueue().Start(editTaskID); err != nil {
+		t.Fatalf("start edit task: %v", err)
+	}
+	editLogEntries := testLogEntriesEdit(editTaskID)
+	sendLogEntries(t, guestWS, editTaskID, editLogEntries)
+	flushAccumulator(t, srv)
+	if err := srv.TaskQueue().Complete(editTaskID, "Task completed successfully"); err != nil {
+		t.Fatalf("complete edit task: %v", err)
+	}
+	t.Logf("Edit task created: %s", editTaskID)
+
+	validateUI(t, baseURL, taskID, compactionTaskID, failedTaskID, completedTaskID, pendingTaskID, failureReason, editTaskID, projectRoot)
 }
 
 func validateServerLogs(t *testing.T, srv *server.Server, taskID string, expectedEntries []testLogEntry) {
@@ -685,7 +774,7 @@ func validateServerLogs(t *testing.T, srv *server.Server, taskID string, expecte
 	}
 }
 
-func validateUI(t *testing.T, baseURL, taskID, compactionTaskID, failedTaskID, completedTaskID, pendingTaskID, failureReason, projectRoot string) {
+func validateUI(t *testing.T, baseURL, taskID, compactionTaskID, failedTaskID, completedTaskID, pendingTaskID, failureReason, editTaskID, projectRoot string) {
 	// Allow overriding the screenshot directory via env var for manual inspection.
 	// When set, screenshots survive t.TempDir() cleanup.
 	overrideDir := os.Getenv("SCREENSHOT_DIR")
@@ -723,6 +812,7 @@ const { chromium } = require('playwright');
   const completedTaskId = '%s';
   const pendingTaskId = '%s';
   const failureReason = '%s';
+  const editTaskId = '%s';
   const expectedLogDate = '%s';
   const path = require('path');
 
@@ -1699,6 +1789,185 @@ const { chromium } = require('playwright');
   await takeScreenshot('03c-streaming-thinking-blocks');
 
   // =====================================================================
+  // Phase 3d: Edit tool diff rendering (Issue #2)
+  // =====================================================================
+  console.log('=== Phase 3d: Edit tool diff rendering (Issue #2) ===');
+
+  // --- Unit-style checks of the JS diff functions ---
+  const diffUnitResult = await page.evaluate(() => {
+    const out = {};
+
+    // 1. Single-line word-level change (mirrors the real edit capture)
+    const wordDiff = buildEditDiffHTML(JSON.stringify({
+      path: '/tmp/example-edit-target.txt',
+      edits: [{ oldText: 'return "hello " + name', newText: 'return "goodbye " + name' }]
+    }));
+    out.word = {
+      hasDiff: wordDiff.indexOf('class="tool-diff"') !== -1,
+      delLines: (wordDiff.match(/class="diff-line del"/g) || []).length,
+      addLines: (wordDiff.match(/class="diff-line add"/g) || []).length,
+      wordDel: /diff-word-del">[^<]*hello[^<]*</.test(wordDiff),
+      wordAdd: /diff-word-add">[^<]*goodbye[^<]*</.test(wordDiff),
+    };
+
+    // 2. Multi-line change with unchanged context lines
+    const multiDiff = buildEditDiffHTML(JSON.stringify({
+      path: '/tmp/f.py',
+      edits: [{ oldText: 'x = 1\ny = 2\nz = 3', newText: 'x = 1\ny = 99\nz = 3\nw = 4' }]
+    }));
+    out.multi = {
+      sameLines: (multiDiff.match(/class="diff-line same"/g) || []).length,
+      delLines: (multiDiff.match(/class="diff-line del"/g) || []).length,
+      addLines: (multiDiff.match(/class="diff-line add"/g) || []).length,
+      hasContext: multiDiff.indexOf('x = 1') !== -1 && multiDiff.indexOf('z = 3') !== -1,
+    };
+
+    // 3. Multiple edits in one call → one hunk per edit
+    const multiEdit = buildEditDiffHTML(JSON.stringify({
+      path: '/tmp/f.py',
+      edits: [
+        { oldText: 'a = 1', newText: 'a = 2' },
+        { oldText: 'b = 1', newText: 'b = 2' }
+      ]
+    }));
+    out.multiEdit = {
+      hunks: (multiEdit.match(/class="diff-hunk"/g) || []).length,
+    };
+
+    // 4. Guard clauses — nothing diffable → empty string
+    out.guards = {
+      empty: buildEditDiffHTML('') === '',
+      unparseable: buildEditDiffHTML('not json') === '',
+      noEdits: buildEditDiffHTML(JSON.stringify({ path: '/tmp/f' })) === '',
+      identical: buildEditDiffHTML(JSON.stringify({ path: '/tmp/f', edits: [{ oldText: 'x', newText: 'x' }] })) === '',
+    };
+
+    return out;
+  });
+
+  const diffUnitChecks = [
+    { name: 'word diff: tool-diff container present', pass: diffUnitResult.word.hasDiff },
+    { name: 'word diff: exactly 1 del line', pass: diffUnitResult.word.delLines === 1 },
+    { name: 'word diff: exactly 1 add line', pass: diffUnitResult.word.addLines === 1 },
+    { name: 'word diff: word-level del span on changed word', pass: diffUnitResult.word.wordDel },
+    { name: 'word diff: word-level add span on changed word', pass: diffUnitResult.word.wordAdd },
+    { name: 'multi-line diff: 2 context (same) lines', pass: diffUnitResult.multi.sameLines === 2 },
+    { name: 'multi-line diff: 1 del line', pass: diffUnitResult.multi.delLines === 1 },
+    { name: 'multi-line diff: 2 add lines', pass: diffUnitResult.multi.addLines === 2 },
+    { name: 'multi-line diff: context lines present', pass: diffUnitResult.multi.hasContext },
+    { name: 'multi-edit: one hunk per edit', pass: diffUnitResult.multiEdit.hunks === 2 },
+    { name: 'guard: empty args → no diff', pass: diffUnitResult.guards.empty },
+    { name: 'guard: unparseable args → no diff', pass: diffUnitResult.guards.unparseable },
+    { name: 'guard: non-edit args → no diff', pass: diffUnitResult.guards.noEdits },
+    { name: 'guard: identical old/new → no diff', pass: diffUnitResult.guards.identical },
+  ];
+  let diffUnitFailed = false;
+  for (const check of diffUnitChecks) {
+    if (!check.pass) { console.error('FAIL:', check.name); diffUnitFailed = true; }
+    else { console.log('PASS:', check.name); }
+  }
+  if (diffUnitFailed) {
+    await takeScreenshot('03d-diff-unit-failed');
+    process.exit(1);
+  }
+
+  // --- User flow: open the completed edit task and verify the rendered diff ---
+  // Back to the Tasks tab (real user journey)
+  await page.locator('.tab').filter({ hasText: 'Tasks' }).click();
+  await page.waitForFunction(() => {
+    return document.getElementById('tab-tasks').style.display === 'block';
+  }, { timeout: 5000 });
+
+  // Enable the COMPLETED filter so the edit task becomes visible
+  await clickEl('.task-filter-btn[data-status="COMPLETED"]');
+
+  // toggleTaskFilter re-fetches and re-renders — wait for the edit task item
+  await page.waitForFunction((id) => {
+    const items = document.querySelectorAll('.task-item');
+    for (const item of items) {
+      const idEl = item.querySelector('.task-id');
+      if (idEl && idEl.textContent.includes(id)) return true;
+    }
+    return false;
+  }, editTaskId, { timeout: 10000 });
+
+  // Click the edit task item
+  await page.evaluate((id) => {
+    const items = document.querySelectorAll('.task-item');
+    for (const item of items) {
+      const idEl = item.querySelector('.task-id');
+      if (idEl && idEl.textContent.includes(id)) { item.click(); return; }
+    }
+    throw new Error('edit task item not found: ' + id);
+  }, editTaskId);
+  await page.waitForSelector('.task-detail-body .tool-block', { timeout: 5000 });
+
+  const editDiffResult = await page.evaluate(() => {
+    const body = document.querySelector('.task-detail-body');
+    if (!body) return { error: 'no .task-detail-body found' };
+    const blocks = Array.from(body.querySelectorAll('.tool-block'));
+    const nameOf = b => (b.querySelector('.tool-name') ? b.querySelector('.tool-name').textContent : '').trim();
+    const editBlock = blocks.find(b => nameOf(b) === 'edit');
+    const readBlock = blocks.find(b => nameOf(b) === 'read');
+    if (!editBlock) return { error: 'no edit tool block found' };
+
+    const diff = editBlock.querySelector('.tool-diff');
+    const textOf = sel => Array.from(editBlock.querySelectorAll(sel)).map(e => e.textContent);
+    const outputPre = editBlock.querySelector('.tool-output pre');
+    const headerPlain = editBlock.querySelector('.command-line-plain');
+
+    return {
+      blockCount: blocks.length,
+      hasDiff: diff !== null,
+      delLines: diff ? textOf('.diff-line.del .diff-text') : [],
+      addLines: diff ? textOf('.diff-line.add .diff-text') : [],
+      wordDels: diff ? textOf('.diff-word-del') : [],
+      wordAdds: diff ? textOf('.diff-word-add') : [],
+      readBlockHasDiff: readBlock ? readBlock.querySelector('.tool-diff') !== null : null,
+      outputText: outputPre ? outputPre.textContent : '',
+      headerArgs: headerPlain ? headerPlain.textContent.trim() : '',
+    };
+  });
+
+  if (editDiffResult.error) {
+    fail('Edit diff validation error: ' + editDiffResult.error);
+    await takeScreenshot('03d-edit-diff-error');
+    process.exit(1);
+  }
+
+  const editDiffChecks = [
+    { name: '2 tool blocks rendered (read + edit)', pass: editDiffResult.blockCount === 2 },
+    { name: 'edit block has inline diff', pass: editDiffResult.hasDiff },
+    { name: 'diff del line shows old text', pass: editDiffResult.delLines.some(l => l.includes('hello')) },
+    { name: 'diff add line shows new text', pass: editDiffResult.addLines.some(l => l.includes('goodbye')) },
+    { name: 'word-level del span present', pass: editDiffResult.wordDels.some(w => w.includes('hello')) },
+    { name: 'word-level add span present', pass: editDiffResult.wordAdds.some(w => w.includes('goodbye')) },
+    { name: 'read block has NO diff', pass: editDiffResult.readBlockHasDiff === false },
+    { name: 'edit output shows replacement message', pass: editDiffResult.outputText.includes('Successfully replaced 1 block(s)') },
+    { name: 'edit header shows path display string', pass: editDiffResult.headerArgs === 'path: /tmp/example-edit-target.txt' },
+  ];
+  let editDiffFailed = false;
+  for (const check of editDiffChecks) {
+    if (!check.pass) { console.error('FAIL:', check.name); editDiffFailed = true; }
+    else { console.log('PASS:', check.name); }
+  }
+  if (editDiffFailed) {
+    await takeScreenshot('03d-edit-diff-failed');
+    process.exit(1);
+  }
+
+  // Expand the edit tool block so the diff is visible in the screenshot
+  await page.evaluate(() => {
+    const body = document.querySelector('.task-detail-body');
+    const editBlock = Array.from(body.querySelectorAll('.tool-block'))
+      .find(b => (b.querySelector('.tool-name') ? b.querySelector('.tool-name').textContent : '').trim() === 'edit');
+    if (!editBlock) throw new Error('edit block not found');
+    editBlock.querySelector('.tool-block-header').click();
+  });
+  await page.waitForTimeout(300);
+  await takeScreenshot('03d-edit-diff');
+
+  // =====================================================================
   // Phase 4: Logs tab — dates, tasks, entries, breadcrumbs
   // =====================================================================
   console.log('=== Phase 4: Logs tab ===');
@@ -2322,11 +2591,11 @@ const { chromium } = require('playwright');
   }, { timeout: 5000 });
 
   // Ensure PENDING filter is active so the pending task is visible.
-  // (Check the class inside the page context — page.evaluate returns an
-  // ElementHandle for DOM elements, which has no .classList property.)
+  // NOTE: return a serializable boolean — newer Playwright versions
+  // serialize DOM elements returned from page.evaluate as ref strings.
   const pendingFilterInactive = await page.evaluate(() => {
     const btn = document.querySelector('button[data-status="PENDING"]');
-    return btn ? btn.classList.contains('inactive') : false;
+    return btn !== null && btn.classList.contains('inactive');
   });
   if (pendingFilterInactive) {
     await clickEl('button[data-status="PENDING"]');
@@ -2500,7 +2769,7 @@ const { chromium } = require('playwright');
   console.log('All UI validation checks passed!');
   await browser.close();
 })().catch(e => { console.error('Test failed:', e); process.exit(1); });
-`, screenshotDir, baseURL, taskID, compactionTaskID, failedTaskID, completedTaskID, pendingTaskID, failureReason, logDate)
+`, screenshotDir, baseURL, taskID, compactionTaskID, failedTaskID, completedTaskID, pendingTaskID, failureReason, editTaskID, logDate)
 
 	tmpScript := t.TempDir() + "/validate_ui.js"
 	if err := os.WriteFile(tmpScript, []byte(script), 0o644); err != nil {

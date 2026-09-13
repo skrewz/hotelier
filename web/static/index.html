@@ -188,6 +188,21 @@
         .tool-block-body .tool-output pre { margin: 0; white-space: pre-wrap; word-break: break-all; font-family: inherit; font-size: inherit; color: inherit; }
         .tool-block-body .tool-output .output-label { color: #475569; font-size: 0.65rem; text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 0.25rem; }
 
+        /* Inline diff for edit tool calls (Issue #2) */
+        .tool-diff { margin: 0.5rem 0.75rem; border: 1px solid #1e293b; border-radius: 0.25rem; background: #0c1929; overflow-x: auto; }
+        .diff-hunk { font-family: 'SF Mono', 'Fira Code', monospace; font-size: 0.75rem; line-height: 1.5; }
+        .diff-hunk + .diff-hunk { border-top: 1px dashed #334155; }
+        .diff-line { display: flex; padding: 0 0.5rem; }
+        .diff-sign { flex: 0 0 0.75rem; user-select: none; color: #475569; }
+        .diff-text { flex: 1; white-space: pre-wrap; word-break: break-word; }
+        .diff-line.same .diff-text { color: #64748b; }
+        .diff-line.del { background: rgba(239, 68, 68, 0.10); }
+        .diff-line.del .diff-sign { color: #f87171; }
+        .diff-line.add { background: rgba(34, 197, 94, 0.10); }
+        .diff-line.add .diff-sign { color: #4ade80; }
+        .diff-word-del { background: rgba(239, 68, 68, 0.28); border-radius: 0.125rem; }
+        .diff-word-add { background: rgba(34, 197, 94, 0.28); border-radius: 0.125rem; }
+
         /* Subtle bash command-line highlighting (Prism.js tokens) */
         .command-line { font-family: 'SF Mono', 'Fira Code', monospace; font-size: 0.75rem; color: #cbd5e1; margin-left: 0.5rem; }
         .command-line .token.function       { color: #8ddb8c; }
@@ -713,6 +728,7 @@
                 </div>
                 <div class="tool-block-body" id="tool-body-${block.toolId}">
                     ${block.args ? `<div class="tool-args">${escapeHtml(block.args)}</div>` : ''}
+                    ${buildEditDiffHTML(block.argsJSON)}
                     <div class="tool-output"><div class="output-label">Output</div></div>
                 </div>
             `;
@@ -721,21 +737,161 @@
             return frag;
         }
 
+        // =====================================================================
+        // Inline diff rendering for edit tool calls (Issue #2)
+        // =====================================================================
+
+        // diffLCSOps computes a minimal edit script between two arrays of
+        // comparable items using longest-common-subsequence dynamic
+        // programming. Returns [{type: 'same'|'del'|'add', value}] where
+        // 'del' items carry the old value and 'add' items carry the new one.
+        function diffLCSOps(oldItems, newItems) {
+            const n = oldItems.length, m = newItems.length;
+            // dp[i][j] = length of the LCS of oldItems[i:] and newItems[j:]
+            const dp = [];
+            for (let i = 0; i <= n; i++) dp.push(new Array(m + 1).fill(0));
+            for (let i = n - 1; i >= 0; i--) {
+                for (let j = m - 1; j >= 0; j--) {
+                    if (oldItems[i] === newItems[j]) dp[i][j] = dp[i + 1][j + 1] + 1;
+                    else dp[i][j] = Math.max(dp[i + 1][j], dp[i][j + 1]);
+                }
+            }
+            const ops = [];
+            let i = 0, j = 0;
+            while (i < n && j < m) {
+                if (oldItems[i] === newItems[j]) {
+                    ops.push({ type: 'same', value: oldItems[i] });
+                    i++; j++;
+                } else if (dp[i + 1][j] >= dp[i][j + 1]) {
+                    ops.push({ type: 'del', value: oldItems[i] });
+                    i++;
+                } else {
+                    ops.push({ type: 'add', value: newItems[j] });
+                    j++;
+                }
+            }
+            while (i < n) { ops.push({ type: 'del', value: oldItems[i] }); i++; }
+            while (j < m) { ops.push({ type: 'add', value: newItems[j] }); j++; }
+            return ops;
+        }
+
+        // diffTokenize splits a line into whitespace-preserving tokens so that
+        // word-level diffs reconstruct the original line exactly.
+        function diffTokenize(line) {
+            return line.match(/\s+|\S+/g) || [];
+        }
+
+        // diffLineHTML renders one diff line. inner, when provided, is
+        // pre-escaped (and possibly annotated) markup; otherwise text is
+        // escaped verbatim.
+        function diffLineHTML(type, text, inner) {
+            const sign = type === 'del' ? '-' : type === 'add' ? '+' : ' ';
+            const content = (inner !== undefined) ? inner : escapeHtml(text);
+            return `<div class="diff-line ${type}"><span class="diff-sign">${sign}</span><span class="diff-text">${content}</span></div>`;
+        }
+
+        // diffWordPairHTML renders a paired del/add line with word-level
+        // highlighting. When the two lines share too few tokens to make word
+        // spans meaningful, it falls back to plain whole-line highlighting.
+        function diffWordPairHTML(oldLine, newLine) {
+            const oldTokens = diffTokenize(oldLine);
+            const newTokens = diffTokenize(newLine);
+            const ops = diffLCSOps(oldTokens, newTokens);
+            const shared = ops.filter(o => o.type === 'same').length;
+            const maxLen = Math.max(oldTokens.length, newTokens.length);
+            if (maxLen === 0 || shared / maxLen < 0.3) {
+                return diffLineHTML('del', oldLine) + diffLineHTML('add', newLine);
+            }
+            let delInner = '', addInner = '';
+            for (const op of ops) {
+                if (op.type === 'same') {
+                    delInner += escapeHtml(op.value);
+                    addInner += escapeHtml(op.value);
+                } else if (op.type === 'del') {
+                    delInner += `<span class="diff-word-del">${escapeHtml(op.value)}</span>`;
+                } else {
+                    addInner += `<span class="diff-word-add">${escapeHtml(op.value)}</span>`;
+                }
+            }
+            return diffLineHTML('del', null, delInner) + diffLineHTML('add', null, addInner);
+        }
+
+        // diffHunkHTML renders one oldText → newText replacement as a group of
+        // diff lines. Changed lines are paired (positionally) for word-level
+        // highlighting; unpaired lines are shown as whole-line changes.
+        function diffHunkHTML(oldText, newText) {
+            const oldLines = oldText.split('\n');
+            const newLines = newText.split('\n');
+            // Size guard: LCS is O(n*m). Above this product, fall back to a
+            // naive full-replacement rendering (all old lines, then all new).
+            if (oldLines.length * newLines.length > 250000) {
+                let html = '';
+                for (const l of oldLines) html += diffLineHTML('del', l);
+                for (const l of newLines) html += diffLineHTML('add', l);
+                return `<div class="diff-hunk">${html}</div>`;
+            }
+            const ops = diffLCSOps(oldLines, newLines);
+            let html = '';
+            let i = 0;
+            while (i < ops.length) {
+                if (ops[i].type === 'same') {
+                    html += diffLineHTML('same', ops[i].value);
+                    i++;
+                    continue;
+                }
+                const dels = [], adds = [];
+                while (i < ops.length && ops[i].type !== 'same') {
+                    (ops[i].type === 'del' ? dels : adds).push(ops[i].value);
+                    i++;
+                }
+                const pairs = Math.min(dels.length, adds.length);
+                for (let p = 0; p < pairs; p++) html += diffWordPairHTML(dels[p], adds[p]);
+                for (let p = pairs; p < dels.length; p++) html += diffLineHTML('del', dels[p]);
+                for (let p = pairs; p < adds.length; p++) html += diffLineHTML('add', adds[p]);
+            }
+            return `<div class="diff-hunk">${html}</div>`;
+        }
+
+        // buildEditDiffHTML renders the inline diff for an edit tool call from
+        // its raw args JSON. Returns '' when there is nothing diffable:
+        // missing/unparseable args, non-edit shape (no edits array), or
+        // identical old/new text.
+        function buildEditDiffHTML(argsJSON) {
+            if (!argsJSON) return '';
+            let parsed;
+            try {
+                parsed = JSON.parse(argsJSON);
+            } catch (_) {
+                return '';
+            }
+            if (!parsed || !Array.isArray(parsed.edits)) return '';
+            const hunks = [];
+            for (const edit of parsed.edits) {
+                if (!edit || typeof edit.oldText !== 'string' || typeof edit.newText !== 'string') continue;
+                if (edit.oldText === edit.newText) continue;
+                hunks.push(diffHunkHTML(edit.oldText, edit.newText));
+            }
+            if (hunks.length === 0) return '';
+            return `<div class="tool-diff">${hunks.join('')}</div>`;
+        }
+
         // buildToolBlockHTML creates a complete tool-block div as innerHTML.
         // Used by renderTaskDetail which builds the full view at once.
         // Completed blocks (done/error) are rendered collapsed by default.
         // Running blocks stay collapsed.
         //   toolName  — name of the tool (e.g. "bash")
         //   toolId    — unique tool call identifier
-        //   args      — tool arguments (JSON string)
+        //   args      — tool arguments (display string)
+        //   argsJSON  — raw argument JSON (renders an inline diff for edit)
         //   output    — captured output
         //   status    — "running", "success", or "error"
         //   timestamp — ISO timestamp for latest activity (defaults to now)
         //   entryCount — number of log entries for this tool call (for counter)
-        function buildToolBlockHTML(toolName, toolId, args, output, status, timestamp, entryCount) {
+        function buildToolBlockHTML(toolName, toolId, args, argsJSON, output, status, timestamp, entryCount) {
             const statusClass = status === 'error' ? 'error' : 'success';
             const statusLabel = status === 'error' ? 'error' : 'done';
             const argsHtml = args ? `<div class="tool-args">${escapeHtml(args)}</div>` : '';
+            const diffHtml = buildEditDiffHTML(argsJSON);
             const outputHtml = output
                 ? `<div class="tool-output"><div class="output-label">Output</div><pre>${escapeHtml(output)}</pre></div>`
                 : '<div class="tool-output"><div class="output-label">Output</div></div>';
@@ -760,7 +916,7 @@
                     </div>
                 </div>
                 <div class="tool-block-body${bodyOpen}" id="tool-body-${toolId}">
-                    ${argsHtml}${outputHtml}
+                    ${argsHtml}${diffHtml}${outputHtml}
                 </div>
             </div>`;
         }
@@ -1239,13 +1395,14 @@
                                 // Flush previous incomplete block
                                 logsHtml += buildToolBlockHTML(
                                     currentToolBlock.toolName, currentToolBlock.toolId,
-                                    currentToolBlock.args, currentToolBlock.output, 'running',
+                                    currentToolBlock.args, currentToolBlock.argsJSON, currentToolBlock.output, 'running',
                                     currentToolBlock.timestamp, currentToolBlock.entryCount
                                 );
                             }
                             currentToolBlock = {
                                 toolName: log.tool_name, toolId: log.tool_id,
-                                args: log.tool_args, output: '', status: 'running', hasOutput: false,
+                                args: log.tool_args, argsJSON: log.tool_args_json,
+                                output: '', status: 'running', hasOutput: false,
                                 timestamp: log.timestamp, entryCount: 1
                             };
                             return;
@@ -1272,7 +1429,7 @@
                             if (currentToolBlock) {
                                 logsHtml += buildToolBlockHTML(
                                     currentToolBlock.toolName, currentToolBlock.toolId,
-                                    currentToolBlock.args, currentToolBlock.output,
+                                    currentToolBlock.args, currentToolBlock.argsJSON, currentToolBlock.output,
                                     currentToolBlock.status, currentToolBlock.timestamp, currentToolBlock.entryCount
                                 );
                             }
@@ -1342,7 +1499,7 @@
                     if (currentToolBlock) {
                         logsHtml += buildToolBlockHTML(
                             currentToolBlock.toolName, currentToolBlock.toolId,
-                            currentToolBlock.args, currentToolBlock.output, 'running',
+                            currentToolBlock.args, currentToolBlock.argsJSON, currentToolBlock.output, 'running',
                             currentToolBlock.timestamp, currentToolBlock.entryCount
                         );
                         currentToolBlock = null;
@@ -1413,7 +1570,7 @@
                 if (currentToolBlock) {
                     logsHtml += buildToolBlockHTML(
                         currentToolBlock.toolName, currentToolBlock.toolId,
-                        currentToolBlock.args, currentToolBlock.output, 'running',
+                        currentToolBlock.args, currentToolBlock.argsJSON, currentToolBlock.output, 'running',
                         currentToolBlock.timestamp, currentToolBlock.entryCount
                     );
                     currentToolBlock = null;
@@ -1951,7 +2108,8 @@
                     _closeLastThinkingBlock(body);
                     const frag = renderToolBlockStart({
                         toolName: logEntry.tool_name, toolId: logEntry.tool_id,
-                        args: logEntry.tool_args, output: '', status: 'running', hasOutput: false
+                        args: logEntry.tool_args, argsJSON: logEntry.tool_args_json,
+                        output: '', status: 'running', hasOutput: false
                     }, '', '');
                     body.appendChild(frag);
                     scrollToBottomIfNeeded(body, wasAtBottom);
@@ -2270,13 +2428,14 @@
                                 // Flush previous incomplete block
                                 entriesHtml += buildToolBlockHTML(
                                     currentToolBlock.toolName, currentToolBlock.toolId,
-                                    currentToolBlock.args, currentToolBlock.output, 'running',
+                                    currentToolBlock.args, currentToolBlock.argsJSON, currentToolBlock.output, 'running',
                                     currentToolBlock.timestamp, currentToolBlock.entryCount
                                 );
                             }
                             currentToolBlock = {
                                 toolName: log.tool_name, toolId: log.tool_id,
-                                args: log.tool_args, output: '', status: 'running', hasOutput: false,
+                                args: log.tool_args, argsJSON: log.tool_args_json,
+                                output: '', status: 'running', hasOutput: false,
                                 timestamp: log.timestamp, entryCount: 1
                             };
                             return;
@@ -2302,7 +2461,7 @@
                             // Build and append the complete tool block now that we have all output
                             entriesHtml += buildToolBlockHTML(
                                 currentToolBlock.toolName, currentToolBlock.toolId,
-                                currentToolBlock.args, currentToolBlock.output,
+                                currentToolBlock.args, currentToolBlock.argsJSON, currentToolBlock.output,
                                 currentToolBlock.status, currentToolBlock.timestamp, currentToolBlock.entryCount
                             );
                             currentToolBlock = null;
@@ -2370,7 +2529,7 @@
                     if (currentToolBlock) {
                         entriesHtml += buildToolBlockHTML(
                             currentToolBlock.toolName, currentToolBlock.toolId,
-                            currentToolBlock.args, currentToolBlock.output, 'running',
+                            currentToolBlock.args, currentToolBlock.argsJSON, currentToolBlock.output, 'running',
                             currentToolBlock.timestamp, currentToolBlock.entryCount
                         );
                         currentToolBlock = null;
@@ -2422,7 +2581,7 @@
                 if (currentToolBlock) {
                     entriesHtml += buildToolBlockHTML(
                         currentToolBlock.toolName, currentToolBlock.toolId,
-                        currentToolBlock.args, currentToolBlock.output, 'running',
+                        currentToolBlock.args, currentToolBlock.argsJSON, currentToolBlock.output, 'running',
                         currentToolBlock.timestamp, currentToolBlock.entryCount
                     );
                     currentToolBlock = null;
