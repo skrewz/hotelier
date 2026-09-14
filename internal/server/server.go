@@ -1389,7 +1389,7 @@ func (s *Server) handleCreateTask(w http.ResponseWriter, r *http.Request) {
 	// Add with deduplication: if the task carries a dedup_key that matches a
 	// PENDING task, the submission is squelched and the existing task is
 	// returned instead (no new task is created or assigned).
-	added, deduplicated, err := s.orchestrator.Queue().AddOrDedup(&task)
+	added, deduplicated, err := s.orchestrator.AddTaskOrDedup(&task)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
