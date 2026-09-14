@@ -671,3 +671,74 @@ func TestLogStore_ReadRawJSONL_EmptyUncompressed(t *testing.T) {
 		t.Errorf("expected empty raw, got %q", raw)
 	}
 }
+
+func TestLogStore_ReadRawJSONL_EmptyCompressed(t *testing.T) {
+	s, dir := newTestLogStore(t)
+	defer os.RemoveAll(dir)
+
+	// An existing but empty bz2 file is a present log with zero content,
+	// not a missing log.
+	taskDir := filepath.Join(dir, "2026-05-10", "empty-bz2-task")
+	if err := os.MkdirAll(taskDir, 0o755); err != nil {
+		t.Fatalf("create task dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(taskDir, "logs.jsonl.bz2"), nil, 0o644); err != nil {
+		t.Fatalf("write empty bz2: %v", err)
+	}
+
+	raw, err := s.ReadRawJSONL("2026-05-10", "empty-bz2-task")
+	if err != nil {
+		t.Fatalf("read raw: %v", err)
+	}
+	if raw != "" {
+		t.Errorf("expected empty raw, got %q", raw)
+	}
+}
+
+func TestLogStore_ReadRawJSONL_CorruptCompressed(t *testing.T) {
+	s, dir := newTestLogStore(t)
+	defer os.RemoveAll(dir)
+
+	// Create a valid bz2 via Append, then truncate it to simulate a
+	// crash mid-append leaving a truncated final stream block.
+	ts := time.Date(2026, 5, 10, 12, 0, 0, 0, time.UTC)
+	s.Append(Entry{TaskID: "task-trunc", Line: "first", Level: "info", Timestamp: ts})
+	s.Append(Entry{TaskID: "task-trunc", Line: "second", Level: "info", Timestamp: ts.Add(time.Second)})
+	s.CloseAll()
+
+	bz2Path := filepath.Join(dir, "2026-05-10", "task-trunc", "logs.jsonl.bz2")
+	full, err := os.ReadFile(bz2Path)
+	if err != nil {
+		t.Fatalf("read bz2: %v", err)
+	}
+
+	// Find a truncation length that actually fails to decompress (a
+	// truncation landing exactly on a stream boundary would still be
+	// valid and make the test vacuous).
+	var corrupt []byte
+	for n := len(full) / 2; n > 3; n-- {
+		r, rerr := bzip2.NewReader(bytes.NewReader(full[:n]), nil)
+		if rerr != nil {
+			corrupt = full[:n]
+			break
+		}
+		if _, err := io.ReadAll(r); err != nil {
+			corrupt = full[:n]
+			break
+		}
+	}
+	if corrupt == nil {
+		t.Fatal("could not construct a corrupt bz2 prefix")
+	}
+	if err := os.WriteFile(bz2Path, corrupt, 0o644); err != nil {
+		t.Fatalf("truncate bz2: %v", err)
+	}
+
+	_, err = s.ReadRawJSONL("2026-05-10", "task-trunc")
+	if err == nil {
+		t.Fatal("expected error for corrupt bz2, got nil")
+	}
+	if errors.Is(err, ErrLogNotFound) {
+		t.Errorf("corrupt bz2 must not be masked as ErrLogNotFound, got %v", err)
+	}
+}

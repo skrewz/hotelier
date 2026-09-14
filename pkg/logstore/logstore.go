@@ -320,17 +320,31 @@ func (s *LogStore) ReadLogs(date, taskID string) ([]Entry, error) {
 // ReadRawJSONL reads the raw JSONL content from a task's log file.
 // Returns the decompressed JSONL as a string. Supports both compressed
 // (.bz2) and uncompressed (.jsonl) formats for backward compatibility;
-// compressed files are preferred. Returns ErrLogNotFound when neither
-// file exists.
+// compressed files are preferred. An existing file is returned as-is,
+// even when empty. Returns ErrLogNotFound only when neither file exists;
+// a present but unreadable file (e.g. a truncated bzip2 stream left by a
+// crash mid-append) yields the underlying I/O error so callers can
+// distinguish "missing" from "corrupt".
 func (s *LogStore) ReadRawJSONL(date, taskID string) (string, error) {
-	// Try compressed file first
+	// Try compressed file first.
 	bz2Path := filepath.Join(s.dir, date, taskID, "logs.jsonl.bz2")
+	if info, err := os.Stat(bz2Path); err == nil && info.Size() == 0 {
+		// A zero-byte bz2 (e.g. left by a crash before the first stream
+		// block was written) is an empty log, not a corrupt one — a
+		// zero-byte bzip2 stream fails to decompress.
+		return "", nil
+	}
 	data, err := readRawFile(bz2Path, true)
-	if err == nil && len(data) > 0 {
+	switch {
+	case err == nil:
 		return string(data), nil
+	case !os.IsNotExist(err):
+		// The compressed file exists but is unreadable. Surface the I/O
+		// error instead of masking it as a missing log.
+		return "", fmt.Errorf("read log file %s: %w", bz2Path, err)
 	}
 
-	// Fall back to uncompressed file
+	// Fall back to uncompressed file.
 	jsonlPath := filepath.Join(s.dir, date, taskID, "logs.jsonl")
 	data, err = readRawFile(jsonlPath, false)
 	if err != nil {
