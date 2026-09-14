@@ -462,6 +462,60 @@ func TestLogAPI_Download_MethodNotAllowed(t *testing.T) {
 	}
 }
 
+// TestLogAPI_Download_InvalidDate verifies 400 when the date segment does
+// not match YYYY-MM-DD.
+func TestLogAPI_Download_InvalidDate(t *testing.T) {
+	dir, err := os.MkdirTemp("", "hotelier-logdownload-baddate-*")
+	if err != nil {
+		t.Fatalf("create temp dir: %v", err)
+	}
+	defer os.RemoveAll(dir)
+
+	cfg := config.ServerConfig{
+		Host:   "127.0.0.1",
+		Port:   0,
+		LogDir: dir,
+	}
+	srv := New(cfg)
+
+	for _, date := range []string{"not-a-date", "2026-5-10", "2026-05-10x"} {
+		req := httptest.NewRequest(http.MethodGet, "/api/logs/"+date+"/my-task/download", nil)
+		w := httptest.NewRecorder()
+		srv.HandleLogEntry(w, req)
+		if w.Code != http.StatusBadRequest {
+			t.Errorf("date %q: expected 400, got %d", date, w.Code)
+		}
+	}
+}
+
+// TestLogAPI_Download_InvalidTaskID verifies 400 when the task ID segment
+// contains characters that would produce a malformed Content-Disposition
+// header (quotes, whitespace).
+func TestLogAPI_Download_InvalidTaskID(t *testing.T) {
+	dir, err := os.MkdirTemp("", "hotelier-logdownload-badtask-*")
+	if err != nil {
+		t.Fatalf("create temp dir: %v", err)
+	}
+	defer os.RemoveAll(dir)
+
+	cfg := config.ServerConfig{
+		Host:   "127.0.0.1",
+		Port:   0,
+		LogDir: dir,
+	}
+	srv := New(cfg)
+
+	// Percent-encoded double quote and space in the task ID segment.
+	for _, taskID := range []string{"bad%22task", "bad%20task", "tab%09id"} {
+		req := httptest.NewRequest(http.MethodGet, "/api/logs/2026-05-10/"+taskID+"/download", nil)
+		w := httptest.NewRecorder()
+		srv.HandleLogEntry(w, req)
+		if w.Code != http.StatusBadRequest {
+			t.Errorf("task id %q: expected 400, got %d", taskID, w.Code)
+		}
+	}
+}
+
 // TestLogAPI_3PartPathNonDownloadReturns404 verifies that a 3-segment path
 // where the third segment is not "download" returns 404.
 func TestLogAPI_3PartPathNonDownloadReturns404(t *testing.T) {
