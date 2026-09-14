@@ -1024,3 +1024,171 @@ func TestTask_RepoRefEmpty(t *testing.T) {
 		t.Errorf("expected empty RepoRef, got %q", retrieved.RepoRef)
 	}
 }
+
+// --- AddOrDedup tests ---
+
+// TestAddOrDedup_MatchReturnsExistingPending verifies that a task with a
+// dedup_key matching a PENDING task is not added; the existing task is
+// returned with deduplicated=true.
+func TestAddOrDedup_MatchReturnsExistingPending(t *testing.T) {
+	q := newTestQueue(t)
+
+	first := &Task{ID: "task-1", Prompt: "First", DedupKey: "deploy-42"}
+	if err := q.Add(first); err != nil {
+		t.Fatalf("first Add failed: %v", err)
+	}
+
+	second := &Task{ID: "task-2", Prompt: "Duplicate", DedupKey: "deploy-42"}
+	existing, deduplicated, err := q.AddOrDedup(second)
+	if err != nil {
+		t.Fatalf("AddOrDedup failed: %v", err)
+	}
+	if !deduplicated {
+		t.Fatal("expected deduplicated=true")
+	}
+	if existing.ID != "task-1" {
+		t.Errorf("expected existing task task-1, got %s", existing.ID)
+	}
+	if q.Count() != 1 {
+		t.Errorf("expected 1 task in queue, got %d", q.Count())
+	}
+	if _, ok := q.Get("task-2"); ok {
+		t.Error("expected task-2 not to be added")
+	}
+}
+
+// TestAddOrDedup_NoMatchAddsTask verifies that a task whose dedup_key does
+// not match any pending task is added normally.
+func TestAddOrDedup_NoMatchAddsTask(t *testing.T) {
+	q := newTestQueue(t)
+
+	if err := q.Add(&Task{ID: "task-1", Prompt: "First", DedupKey: "key-a"}); err != nil {
+		t.Fatalf("first Add failed: %v", err)
+	}
+
+	task := &Task{ID: "task-2", Prompt: "Second", DedupKey: "key-b"}
+	existing, deduplicated, err := q.AddOrDedup(task)
+	if err != nil {
+		t.Fatalf("AddOrDedup failed: %v", err)
+	}
+	if deduplicated {
+		t.Fatal("expected deduplicated=false")
+	}
+	if existing.ID != "task-2" {
+		t.Errorf("expected task-2, got %s", existing.ID)
+	}
+	if q.Count() != 2 {
+		t.Errorf("expected 2 tasks in queue, got %d", q.Count())
+	}
+	if existing.Status != TaskStatusPending {
+		t.Errorf("expected PENDING status, got %s", existing.Status)
+	}
+}
+
+// TestAddOrDedup_EmptyKeyAlwaysAdds verifies that tasks without a dedup_key
+// are never deduplicated (backwards compatible behaviour).
+func TestAddOrDedup_EmptyKeyAlwaysAdds(t *testing.T) {
+	q := newTestQueue(t)
+
+	for i, id := range []string{"task-1", "task-2"} {
+		task := &Task{ID: id, Prompt: fmt.Sprintf("Prompt %d", i)}
+		if _, deduplicated, err := q.AddOrDedup(task); err != nil {
+			t.Fatalf("AddOrDedup(%s) failed: %v", id, err)
+		} else if deduplicated {
+			t.Fatalf("expected no dedup for empty key, got dedup for %s", id)
+		}
+	}
+
+	if q.Count() != 2 {
+		t.Errorf("expected 2 tasks in queue, got %d", q.Count())
+	}
+}
+
+// TestAddOrDedup_IgnoresNonPendingTasks verifies that only PENDING tasks are
+// compared: a task with the same dedup_key in any non-pending state does not
+// block a new submission.
+func TestAddOrDedup_IgnoresNonPendingTasks(t *testing.T) {
+	cases := []struct {
+		name   string
+		status TaskStatus
+	}{
+		{"assigned", TaskStatusAssigned},
+		{"running", TaskStatusRunning},
+		{"completed", TaskStatusCompleted},
+		{"failed", TaskStatusFailed},
+		{"cancelled", TaskStatusCancelled},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			q := newTestQueue(t)
+
+			first := &Task{ID: "task-1", Prompt: "First", DedupKey: "key-x", Status: tc.status}
+			if err := q.Add(first); err != nil {
+				t.Fatalf("first Add failed: %v", err)
+			}
+			// Add() forces PENDING; set the non-pending state directly.
+			first.Status = tc.status
+
+			second := &Task{ID: "task-2", Prompt: "Second", DedupKey: "key-x"}
+			existing, deduplicated, err := q.AddOrDedup(second)
+			if err != nil {
+				t.Fatalf("AddOrDedup failed: %v", err)
+			}
+			if deduplicated {
+				t.Fatalf("expected no dedup against %s task", tc.name)
+			}
+			if existing.ID != "task-2" {
+				t.Errorf("expected task-2, got %s", existing.ID)
+			}
+			if q.Count() != 2 {
+				t.Errorf("expected 2 tasks in queue, got %d", q.Count())
+			}
+		})
+	}
+}
+
+// TestAddOrDedup_ReturnsFirstPendingOnMultipleMatches verifies that when
+// several pending tasks share a dedup_key, the first (insertion order) is
+// returned.
+func TestAddOrDedup_ReturnsFirstPendingOnMultipleMatches(t *testing.T) {
+	q := newTestQueue(t)
+
+	first := &Task{ID: "task-1", Prompt: "First", DedupKey: "key-m"}
+	second := &Task{ID: "task-2", Prompt: "Second", DedupKey: "key-m"}
+	if err := q.Add(first); err != nil {
+		t.Fatalf("first Add failed: %v", err)
+	}
+	if err := q.Add(second); err != nil {
+		t.Fatalf("second Add failed: %v", err)
+	}
+
+	existing, deduplicated, err := q.AddOrDedup(&Task{ID: "task-3", Prompt: "Third", DedupKey: "key-m"})
+	if err != nil {
+		t.Fatalf("AddOrDedup failed: %v", err)
+	}
+	if !deduplicated {
+		t.Fatal("expected deduplicated=true")
+	}
+	if existing.ID != "task-1" {
+		t.Errorf("expected first pending task task-1, got %s", existing.ID)
+	}
+	if q.Count() != 2 {
+		t.Errorf("expected 2 tasks in queue, got %d", q.Count())
+	}
+}
+
+// TestAddOrDedup_DuplicateIDStillErrors verifies that a duplicate task ID is
+// still rejected even when the dedup_key would not match.
+func TestAddOrDedup_DuplicateIDStillErrors(t *testing.T) {
+	q := newTestQueue(t)
+
+	if err := q.Add(&Task{ID: "task-1", Prompt: "First", DedupKey: "key-a"}); err != nil {
+		t.Fatalf("first Add failed: %v", err)
+	}
+
+	_, _, err := q.AddOrDedup(&Task{ID: "task-1", Prompt: "Duplicate ID", DedupKey: "key-b"})
+	if err == nil {
+		t.Error("expected error for duplicate task ID, got nil")
+	}
+}
