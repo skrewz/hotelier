@@ -1235,3 +1235,161 @@ func TestGuest_TaskAssignedDuringRegistration_IsReceived(t *testing.T) {
 		t.Fatal("task.assign was not received by the guest (dropped before handler registration?)")
 	}
 }
+
+// TestGuestSendLog_NilClient verifies that SendLog returns an error
+// (not a nil pointer panic) when the RPC client is nil, e.g. while the
+// guest is reconnecting (issue #72).
+func TestGuestSendLog_NilClient(t *testing.T) {
+	g := newTestGuest(t)
+	g.client = nil
+
+	err := g.SendLog(LogEntry{TaskID: "task-1", Line: "hello"})
+	if err == nil {
+		t.Fatal("expected error from SendLog with nil client")
+	}
+}
+
+// TestGuestSendResult_NilClient verifies that SendResult returns an error
+// immediately (no retry backoff) when the RPC client is nil (issue #72).
+func TestGuestSendResult_NilClient(t *testing.T) {
+	g := newTestGuest(t)
+	g.client = nil
+
+	start := time.Now()
+	err := g.SendResult(TaskResult{TaskID: "task-1", Success: true})
+	if err == nil {
+		t.Fatal("expected error from SendResult with nil client")
+	}
+	if elapsed := time.Since(start); elapsed > 2*time.Second {
+		t.Errorf("SendResult with nil client should fail immediately, took %v", elapsed)
+	}
+}
+
+// TestGuestDeclineTask_NilClient verifies that DeclineTask does not panic
+// and returns immediately when the RPC client is nil (issue #72).
+func TestGuestDeclineTask_NilClient(t *testing.T) {
+	g := newTestGuest(t)
+	g.client = nil
+
+	start := time.Now()
+	g.DeclineTask("task-1", "busy")
+	if elapsed := time.Since(start); elapsed > 2*time.Second {
+		t.Errorf("DeclineTask with nil client should return immediately, took %v", elapsed)
+	}
+}
+
+// TestGuestHeartbeat_NilClient verifies that Heartbeat returns an error
+// immediately (no retry backoff) when the RPC client is nil (issue #72).
+func TestGuestHeartbeat_NilClient(t *testing.T) {
+	g := newTestGuest(t)
+	g.client = nil
+
+	start := time.Now()
+	err := g.Heartbeat()
+	if err == nil {
+		t.Fatal("expected error from Heartbeat with nil client")
+	}
+	if elapsed := time.Since(start); elapsed > 2*time.Second {
+		t.Errorf("Heartbeat with nil client should fail immediately, took %v", elapsed)
+	}
+}
+
+// TestGuestRegister_NilClient verifies that Register returns an error
+// (not a nil pointer panic) when the RPC client is nil (issue #72).
+func TestGuestRegister_NilClient(t *testing.T) {
+	g := newTestGuest(t)
+	g.client = nil
+
+	if err := g.Register(); err == nil {
+		t.Fatal("expected error from Register with nil client")
+	}
+}
+
+// TestGuestUnregister_NilClient verifies that Unregister returns an error
+// (not a nil pointer panic) when the RPC client is nil (issue #72).
+func TestGuestUnregister_NilClient(t *testing.T) {
+	g := newTestGuest(t)
+	g.client = nil
+
+	if err := g.Unregister(); err == nil {
+		t.Fatal("expected error from Unregister with nil client")
+	}
+}
+
+// TestGuestSendLog_ConcurrentWithClientClear verifies that SendLog is safe
+// to call concurrently with the reconnect loop clearing the client: no
+// panic, no data race (issue #72). Before the fix, SendLog read g.client
+// without the mutex while the writer flipped it, which the race detector
+// flags; the nil window also produced the production SIGSEGV. A real
+// connection is used so that a non-nil client always has a live conn —
+// the production invariant (a client is only stored after Connect
+// succeeds, and cleared to nil when the connection is lost).
+func TestGuestSendLog_ConcurrentWithClientClear(t *testing.T) {
+	cfg := config.ServerConfig{
+		Host:      "127.0.0.1",
+		Port:      0,
+		MaxGuests: 0,
+	}
+	srv := server.New(cfg)
+	hub := srv.Hub()
+	go hub.Run()
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/ws", srv.HandleWebSocket)
+
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	go func() { _ = http.Serve(ln, mux) }()
+	t.Cleanup(func() { _ = ln.Close() })
+
+	wsURL := fmt.Sprintf("ws://127.0.0.1:%d/ws", ln.Addr().(*net.TCPAddr).Port)
+	gcfg := config.GuestConfig{
+		Name:              "Race Guest",
+		Tags:              []string{"test"},
+		URL:               wsURL,
+		HeartbeatInterval: 1,
+	}
+	g := New(gcfg, func(ctx context.Context, task TaskAssignment, _ LogCallback) (*TaskResult, error) {
+		return &TaskResult{TaskID: task.TaskID, Success: true, Output: "ok"}, nil
+	})
+	if err := g.Connect(); err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	if err := g.Register(); err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	connected := g.rpcClient()
+	t.Cleanup(func() {
+		g.Stop()
+		if c := g.rpcClient(); c != nil {
+			c.Close()
+		}
+	})
+
+	done := make(chan struct{})
+	var panicked bool
+	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				panicked = true
+			}
+			close(done)
+		}()
+		for i := 0; i < 2000; i++ {
+			_ = g.SendLog(LogEntry{TaskID: "task-1", Line: "x"})
+			// Flip the client between the live client and nil, as the
+			// reconnect loop does, to exercise the check-then-use window.
+			if i%100 == 0 {
+				g.setRPCClient(connected)
+			} else if i%100 == 50 {
+				g.setRPCClient(nil)
+			}
+		}
+	}()
+	<-done
+	if panicked {
+		t.Fatal("SendLog panicked while client was being cleared")
+	}
+}
