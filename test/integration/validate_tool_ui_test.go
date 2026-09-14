@@ -1930,6 +1930,21 @@ const { chromium } = require('playwright');
 
   await takeScreenshot('06-log-entries');
 
+  // --- Exercise the download button end-to-end (Issue #6) ---
+  // Clicking the button must start a real browser download of the raw
+  // JSONL file. This exercises downloadLog() (URL construction, anchor
+  // click, download attribute) and the endpoint's attachment response.
+  const [download] = await Promise.all([
+    page.waitForEvent('download'),
+    page.click('.log-breadcrumb .download-btn'),
+  ]);
+  const suggestedFilename = download.suggestedFilename();
+  if (suggestedFilename !== taskId + '.jsonl') {
+    fail('download filename should be ' + taskId + '.jsonl, got ' + suggestedFilename);
+  }
+  console.log('PASS: download button triggers download of ' + suggestedFilename);
+  await download.cancel();
+
   // --- Click "All Dates" breadcrumb crumb to navigate back ---
   console.log('--- Clicking All Dates breadcrumb ---');
   await clickEl('.crumb');
