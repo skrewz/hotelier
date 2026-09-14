@@ -1192,3 +1192,54 @@ func TestAddOrDedup_DuplicateIDStillErrors(t *testing.T) {
 		t.Error("expected error for duplicate task ID, got nil")
 	}
 }
+
+// TestAddOrDedup_ConcurrentSameKey verifies the atomicity guarantee of
+// AddOrDedup: when N goroutines concurrently submit tasks with the same
+// dedup_key, exactly one task ends up in the queue and every caller
+// receives that same task. Intended to be run under -race.
+func TestAddOrDedup_ConcurrentSameKey(t *testing.T) {
+	q := newTestQueue(t)
+
+	const n = 32
+	results := make(chan *Task, n)
+	errs := make(chan error, n)
+	var wg sync.WaitGroup
+
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			task := &Task{ID: fmt.Sprintf("task-%d", i), Prompt: fmt.Sprintf("Prompt %d", i), DedupKey: "shared-key"}
+			existing, _, err := q.AddOrDedup(task)
+			if err != nil {
+				errs <- err
+				return
+			}
+			results <- existing
+		}(i)
+	}
+
+	wg.Wait()
+	close(results)
+	close(errs)
+
+	for err := range errs {
+		t.Fatalf("AddOrDedup failed: %v", err)
+	}
+
+	var winner string
+	for existing := range results {
+		if winner == "" {
+			winner = existing.ID
+		} else if existing.ID != winner {
+			t.Fatalf("expected all callers to receive the same task, got %s and %s", winner, existing.ID)
+		}
+	}
+	if winner == "" {
+		t.Fatal("expected a winning task ID")
+	}
+
+	if q.Count() != 1 {
+		t.Errorf("expected exactly 1 task in queue, got %d", q.Count())
+	}
+}
