@@ -28,6 +28,10 @@ type Event struct {
 	Args                  json.RawMessage `json:"args,omitempty"`
 	Result                json.RawMessage `json:"result,omitempty"`
 	PartialResult         json.RawMessage `json:"partialResult,omitempty"`
+	// Compaction event fields (compaction_start / compaction_end).
+	Reason       string `json:"reason,omitempty"`       // "manual", "threshold", "overflow"
+	Aborted      bool   `json:"aborted,omitempty"`      // true if compaction was aborted
+	ErrorMessage string `json:"errorMessage,omitempty"` // set on failed compaction
 }
 
 // maxStderrLines is the maximum number of stderr lines to retain.
@@ -64,6 +68,11 @@ type PiClient struct {
 	waitOnce sync.Once
 	// waitErr holds the exit error from cmd.Wait().
 	waitErr error
+	// processState holds the subprocess exit state, populated by the Wait()
+	// goroutines after cmd.Wait() returns and published under mu. Reading
+	// cmd.ProcessState directly races with cmd.Wait() (see
+	// TestProcessStateAccessorsRaceFree).
+	processState *os.ProcessState
 	// stderrLines captures the last N lines of stderr output for diagnostics.
 	stderrLines   []string
 	stderrLinesMu sync.Mutex
@@ -185,6 +194,7 @@ func (c *PiClient) Start(ctx context.Context) error {
 			waitErr := c.cmd.Wait()
 			c.mu.Lock()
 			c.waitErr = waitErr
+			c.processState = c.cmd.ProcessState
 			c.mu.Unlock()
 		})
 	}()
@@ -222,7 +232,11 @@ func (c *PiClient) Stop(ctx context.Context) error {
 	done := make(chan error, 1)
 	go func() {
 		c.waitOnce.Do(func() {
-			done <- c.cmd.Wait()
+			waitErr := c.cmd.Wait()
+			done <- waitErr
+			c.mu.Lock()
+			c.processState = c.cmd.ProcessState
+			c.mu.Unlock()
 		})
 		// If waitOnce was already called (process exited on its own),
 		// signal done so we don't block forever.
@@ -255,7 +269,11 @@ func (c *PiClient) Stop(ctx context.Context) error {
 		killDone := make(chan error, 1)
 		go func() {
 			c.waitOnce.Do(func() {
-				killDone <- c.cmd.Wait()
+				waitErr := c.cmd.Wait()
+				killDone <- waitErr
+				c.mu.Lock()
+				c.processState = c.cmd.ProcessState
+				c.mu.Unlock()
 			})
 			select {
 			case killDone <- nil:
@@ -301,8 +319,8 @@ func (c *PiClient) IsRunning() bool {
 		return false
 	}
 	// Process has exited (crashed or otherwise) — mark as not running.
-	// ProcessState is set by cmd.Wait() when the process exits.
-	if c.cmd.ProcessState != nil {
+	// processState is set by the Wait() goroutines when the process exits.
+	if c.processState != nil {
 		c.started = false
 		return false
 	}
@@ -311,7 +329,9 @@ func (c *PiClient) IsRunning() bool {
 
 // GetProcessState returns the process state, or nil if the process hasn't exited yet.
 func (c *PiClient) GetProcessState() *os.ProcessState {
-	return c.cmd.ProcessState
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.processState
 }
 
 // Cmd returns the underlying exec.Cmd (for testing/advanced use).
@@ -337,13 +357,13 @@ func (c *PiClient) GetExitError() error {
 func (c *PiClient) GetExitCode() int {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if c.cmd == nil || c.cmd.ProcessState == nil {
+	if c.cmd == nil || c.processState == nil {
 		return -1
 	}
 	if c.waitErr == nil {
 		return 0
 	}
-	return c.cmd.ProcessState.ExitCode()
+	return c.processState.ExitCode()
 }
 
 // GetStderrLines returns the captured stderr lines (up to maxStderrLines).
@@ -642,6 +662,68 @@ func FinalText(event Event) string {
 		}
 	}
 	return lastAssistant
+}
+
+// IsCompaction checks if the event is a context compaction event.
+// pi emits compaction_start when it begins summarising the conversation
+// history and compaction_end when the summary is complete (or the
+// compaction failed/was aborted). See pi's rpc.md (Compaction events).
+func IsCompaction(event Event) bool {
+	return event.Type == "compaction_start" || event.Type == "compaction_end"
+}
+
+// CompactionType returns "start" or "end" for compaction events.
+func CompactionType(event Event) string {
+	if event.Type == "compaction_start" {
+		return "start"
+	}
+	return "end"
+}
+
+// CompactionReason returns the trigger reason for a compaction event:
+// "manual", "threshold" (context near the limit) or "overflow" (the request
+// exceeded the model's context window).
+func CompactionReason(event Event) string {
+	return event.Reason
+}
+
+// CompactionSummary extracts the generated summary from a compaction_end
+// result. Returns "" when the compaction produced no result (e.g. it was
+// aborted or failed).
+func CompactionSummary(event Event) string {
+	if event.Result == nil {
+		return ""
+	}
+	var result struct {
+		Summary string `json:"summary"`
+	}
+	if err := json.Unmarshal(event.Result, &result); err != nil {
+		return ""
+	}
+	return result.Summary
+}
+
+// CompactionTokens extracts the token counts from a compaction_end result:
+// tokensBefore is the context size before compaction, estimatedTokensAfter
+// is the estimated size after. Both are 0 when there is no result.
+func CompactionTokens(event Event) (tokensBefore, estimatedTokensAfter int) {
+	if event.Result == nil {
+		return 0, 0
+	}
+	var result struct {
+		TokensBefore         int `json:"tokensBefore"`
+		EstimatedTokensAfter int `json:"estimatedTokensAfter"`
+	}
+	if err := json.Unmarshal(event.Result, &result); err != nil {
+		return 0, 0
+	}
+	return result.TokensBefore, result.EstimatedTokensAfter
+}
+
+// CompactionErrorMessage returns the error message from a failed
+// compaction_end event, or "" when the compaction succeeded.
+func CompactionErrorMessage(event Event) string {
+	return event.ErrorMessage
 }
 
 // IsToolExecution checks if the event is a tool execution event.

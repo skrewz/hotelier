@@ -13,9 +13,24 @@ import os
 from datetime import datetime, timezone, timedelta
 
 # Configuration
-CAPTURE_FILE = "/tmp/pi-rpc-capture.log"
-REDACTED_FILE = "/tmp/pi-rpc-capture-redacted.log"
-PROMPT = "What's my hostname?"
+CAPTURE_FILE = "/tmp/pi-rpc-capture-compaction.log"
+REDACTED_FILE = "/tmp/pi-rpc-capture-compaction-redacted.log"
+# Two trivial prompt exchanges so the session has more than one turn —
+# pi refuses to compact a session with nothing to summarise.
+PROMPTS = [
+    "Reply with just the word done",
+    "Reply with just the word done again",
+]
+
+# When True, send a `compact` command after the prompts and keep capturing
+# until the compaction response — this records the compaction_start /
+# compaction_end wire events (issue #53).
+COMPACT_AFTER_PROMPT = True
+# pi's default compaction.keepRecentTokens is 20000 — far larger than this
+# tiny session, so pi would refuse to compact ("session too small"). The
+# capture runs pi in an isolated HOME with this override so the compaction
+# succeeds on a small session. The wire events are unaffected.
+COMPACT_KEEP_RECENT_TOKENS = 1
 
 # Hardwired base timestamp: 2026-05-24 UTC midnight
 TODAY_UTC_MIDNIGHT = datetime(2026, 5, 24, 0, 0, 0, 0, tzinfo=timezone.utc)
@@ -33,17 +48,101 @@ def log(tag, data, f):
     f.write(line + "\n")
 
 
+def make_isolated_home():
+    """Create an isolated HOME for the capture run.
+
+    pi resolves its agent config from $HOME/.pi/agent. We copy the real
+    models.json / auth.json / settings.json into a temp HOME and override
+    compaction.keepRecentTokens so a tiny session can be compacted (see
+    COMPACT_KEEP_RECENT_TOKENS). Returns the fake HOME path.
+    """
+    import shutil
+    import tempfile
+
+    fake_home = tempfile.mkdtemp(prefix="pi-capture-home-")
+    agent_dir = os.path.join(fake_home, ".pi", "agent")
+    os.makedirs(agent_dir)
+    real_agent_dir = os.path.join(os.path.expanduser("~"), ".pi", "agent")
+    for name in ("models.json", "auth.json"):
+        src = os.path.join(real_agent_dir, name)
+        if os.path.exists(src):
+            shutil.copy(src, os.path.join(agent_dir, name))
+    settings_path = os.path.join(real_agent_dir, "settings.json")
+    settings = {}
+    if os.path.exists(settings_path):
+        with open(settings_path) as sf:
+            settings = json.load(sf)
+    settings["compaction"] = {"keepRecentTokens": COMPACT_KEEP_RECENT_TOKENS}
+    with open(os.path.join(agent_dir, "settings.json"), "w") as sf:
+        json.dump(settings, sf, indent=2)
+    return fake_home
+
+
+def read_events_until(proc, f, stop, event_count):
+    """Read pi stdout lines into the capture until stop(event) is true.
+
+    Returns the updated event count.
+    """
+    for line in proc.stdout:
+        line = line.rstrip("\n").rstrip("\r")
+        if not line:
+            continue
+
+        event_count += 1
+        log("STDOUT\u2190pi", line, f)
+
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+
+        etype = event.get("type", "?")
+
+        if etype == "message_update":
+            ame = event.get("assistantMessageEvent", {})
+            delta_type = ame.get("type", "")
+            if delta_type == "text_delta":
+                text = ame.get("delta", "")
+                sys.stdout.write(text)
+                sys.stdout.flush()
+            elif delta_type == "done":
+                sys.stdout.write("\n")
+
+        elif etype == "tool_execution_start":
+            tool = event.get("toolName", "?")
+            args = event.get("args", {})
+            sys.stdout.write(f"\n\U0001f527 Tool: {tool} ({args})\n")
+
+        elif etype == "tool_execution_end":
+            tool = event.get("toolName", "?")
+            sys.stdout.write(f"\u2705 Tool {tool} finished\n")
+
+        elif etype == "agent_end":
+            sys.stdout.write("\n\n" + "=" * 80 + "\n")
+            sys.stdout.write("Agent finished.\n")
+
+        if stop(event):
+            return event_count
+    return event_count
+
+
 def run_rpc_capture():
     """Run pi in RPC mode and capture all wire traffic."""
+    fake_home = make_isolated_home()
+    env = dict(os.environ, HOME=fake_home)
+
     with open(CAPTURE_FILE, "w") as f:
         f.write(f"pi RPC wire capture \u2014 {ts()}\n")
-        f.write(f"Prompt: {PROMPT}\n")
+        for i, prompt in enumerate(PROMPTS):
+            f.write(f"Prompt {i + 1}: {prompt}\n")
+        if COMPACT_AFTER_PROMPT:
+            f.write(f"Then: compact (keepRecentTokens={COMPACT_KEEP_RECENT_TOKENS})\n")
         f.write("=" * 80 + "\n\n")
-        
-        log("INFO", f"Starting pi RPC, capture \u2192 {CAPTURE_FILE}", f)
-        log("INFO", f"Prompt: {PROMPT}", f)
 
-        # Start pi in RPC mode with no session persistence
+        log("INFO", f"Starting pi RPC, capture \u2192 {CAPTURE_FILE}", f)
+
+        # Start pi in RPC mode with no session persistence, using the
+        # isolated HOME (compaction.keepRecentTokens override).
         proc = subprocess.Popen(
             ["pi", "--mode", "rpc", "--no-session"],
             stdin=subprocess.PIPE,
@@ -51,60 +150,41 @@ def run_rpc_capture():
             stderr=subprocess.STDOUT,
             text=True,
             bufsize=1,
+            env=env,
         )
 
         log("INFO", f"pi process started (PID: {proc.pid})", f)
         log("INFO", "\u2500" * 80, f)
 
-        # Send the prompt command
-        cmd = {"type": "prompt", "message": PROMPT, "id": "req-1"}
-        json_cmd = json.dumps(cmd)
-        log("STDIN\u2192pi", json_cmd, f)
-        proc.stdin.write(json_cmd + "\n")
-        proc.stdin.flush()
-
-        # Read events until agent_end
         event_count = 0
         try:
-            for line in proc.stdout:
-                line = line.rstrip("\n").rstrip("\r")
-                if not line:
-                    continue
+            # Send each prompt and read events until agent_end.
+            for i, prompt in enumerate(PROMPTS):
+                req_id = f"req-{i + 1}"
+                cmd = {"type": "prompt", "message": prompt, "id": req_id}
+                json_cmd = json.dumps(cmd)
+                log("STDIN\u2192pi", json_cmd, f)
+                proc.stdin.write(json_cmd + "\n")
+                proc.stdin.flush()
+                event_count = read_events_until(
+                    proc, f, lambda e: e.get("type") == "agent_end", event_count
+                )
 
-                event_count += 1
-                log("STDOUT\u2190pi", line, f)
-
-                try:
-                    event = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
-
-                etype = event.get("type", "?")
-
-                if etype == "message_update":
-                    ame = event.get("assistantMessageEvent", {})
-                    delta_type = ame.get("type", "")
-                    if delta_type == "text_delta":
-                        text = ame.get("delta", "")
-                        sys.stdout.write(text)
-                        sys.stdout.flush()
-                    elif delta_type == "done":
-                        sys.stdout.write("\n")
-
-                elif etype == "tool_execution_start":
-                    tool = event.get("toolName", "?")
-                    args = event.get("args", {})
-                    sys.stdout.write(f"\n\U0001f527 Tool: {tool} ({args})\n")
-
-                elif etype == "tool_execution_end":
-                    tool = event.get("toolName", "?")
-                    sys.stdout.write(f"\u2705 Tool {tool} finished\n")
-
-                elif etype == "agent_end":
-                    sys.stdout.write("\n\n" + "=" * 80 + "\n")
-                    sys.stdout.write("Agent finished.\n")
-                    break
-
+            if COMPACT_AFTER_PROMPT:
+                # Request a manual compaction of the session so the capture
+                # includes compaction_start and compaction_end events.
+                compact_cmd = {"type": "compact", "id": "req-compact"}
+                json_cmd = json.dumps(compact_cmd)
+                log("STDIN\u2192pi", json_cmd, f)
+                proc.stdin.write(json_cmd + "\n")
+                proc.stdin.flush()
+                event_count = read_events_until(
+                    proc,
+                    f,
+                    lambda e: e.get("type") == "response" and e.get("id") == "req-compact",
+                    event_count,
+                )
+                sys.stdout.write("Compaction finished.\n")
         finally:
             try:
                 proc.stdin.close()
@@ -173,8 +253,10 @@ def redact_capture(offset):
         content
     )
 
-    # Model name - use a generic placeholder
+    # Model name - use a generic placeholder (GGUF model paths)
     content = re.sub(r"[A-Z][A-Z0-9]+-\d+\.\d+-[A-Za-z]+-[A-Z0-9_]+\.gguf", "actual-model-name", content)
+    # responseModel - replace any GGUF model path with a generic placeholder
+    content = re.sub(r'"responseModel":"[^"]*"', '"responseModel":"actual-model-name"', content)
 
     # Hostname - replace any hostname-like patterns with a generic one
     # Match the hostname in tool output and thinking content

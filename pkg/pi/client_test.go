@@ -508,6 +508,13 @@ func TestPiClient_IsRunning_DetectsCrashedProcess(t *testing.T) {
 		t.Fatal("expected ProcessState to be set after cmd.Run()")
 	}
 
+	// Record the state the same way the Wait() goroutine does in the
+	// real flow (it copies cmd.ProcessState into processState under mu
+	// after Wait returns).
+	c.mu.Lock()
+	c.processState = c.cmd.ProcessState
+	c.mu.Unlock()
+
 	// IsRunning should detect the dead process
 	if c.IsRunning() {
 		t.Error("IsRunning() should be false when process has exited")

@@ -41,6 +41,14 @@ type TaskLogEntry struct {
 	ToolArgs   string `json:"tool_args,omitempty"`   // arguments/parameters
 	ToolOutput string `json:"tool_output,omitempty"` // captured output
 	ToolError  bool   `json:"tool_error,omitempty"`  // true if tool ended with error
+
+	// Structured compaction fields (only set when Level == "compaction")
+	CompactionType         string `json:"compaction_type,omitempty"`          // "start", "end"
+	CompactionReason       string `json:"compaction_reason,omitempty"`        // "manual", "threshold", "overflow"
+	CompactionSummary      string `json:"compaction_summary,omitempty"`       // generated summary (end)
+	CompactionTokensBefore int    `json:"compaction_tokens_before,omitempty"` // context size before (end)
+	CompactionTokensAfter  int    `json:"compaction_tokens_after,omitempty"`  // estimated size after (end)
+	CompactionError        bool   `json:"compaction_error,omitempty"`         // true if compaction failed
 }
 
 // TaskLogStore stores log entries per task.
@@ -680,6 +688,13 @@ func (s *Server) handleGuestLog(ctx context.Context, params json.RawMessage) (in
 		ToolArgs   string `json:"tool_args,omitempty"`
 		ToolOutput string `json:"tool_output,omitempty"`
 		ToolError  bool   `json:"tool_error,omitempty"`
+		// Structured compaction fields (level "compaction").
+		CompactionType         string `json:"compaction_type,omitempty"`
+		CompactionReason       string `json:"compaction_reason,omitempty"`
+		CompactionSummary      string `json:"compaction_summary,omitempty"`
+		CompactionTokensBefore int    `json:"compaction_tokens_before,omitempty"`
+		CompactionTokensAfter  int    `json:"compaction_tokens_after,omitempty"`
+		CompactionError        bool   `json:"compaction_error,omitempty"`
 	}
 
 	if err := json.Unmarshal(params, &req); err != nil {
@@ -709,6 +724,14 @@ func (s *Server) handleGuestLog(ctx context.Context, params json.RawMessage) (in
 				e.ToolOutput = req.ToolOutput
 				e.ToolError = req.ToolError
 			}
+			if req.Level == "compaction" || req.CompactionType != "" {
+				e.CompactionType = req.CompactionType
+				e.CompactionReason = req.CompactionReason
+				e.CompactionSummary = req.CompactionSummary
+				e.CompactionTokensBefore = req.CompactionTokensBefore
+				e.CompactionTokensAfter = req.CompactionTokensAfter
+				e.CompactionError = req.CompactionError
+			}
 			// If the entry has level "tool" (set by accumulator) but
 			// structured fields are empty, parse them from the line.
 			if e.Level == "tool" && e.ToolType == "" {
@@ -719,31 +742,43 @@ func (s *Server) handleGuestLog(ctx context.Context, params json.RawMessage) (in
 			// the system should not continue processing tasks if it cannot log.
 			if s.diskLogStore != nil {
 				if err := s.diskLogStore.Append(logstore.Entry{
-					TaskID:     e.TaskID,
-					Line:       e.Line,
-					Level:      e.Level,
-					Timestamp:  e.Timestamp,
-					ToolType:   e.ToolType,
-					ToolName:   e.ToolName,
-					ToolID:     e.ToolID,
-					ToolArgs:   e.ToolArgs,
-					ToolOutput: e.ToolOutput,
-					ToolError:  e.ToolError,
+					TaskID:                 e.TaskID,
+					Line:                   e.Line,
+					Level:                  e.Level,
+					Timestamp:              e.Timestamp,
+					ToolType:               e.ToolType,
+					ToolName:               e.ToolName,
+					ToolID:                 e.ToolID,
+					ToolArgs:               e.ToolArgs,
+					ToolOutput:             e.ToolOutput,
+					ToolError:              e.ToolError,
+					CompactionType:         e.CompactionType,
+					CompactionReason:       e.CompactionReason,
+					CompactionSummary:      e.CompactionSummary,
+					CompactionTokensBefore: e.CompactionTokensBefore,
+					CompactionTokensAfter:  e.CompactionTokensAfter,
+					CompactionError:        e.CompactionError,
 				}); err != nil {
 					fmt.Fprintf(os.Stderr, fatalwriter.FatalMsgFormat, err)
 					os.Exit(1)
 				}
 			}
 			s.hub.SendNotification("", rpc.ConnectionRoleBrowser, "task.log", map[string]interface{}{
-				"task_id":     e.TaskID,
-				"line":        e.Line,
-				"level":       e.Level,
-				"tool_type":   e.ToolType,
-				"tool_name":   e.ToolName,
-				"tool_id":     e.ToolID,
-				"tool_args":   e.ToolArgs,
-				"tool_output": e.ToolOutput,
-				"tool_error":  e.ToolError,
+				"task_id":                  e.TaskID,
+				"line":                     e.Line,
+				"level":                    e.Level,
+				"tool_type":                e.ToolType,
+				"tool_name":                e.ToolName,
+				"tool_id":                  e.ToolID,
+				"tool_args":                e.ToolArgs,
+				"tool_output":              e.ToolOutput,
+				"tool_error":               e.ToolError,
+				"compaction_type":          e.CompactionType,
+				"compaction_reason":        e.CompactionReason,
+				"compaction_summary":       e.CompactionSummary,
+				"compaction_tokens_before": e.CompactionTokensBefore,
+				"compaction_tokens_after":  e.CompactionTokensAfter,
+				"compaction_error":         e.CompactionError,
 			})
 		},
 	)
