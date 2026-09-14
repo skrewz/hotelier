@@ -68,6 +68,11 @@ type PiClient struct {
 	waitOnce sync.Once
 	// waitErr holds the exit error from cmd.Wait().
 	waitErr error
+	// processState holds the subprocess exit state, populated by the Wait()
+	// goroutines after cmd.Wait() returns and published under mu. Reading
+	// cmd.ProcessState directly races with cmd.Wait() (see
+	// TestProcessStateAccessorsRaceFree).
+	processState *os.ProcessState
 	// stderrLines captures the last N lines of stderr output for diagnostics.
 	stderrLines   []string
 	stderrLinesMu sync.Mutex
@@ -189,6 +194,7 @@ func (c *PiClient) Start(ctx context.Context) error {
 			waitErr := c.cmd.Wait()
 			c.mu.Lock()
 			c.waitErr = waitErr
+			c.processState = c.cmd.ProcessState
 			c.mu.Unlock()
 		})
 	}()
@@ -226,7 +232,11 @@ func (c *PiClient) Stop(ctx context.Context) error {
 	done := make(chan error, 1)
 	go func() {
 		c.waitOnce.Do(func() {
-			done <- c.cmd.Wait()
+			waitErr := c.cmd.Wait()
+			done <- waitErr
+			c.mu.Lock()
+			c.processState = c.cmd.ProcessState
+			c.mu.Unlock()
 		})
 		// If waitOnce was already called (process exited on its own),
 		// signal done so we don't block forever.
@@ -259,7 +269,11 @@ func (c *PiClient) Stop(ctx context.Context) error {
 		killDone := make(chan error, 1)
 		go func() {
 			c.waitOnce.Do(func() {
-				killDone <- c.cmd.Wait()
+				waitErr := c.cmd.Wait()
+				killDone <- waitErr
+				c.mu.Lock()
+				c.processState = c.cmd.ProcessState
+				c.mu.Unlock()
 			})
 			select {
 			case killDone <- nil:
@@ -305,8 +319,8 @@ func (c *PiClient) IsRunning() bool {
 		return false
 	}
 	// Process has exited (crashed or otherwise) — mark as not running.
-	// ProcessState is set by cmd.Wait() when the process exits.
-	if c.cmd.ProcessState != nil {
+	// processState is set by the Wait() goroutines when the process exits.
+	if c.processState != nil {
 		c.started = false
 		return false
 	}
@@ -315,7 +329,9 @@ func (c *PiClient) IsRunning() bool {
 
 // GetProcessState returns the process state, or nil if the process hasn't exited yet.
 func (c *PiClient) GetProcessState() *os.ProcessState {
-	return c.cmd.ProcessState
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.processState
 }
 
 // Cmd returns the underlying exec.Cmd (for testing/advanced use).
@@ -341,13 +357,13 @@ func (c *PiClient) GetExitError() error {
 func (c *PiClient) GetExitCode() int {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if c.cmd == nil || c.cmd.ProcessState == nil {
+	if c.cmd == nil || c.processState == nil {
 		return -1
 	}
 	if c.waitErr == nil {
 		return 0
 	}
-	return c.cmd.ProcessState.ExitCode()
+	return c.processState.ExitCode()
 }
 
 // GetStderrLines returns the captured stderr lines (up to maxStderrLines).
@@ -699,6 +715,7 @@ func CompactionTokens(event Event) (tokensBefore, estimatedTokensAfter int) {
 func CompactionErrorMessage(event Event) string {
 	return event.ErrorMessage
 }
+
 // IsToolExecution checks if the event is a tool execution event.
 func IsToolExecution(event Event) bool {
 	return event.Type == "tool_execution_start" ||
