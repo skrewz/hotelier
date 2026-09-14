@@ -418,67 +418,77 @@ func (c *PiClient) sendCommandLocked(cmd map[string]interface{}) error {
 func (c *PiClient) readEvents() {
 	defer close(c.eventCh)
 
-	scanner := bufio.NewScanner(c.stdout)
-	scanner.Buffer(make([]byte, 1024*1024), 1024*1024)
+	// ReadString (unlike bufio.Scanner) has no token size limit, so a single
+	// oversized JSON line (e.g. a tool result carrying a large file read) does
+	// not abort the event stream. See issue #92.
+	reader := bufio.NewReader(c.stdout)
+	for {
+		line, readErr := reader.ReadString('\n')
+		line = strings.TrimSuffix(line, "\n")
 
-	for scanner.Scan() {
-		line := scanner.Text()
-		if line == "" {
-			continue
+		if line != "" {
+			// Capture spawn-phase output (first 10 lines combined with stderr)
+			if !c.trySpawnOutput(line) {
+				// Log raw RPC events to stdout when debug is enabled.
+				if c.debug {
+					fmt.Fprintf(os.Stdout, "[RPC] <- %s\n", line)
+				}
+
+				var event Event
+				if err := json.Unmarshal([]byte(line), &event); err != nil {
+					c.log.Printf("pi parse error: %v (line: %s)", err, line)
+				} else {
+					// Record event in history for diagnostics
+					c.addEventToHistory(event)
+
+					// Skip responses (they have an "id" field and "type": "response")
+					if event.Type != "response" {
+						// Log tool execution events for troubleshooting
+						if event.Type == "tool_execution_start" || event.Type == "tool_execution_end" {
+							c.log.Printf("pi tool: %s %s (id: %s)", event.Type, event.ToolName, event.ToolCallId)
+						}
+
+						select {
+						case c.eventCh <- event:
+						case <-c.doneCh:
+							return
+						}
+					}
+				}
+			}
 		}
 
-		// Capture spawn-phase output (first 10 lines combined with stderr)
-		if c.trySpawnOutput(line) {
-			continue
-		}
-
-		// Log raw RPC events to stdout when debug is enabled.
-		if c.debug {
-			fmt.Fprintf(os.Stdout, "[RPC] <- %s\n", line)
-		}
-
-		var event Event
-		if err := json.Unmarshal([]byte(line), &event); err != nil {
-			c.log.Printf("pi parse error: %v (line: %s)", err, line)
-			continue
-		}
-
-		// Record event in history for diagnostics
-		c.addEventToHistory(event)
-
-		// Skip responses (they have an "id" field and "type": "response")
-		if event.Type == "response" {
-			continue
-		}
-
-		// Log tool execution events for troubleshooting
-		if event.Type == "tool_execution_start" || event.Type == "tool_execution_end" {
-			c.log.Printf("pi tool: %s %s (id: %s)", event.Type, event.ToolName, event.ToolCallId)
-		}
-
-		select {
-		case c.eventCh <- event:
-		case <-c.doneCh:
+		if readErr != nil {
+			if readErr != io.EOF {
+				c.log.Printf("pi stdout read error: %v", readErr)
+			}
 			return
 		}
-	}
-
-	if err := scanner.Err(); err != nil {
-		c.log.Printf("pi stdout scan error: %v", err)
 	}
 }
 
 func (c *PiClient) readStderr() {
-	scanner := bufio.NewScanner(c.stderr)
-	for scanner.Scan() {
-		line := scanner.Text()
-		// Capture spawn-phase output (first 10 lines combined with stdout)
-		if c.trySpawnOutput(line) {
-			continue
+	// ReadString (unlike bufio.Scanner) has no token size limit. See issue #92.
+	reader := bufio.NewReader(c.stderr)
+	for {
+		line, readErr := reader.ReadString('\n')
+		line = strings.TrimSuffix(line, "\n")
+
+		if line != "" {
+			// Capture spawn-phase output (first 10 lines combined with stdout)
+			if !c.trySpawnOutput(line) {
+				// Capture stderr for diagnostics
+				c.addStderrLine(line)
+				c.log.Printf("pi stderr: %s", line)
+			}
 		}
-		// Capture stderr for diagnostics
-		c.addStderrLine(line)
-		c.log.Printf("pi stderr: %s", line)
+
+		if readErr != nil {
+			if readErr != io.EOF {
+				c.log.Printf("pi stderr read error: %v", readErr)
+			}
+			return
+		}
 	}
 }
 
