@@ -61,6 +61,8 @@ func NewPIHandlerDebug(cwd string, provider, model, thinkingLevel string, debug 
 	if path, err := exec.LookPath("pi"); err == nil {
 		piExecPath = path
 		logger.Printf("resolved pi executable: %s", piExecPath)
+	} else {
+		logger.Printf("pi not found on PATH (%v); will resolve at start time", err)
 	}
 
 	cfg := pi.PiClientConfig{
