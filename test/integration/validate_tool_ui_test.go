@@ -21,6 +21,7 @@ import (
 	"hotelier/pkg/config"
 	"hotelier/pkg/logstore"
 	"hotelier/pkg/persona"
+	"hotelier/pkg/pi"
 	"hotelier/pkg/queue"
 	"hotelier/pkg/rpc"
 )
@@ -33,7 +34,7 @@ type testLogEntry struct {
 	toolType     string // "start", "output", "end"
 	toolName     string // e.g. "bash", "read"
 	toolID       string // unique tool call identifier
-	toolArgs     string // arguments/parameters (display string, mirrors pi.ToolArgs)
+	toolArgs     string // arguments/parameters (display string, produced by pi.ToolArgs)
 	toolArgsJSON string // raw argument JSON (mirrors LogEntry.ToolArgsJSON, issue #2)
 	toolOutput   string // captured output
 	toolError    bool   // true if tool ended with error
@@ -46,73 +47,9 @@ type testLogEntry struct {
 	compactionError        bool   // true if compaction failed
 }
 
-// displayToolArgs mirrors pi.ToolArgs: extracts the display string the guest
-// puts in the tool_args field (command / content / path / raw JSON fallback).
-func displayToolArgs(args any) string {
-	if args == nil {
-		return ""
-	}
-	raw, err := json.Marshal(args)
-	if err != nil {
-		return ""
-	}
-	var m map[string]any
-	if err := json.Unmarshal(raw, &m); err != nil {
-		return string(raw)
-	}
-	if cmd, ok := m["command"].(string); ok {
-		return cmd
-	}
-	if content, ok := m["content"].(string); ok {
-		return content
-	}
-	if path, ok := m["path"].(string); ok {
-		return "path: " + path
-	}
-	return string(raw)
-}
-
-// textToolResult mirrors pi.ToolResult: concatenates the text content items
-// of a tool result.
-func textToolResult(result any) string {
-	if result == nil {
-		return ""
-	}
-	raw, err := json.Marshal(result)
-	if err != nil {
-		return ""
-	}
-	var r struct {
-		Content []struct {
-			Type string `json:"type"`
-			Text string `json:"text"`
-		} `json:"content"`
-	}
-	if err := json.Unmarshal(raw, &r); err != nil {
-		return ""
-	}
-	var text string
-	for _, c := range r.Content {
-		if c.Type == "text" {
-			text += c.Text
-		}
-	}
-	return text
-}
-
 // piRPCEvent captures the top-level type field from a Pi RPC wire event.
 type piRPCEvent struct {
 	Type string `json:"type"`
-}
-
-// piToolExecEvent captures tool execution events from Pi RPC.
-type piToolExecEvent struct {
-	Type       string `json:"type"`
-	ToolCallID string `json:"toolCallId"`
-	ToolName   string `json:"toolName"`
-	Args       any    `json:"args"`
-	Result     any    `json:"result"`
-	IsError    bool   `json:"isError"`
 }
 
 // piMessageUpdateEvent captures message_update events.
@@ -181,45 +118,62 @@ func parsePiRPCCapture(filePath string) ([]testLogEntry, error) {
 
 		switch evt.Type {
 		case "tool_execution_start":
-			var toolEvt piToolExecEvent
+			var toolEvt pi.Event
 			if err := json.Unmarshal([]byte(payload), &toolEvt); err != nil {
 				continue
 			}
-			argsJSON, _ := json.Marshal(toolEvt.Args)
-			displayArgs := displayToolArgs(toolEvt.Args)
+			// Use the production extraction (pi.ToolArgs) so the test data
+			// cannot drift from what the guest actually sends.
+			displayArgs := pi.ToolArgs(toolEvt)
 			entries = append(entries, testLogEntry{
-				line:         fmt.Sprintf("[TOOL_START] %s: %s (id: %s)", toolEvt.ToolName, displayArgs, toolEvt.ToolCallID),
+				line:         fmt.Sprintf("[TOOL_START] %s: %s (id: %s)", toolEvt.ToolName, displayArgs, toolEvt.ToolCallId),
 				level:        "tool",
 				toolType:     "start",
 				toolName:     toolEvt.ToolName,
-				toolID:       toolEvt.ToolCallID,
+				toolID:       toolEvt.ToolCallId,
 				toolArgs:     displayArgs,
-				toolArgsJSON: string(argsJSON),
+				toolArgsJSON: string(toolEvt.Args),
+			})
+
+		case "tool_execution_update":
+			// Production emits a [TOOL_OUTPUT] entry for update events whose
+			// partial result carries text: pkg/guest/pi_handler.go handles
+			// tool_execution_update via pi.ToolPartialResult and skips events
+			// with no text.
+			var toolEvt pi.Event
+			if err := json.Unmarshal([]byte(payload), &toolEvt); err != nil {
+				continue
+			}
+			partial := pi.ToolPartialResult(toolEvt)
+			if partial == "" {
+				continue
+			}
+			entries = append(entries, testLogEntry{
+				line:       fmt.Sprintf("[TOOL_OUTPUT] %s (id: %s): %s", toolEvt.ToolName, toolEvt.ToolCallId, partial),
+				level:      "tool",
+				toolType:   "output",
+				toolName:   toolEvt.ToolName,
+				toolID:     toolEvt.ToolCallId,
+				toolOutput: partial,
 			})
 
 		case "tool_execution_end":
-			var toolEvt piToolExecEvent
+			var toolEvt pi.Event
 			if err := json.Unmarshal([]byte(payload), &toolEvt); err != nil {
 				continue
 			}
 			// The guest sends the extracted text (pi.ToolResult), not the raw
 			// result JSON.
-			resultText := textToolResult(toolEvt.Result)
+			resultText := pi.ToolResult(toolEvt)
 			entries = append(entries, testLogEntry{
-				line:       fmt.Sprintf("[TOOL_END] %s (id: %s): %s", toolEvt.ToolName, toolEvt.ToolCallID, resultText),
+				line:       fmt.Sprintf("[TOOL_END] %s (id: %s): %s", toolEvt.ToolName, toolEvt.ToolCallId, resultText),
 				level:      "tool",
 				toolType:   "end",
 				toolName:   toolEvt.ToolName,
-				toolID:     toolEvt.ToolCallID,
+				toolID:     toolEvt.ToolCallId,
 				toolOutput: resultText,
 				toolError:  toolEvt.IsError,
 			})
-
-		// NOTE: tool_execution_update events are intentionally not converted
-		// into log entries. The guest extracts output via pi.ToolResult, which
-		// reads the "result" field — absent on update events (they carry
-		// "partialResult") — so production never emits [TOOL_OUTPUT] entries
-		// for them.
 
 		case "message_update":
 			var msgEvt piMessageUpdateEvent
@@ -749,6 +703,22 @@ func validateServerLogs(t *testing.T, srv *server.Server, taskID string, expecte
 	}
 	if toolCount != expectedToolCount {
 		t.Errorf("expected %d tool entries, got %d", expectedToolCount, toolCount)
+	}
+
+	// The main capture contains a tool_execution_update event whose partial
+	// result carries text ("devvm\n"). Production converts such events into
+	// [TOOL_OUTPUT] entries (pkg/guest/pi_handler.go handles
+	// tool_execution_update via pi.ToolPartialResult), so the parsed entries
+	// must include at least one output entry — otherwise the UI's
+	// tool_type === 'output' handlers go unexercised.
+	var outputCount int
+	for _, e := range entries {
+		if e.Level == "tool" && e.ToolType == "output" {
+			outputCount++
+		}
+	}
+	if outputCount == 0 {
+		t.Errorf("expected at least one tool output entry (tool_execution_update with partial text), got none")
 	}
 
 	// Print summary
@@ -1356,6 +1326,12 @@ const { chromium } = require('playwright');
     { name: 'block status "done"', pass: detailResult.toolStatuses[0] === 'done' },
     { name: 'block has <pre> for output', pass: detailResult.toolOutputsHavePre[0] },
     { name: 'output contains "devvm"', pass: detailResult.toolOutputContents[0].includes('devvm') },
+    // The capture carries a tool_execution_update with partial text "devvm\n"
+    // followed by a tool_execution_end with the same text. Production emits
+    // both a [TOOL_OUTPUT] and a [TOOL_END] entry, so the rendered output
+    // must contain the text twice — this pins the UI's tool_type === 'output'
+    // handler (the partial must be appended, not dropped).
+    { name: 'output contains partial + final text (output handler exercised)', pass: (detailResult.toolOutputContents[0].match(/devvm/g) || []).length === 2 },
     { name: 'no tool markers outside blocks', pass: !detailResult.hasToolMarkersOutsideBlocks },
     { name: 'tool block has command-line span', pass: detailResult.toolHasCommandLine[0] === true },
     { name: 'tool block has NO tool-id span', pass: detailResult.toolHasNoToolId[0] === true },
