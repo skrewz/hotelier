@@ -260,8 +260,11 @@ def redact_capture(offset):
 
     # Model name - use a generic placeholder (GGUF model paths)
     content = re.sub(r"[A-Z][A-Z0-9]+-\d+\.\d+-[A-Za-z]+-[A-Z0-9_]+\.gguf", "actual-model-name", content)
-    # responseModel - replace any GGUF model path with a generic placeholder
-    content = re.sub(r'"responseModel":"[^"]*"', '"responseModel":"actual-model-name"', content)
+    # Response model - field-level redaction. The GGUF name regex above only
+    # matches one name shape; the responseModel field can also carry model
+    # serving paths (e.g. "/models/<org>/<name>.gguf"), so redact the whole
+    # field regardless of its value.
+    content = re.sub(r'"responseModel":"[^"]*"', '"responseModel":"example-response-model"', content)
 
     # Hostname - replace any hostname-like patterns with a generic one
     # Match the hostname in tool output and thinking content
