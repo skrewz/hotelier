@@ -131,6 +131,9 @@ func TestPIHandler_ExecuteTask(t *testing.T) {
 	}
 
 	h := NewPIHandler("/tmp", "", "", "")
+	// Chroot isolation is covered by the dedicated chroot tests; this test
+	// exercises the non-chroot task flow and must run without CAP_SYS_CHROOT.
+	h.chrootEnabled = false
 	if err := h.Start(context.Background()); err != nil {
 		t.Fatalf("start failed: %v", err)
 	}
@@ -171,6 +174,7 @@ func TestPIHandler_FullDeltaSentAsOneEntry(t *testing.T) {
 	}
 
 	h := NewPIHandler("/tmp", "", "", "")
+	h.chrootEnabled = false // non-chroot flow; chroot covered by dedicated tests
 	if err := h.Start(context.Background()); err != nil {
 		t.Fatalf("start failed: %v", err)
 	}
@@ -505,6 +509,7 @@ func TestPIHandler_FinalOutputPreservesNewlines(t *testing.T) {
 	}
 
 	h := NewPIHandler("/tmp", "", "", "")
+	h.chrootEnabled = false // non-chroot flow; chroot covered by dedicated tests
 	if err := h.Start(context.Background()); err != nil {
 		t.Fatalf("start failed: %v", err)
 	}
@@ -705,6 +710,7 @@ func TestPIHandler_ExecuteTask_SendsSpawnLogs(t *testing.T) {
 	logger := log.New(&logBuf, "[test] ", 0)
 
 	h := NewPIHandler(baseDir, "", "", "")
+	h.chrootEnabled = false // non-chroot spawn log flow; chroot covered by dedicated tests
 	h.log = logger
 
 	ctx := context.Background()
@@ -776,6 +782,7 @@ func TestPIHandler_ExecuteTask_SendsErrorLogOnSpawnFailure(t *testing.T) {
 	defer os.RemoveAll(baseDir)
 
 	h := NewPIHandler(baseDir, "", "", "")
+	h.chrootEnabled = false // non-chroot spawn flow; chroot covered by dedicated tests
 
 	ctx := context.Background()
 	if err := h.Start(ctx); err != nil {
@@ -957,7 +964,11 @@ func TestPIHandler_ExecuteTask_ClientNotRunningAttemptsRestart(t *testing.T) {
 		t.Error("expected 'attempting restart' log entry via sendLog")
 	}
 
-	if _, err := exec.LookPath("pi"); err == nil {
+	// NB: use a distinct variable — shadowing err here would make the
+	// "pi not installed" branch below check the LookPath error instead of
+	// the ExecuteTask error (this test only took that branch on hosts
+	// without pi, i.e. it was never exercised where pi is installed).
+	if _, lookErr := exec.LookPath("pi"); lookErr == nil {
 		// pi is installed — restart should succeed, task proceeds (may fail for other reasons)
 		if !hadRestartSuccess {
 			t.Error("expected 'restarted successfully' log entry via sendLog when pi is installed")
@@ -1004,6 +1015,7 @@ func TestPIHandler_ExecuteTask_ClientKilledExternallyRestartSucceeds(t *testing.
 
 	// Start a real client, then kill it to simulate the "pi client not running" scenario.
 	h := NewPIHandler(baseDir, "", "", "")
+	h.chrootEnabled = false // non-chroot restart flow; chroot covered by dedicated tests
 	if err := h.Start(context.Background()); err != nil {
 		t.Fatalf("start failed: %v", err)
 	}
@@ -1331,7 +1343,7 @@ func TestPIHandler_ResetClientWithEnv_RetriesOnFailure(t *testing.T) {
 	// because pi can't start in that directory. With retries, this should take
 	// at least 1s + 2s = 3s of backoff, but the context will cancel it sooner.
 	start := time.Now()
-	err = h.resetClientWithEnv(ctx, "/nonexistent/path/that/does/not/exist", "test-task", func(LogEntry) error {
+	err = h.resetClientWithEnv(ctx, "/nonexistent/path/that/does/not/exist", "test-task", "", func(LogEntry) error {
 		return nil
 	}, nil)
 	elapsed := time.Since(start)
@@ -1389,7 +1401,7 @@ func TestPIHandler_ResetClientWithEnv_SendsRetryLogs(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 800*time.Millisecond)
 	defer cancel()
 
-	_ = h.resetClientWithEnv(ctx, "/nonexistent/path", "test-task", func(entry LogEntry) error {
+	_ = h.resetClientWithEnv(ctx, "/nonexistent/path", "test-task", "", func(entry LogEntry) error {
 		logsMu.Lock()
 		defer logsMu.Unlock()
 		sentLogs = append(sentLogs, entry)
@@ -1662,6 +1674,7 @@ emit({"type": "agent_settled"})
 	defer os.RemoveAll(baseDir)
 
 	h := NewPIHandler(baseDir, "", "", "")
+	h.chrootEnabled = false // non-chroot settle flow; chroot covered by dedicated tests
 
 	task := TaskAssignment{
 		TaskID: "test-waits-for-settled",
@@ -1839,5 +1852,200 @@ for _ in sys.stdin:
 		if line != fakePi {
 			t.Errorf("spawn %d used %q, want the pinned fake pi %q", i+1, line, fakePi)
 		}
+	}
+}
+
+// TestPIHandler_SetupChrootJail verifies that setupChrootJail creates the
+// jail as a sibling of the task directory and populates it with pi (at its
+// host path), the guest's home dot-directories and the task directory
+// (mirrored at the task dir's host path). It works without root — only the
+// actual chroot(2) call requires privilege.
+func TestPIHandler_SetupChrootJail(t *testing.T) {
+	if _, err := exec.LookPath("python3"); err != nil {
+		t.Skip("python3 not installed, cannot run fake pi")
+	}
+
+	// A fake pi keeps the jail small (the real pi package is ~134 MB).
+	fakeBinDir, err := os.MkdirTemp("", "hotelier-fakepi-bin-*")
+	if err != nil {
+		t.Fatalf("create fake bin dir: %v", err)
+	}
+	defer os.RemoveAll(fakeBinDir)
+	if err := os.WriteFile(filepath.Join(fakeBinDir, "pi"), []byte("#!/usr/bin/env python3\nimport sys\nsys.stdin.read()\n"), 0o755); err != nil {
+		t.Fatalf("write fake pi: %v", err)
+	}
+	origPath := os.Getenv("PATH")
+	t.Cleanup(func() { os.Setenv("PATH", origPath) })
+	os.Setenv("PATH", fakeBinDir+string(os.PathListSeparator)+origPath)
+
+	baseDir, err := os.MkdirTemp("", "hotelier-base-*")
+	if err != nil {
+		t.Fatalf("create base dir: %v", err)
+	}
+	defer os.RemoveAll(baseDir)
+
+	h := NewPIHandler(baseDir, "", "", "")
+
+	taskDir := filepath.Join(baseDir, "tasks", "task-chroot", "abc123")
+	if err := os.MkdirAll(filepath.Join(taskDir, "repo"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(taskDir, "repo", "main.go"), []byte("package main\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	jail, err := h.setupChrootJail(taskDir, "task-chroot", func(LogEntry) error { return nil })
+	if err != nil {
+		t.Fatalf("setupChrootJail failed: %v", err)
+	}
+	defer jail.Cleanup()
+
+	// The jail is a sibling of the task directory.
+	if want := taskDir + ".chroot"; jail.Path() != want {
+		t.Errorf("jail path = %q, want %q", jail.Path(), want)
+	}
+	// The task directory is mirrored at its own absolute path.
+	if _, err := os.Stat(filepath.Join(jail.Path(), taskDir, "repo", "main.go")); err != nil {
+		t.Errorf("task dir not mirrored in jail: %v", err)
+	}
+	// pi is present at its host path.
+	piPath, _ := exec.LookPath("pi")
+	if _, err := os.Stat(filepath.Join(jail.Path(), piPath)); err != nil {
+		t.Errorf("pi not in jail at %s: %v", piPath, err)
+	}
+	// The guest's home dot-directories are mirrored (when present on host).
+	if home, err := os.UserHomeDir(); err == nil {
+		for _, dir := range []string{".pi", ".certs", ".forgejo-gitconfigs", ".tokens"} {
+			if _, err := os.Stat(filepath.Join(home, dir)); err != nil {
+				continue
+			}
+			if _, err := os.Stat(filepath.Join(jail.Path(), home, dir)); err != nil {
+				t.Errorf("%s not in jail: %v", dir, err)
+			}
+		}
+	}
+}
+
+// TestPIHandler_ExecuteTask_ChrootSpawnFailure verifies that with chroot
+// enabled (the default), ExecuteTask fails at spawn in an unprivileged
+// environment (chroot(2) returns EPERM) and the jail is cleaned up.
+func TestPIHandler_ExecuteTask_ChrootSpawnFailure(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("requires non-root: chroot(2) must fail with EPERM")
+	}
+	if _, err := exec.LookPath("python3"); err != nil {
+		t.Skip("python3 not installed, cannot run fake pi")
+	}
+
+	// Fake pi that exits when stdin is closed (like a real RPC server).
+	fakeBinDir, err := os.MkdirTemp("", "hotelier-fakepi-bin-*")
+	if err != nil {
+		t.Fatalf("create fake bin dir: %v", err)
+	}
+	defer os.RemoveAll(fakeBinDir)
+	if err := os.WriteFile(filepath.Join(fakeBinDir, "pi"), []byte("#!/usr/bin/env python3\nimport sys\nsys.stdin.read()\n"), 0o755); err != nil {
+		t.Fatalf("write fake pi: %v", err)
+	}
+	origPath := os.Getenv("PATH")
+	t.Cleanup(func() { os.Setenv("PATH", origPath) })
+	os.Setenv("PATH", fakeBinDir+string(os.PathListSeparator)+origPath)
+
+	baseDir, err := os.MkdirTemp("", "hotelier-base-*")
+	if err != nil {
+		t.Fatalf("create base dir: %v", err)
+	}
+	defer os.RemoveAll(baseDir)
+
+	h := NewPIHandler(baseDir, "", "", "")
+	// chrootEnabled defaults to true — do NOT disable it here.
+
+	if err := h.Start(context.Background()); err != nil {
+		t.Fatalf("start failed: %v", err)
+	}
+	defer h.Stop(context.Background())
+
+	task := TaskAssignment{TaskID: "test-chroot-spawn-fail", Prompt: "do the thing"}
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	_, err = h.ExecuteTask(ctx, task, func(LogEntry) error { return nil })
+	if err == nil {
+		t.Fatal("ExecuteTask should fail when chroot(2) is not permitted")
+	}
+
+	// The jail must be cleaned up even on failure.
+	leftovers, _ := filepath.Glob(filepath.Join(baseDir, "tasks", "*", "*.chroot"))
+	if len(leftovers) > 0 {
+		t.Errorf("chroot jail(s) left behind: %v", leftovers)
+	}
+}
+
+// TestPIHandler_ExecuteTask_ChrootCleanup verifies the full chroot flow when
+// running as root: ExecuteTask succeeds (the fake pi settles inside the
+// jail) and both the jail and the task directory are removed afterwards.
+func TestPIHandler_ExecuteTask_ChrootCleanup(t *testing.T) {
+	if os.Geteuid() != 0 {
+		t.Skip("requires root (CAP_SYS_CHROOT)")
+	}
+
+	// Fake pi that settles (same event shape as the real pi). Pure POSIX
+	// shell on purpose: this test runs the fake pi inside the chroot jail,
+	// where only the essential bins are available — a python3 script would
+	// need the stdlib, which is a separate (best-effort) population step.
+	// The first 10 stdout lines are consumed by the SpawnOutput capture
+	// window.
+	fakeBinDir, err := os.MkdirTemp("", "hotelier-fakepi-bin-*")
+	if err != nil {
+		t.Fatalf("create fake bin dir: %v", err)
+	}
+	defer os.RemoveAll(fakeBinDir)
+	script := `#!/usr/bin/env sh
+# Consume the first stdin line (the prompt), like the python fake did.
+read -r _ || true
+i=0
+while [ "$i" -lt 10 ]; do
+    printf '{"type":"queue_update","queue":[]}\n'
+    i=$((i+1))
+done
+printf '{"type":"agent_start"}\n'
+printf '{"type":"agent_settled"}\n'
+`
+	if err := os.WriteFile(filepath.Join(fakeBinDir, "pi"), []byte(script), 0o755); err != nil {
+		t.Fatalf("write fake pi: %v", err)
+	}
+	origPath := os.Getenv("PATH")
+	t.Cleanup(func() { os.Setenv("PATH", origPath) })
+	os.Setenv("PATH", fakeBinDir+string(os.PathListSeparator)+origPath)
+
+	baseDir, err := os.MkdirTemp("", "hotelier-base-*")
+	if err != nil {
+		t.Fatalf("create base dir: %v", err)
+	}
+	defer os.RemoveAll(baseDir)
+
+	h := NewPIHandler(baseDir, "", "", "")
+	// chrootEnabled defaults to true — do NOT disable it here.
+	// No h.Start: ExecuteTask's restart path starts the base client.
+
+	task := TaskAssignment{TaskID: "test-chroot-cleanup", Prompt: "do the thing"}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	result, err := h.ExecuteTask(ctx, task, func(LogEntry) error { return nil })
+	if err != nil {
+		t.Fatalf("ExecuteTask in chroot failed: %v", err)
+	}
+	if result == nil || !result.Success {
+		t.Fatalf("expected successful result, got %+v", result)
+	}
+
+	// Both the jail and the task directory must be gone.
+	leftovers, _ := filepath.Glob(filepath.Join(baseDir, "tasks", "*", "*.chroot"))
+	if len(leftovers) > 0 {
+		t.Errorf("chroot jail(s) left behind: %v", leftovers)
+	}
+	taskDirs, _ := filepath.Glob(filepath.Join(baseDir, "tasks", "*", "*"))
+	if len(taskDirs) > 0 {
+		t.Errorf("task dir(s) left behind: %v", taskDirs)
 	}
 }
