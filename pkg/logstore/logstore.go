@@ -43,6 +43,14 @@ type Entry struct {
 	ToolArgs   string `json:"tool_args,omitempty"`   // arguments/parameters
 	ToolOutput string `json:"tool_output,omitempty"` // captured output
 	ToolError  bool   `json:"tool_error,omitempty"`  // true if tool ended with error
+
+	// Structured compaction fields (only set when Level == "compaction")
+	CompactionType         string `json:"compaction_type,omitempty"`          // "start", "end"
+	CompactionReason       string `json:"compaction_reason,omitempty"`        // "manual", "threshold", "overflow"
+	CompactionSummary      string `json:"compaction_summary,omitempty"`       // generated summary (end)
+	CompactionTokensBefore int    `json:"compaction_tokens_before,omitempty"` // context size before (end)
+	CompactionTokensAfter  int    `json:"compaction_tokens_after,omitempty"`  // estimated size after (end)
+	CompactionError        bool   `json:"compaction_error,omitempty"`         // true if compaction failed
 }
 
 // LogStore persists task logs to the filesystem in a date-partitioned structure.

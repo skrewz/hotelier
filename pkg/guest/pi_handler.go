@@ -388,6 +388,55 @@ func (h *PIHandler) ExecuteTask(ctx context.Context, task TaskAssignment, sendLo
 					h.log.Printf("[TOOL] %s ended (id: %s) elapsed=%s", toolName, toolID, time.Since(lastActivity))
 				}
 			}
+
+			if pi.IsCompaction(event) {
+				reason := pi.CompactionReason(event)
+				switch pi.CompactionType(event) {
+				case "start":
+					entry := LogEntry{
+						TaskID:           task.TaskID,
+						Line:             fmt.Sprintf("[COMPACTION_START] (reason: %s)", reason),
+						Level:            "compaction",
+						CompactionType:   "start",
+						CompactionReason: reason,
+					}
+					if err := sendLog(entry); err != nil {
+						h.log.Printf("[PI] failed to send compaction log: %v", err)
+					}
+					h.log.Printf("[COMPACTION] started (reason: %s)", reason)
+
+				case "end":
+					summary := pi.CompactionSummary(event)
+					tokensBefore, tokensAfter := pi.CompactionTokens(event)
+					errMsg := pi.CompactionErrorMessage(event)
+					if event.Aborted && errMsg == "" {
+						errMsg = "aborted"
+					}
+					var line string
+					if errMsg != "" {
+						line = fmt.Sprintf("[COMPACTION_END] (reason: %s) [ERROR] %s", reason, errMsg)
+					} else if tokensBefore > 0 {
+						line = fmt.Sprintf("[COMPACTION_END] (reason: %s, %d -> %d tokens)", reason, tokensBefore, tokensAfter)
+					} else {
+						line = fmt.Sprintf("[COMPACTION_END] (reason: %s)", reason)
+					}
+					entry := LogEntry{
+						TaskID:                 task.TaskID,
+						Line:                   line,
+						Level:                  "compaction",
+						CompactionType:         "end",
+						CompactionReason:       reason,
+						CompactionSummary:      summary,
+						CompactionTokensBefore: tokensBefore,
+						CompactionTokensAfter:  tokensAfter,
+						CompactionError:        errMsg != "",
+					}
+					if err := sendLog(entry); err != nil {
+						h.log.Printf("[PI] failed to send compaction log: %v", err)
+					}
+					h.log.Printf("[COMPACTION] ended (reason: %s, error: %v)", reason, errMsg != "")
+				}
+			}
 		}
 	}()
 

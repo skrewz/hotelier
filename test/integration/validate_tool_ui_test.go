@@ -36,6 +36,13 @@ type testLogEntry struct {
 	toolArgs   string // arguments/parameters
 	toolOutput string // captured output
 	toolError  bool   // true if tool ended with error
+	// compaction fields (level "compaction")
+	compactionType         string // "start", "end"
+	compactionReason       string // "manual", "threshold", "overflow"
+	compactionSummary      string // generated summary (end)
+	compactionTokensBefore int    // context size before (end)
+	compactionTokensAfter  int    // estimated size after (end)
+	compactionError        bool   // true if compaction failed
 }
 
 // piRPCEvent captures the top-level type field from a Pi RPC wire event.
@@ -73,6 +80,19 @@ type piToolCallInfo struct {
 	Arguments any    `json:"arguments"`
 }
 
+// piCompactionEvent captures compaction_start / compaction_end events.
+type piCompactionEvent struct {
+	Type         string `json:"type"`
+	Reason       string `json:"reason"`
+	Aborted      bool   `json:"aborted"`
+	ErrorMessage string `json:"errorMessage"`
+	Result       struct {
+		Summary              string `json:"summary"`
+		TokensBefore         int    `json:"tokensBefore"`
+		EstimatedTokensAfter int    `json:"estimatedTokensAfter"`
+	} `json:"result"`
+}
+
 // parsePiRPCCapture reads the Pi RPC log file and converts real wire events
 // into testLogEntry format compatible with hotelier's guest.log RPC method.
 func parsePiRPCCapture(filePath string) ([]testLogEntry, error) {
@@ -86,12 +106,14 @@ func parsePiRPCCapture(filePath string) ([]testLogEntry, error) {
 
 	for _, line := range lines {
 		// Each line starts with a prefix like "[STDOUT←pi] 2026-05-24T...: "
-		// The JSON payload follows the last colon+space after the timestamp.
-		jsonStart := strings.LastIndex(line, ": ")
+		// followed by a JSON payload. Anchor on the first '{' — using the
+		// last ": " is unsafe because payloads may contain ": " inside
+		// string values (e.g. compaction summaries).
+		jsonStart := strings.Index(line, "{")
 		if jsonStart == -1 {
 			continue
 		}
-		payload := strings.TrimSpace(line[jsonStart+2:])
+		payload := strings.TrimSpace(line[jsonStart:])
 		if payload == "" {
 			continue
 		}
@@ -178,6 +200,44 @@ func parsePiRPCCapture(filePath string) ([]testLogEntry, error) {
 					})
 				}
 			}
+
+		case "compaction_start", "compaction_end":
+			var compEvt piCompactionEvent
+			if err := json.Unmarshal([]byte(payload), &compEvt); err != nil {
+				continue
+			}
+			if evt.Type == "compaction_start" {
+				entries = append(entries, testLogEntry{
+					line:             fmt.Sprintf("[COMPACTION_START] (reason: %s)", compEvt.Reason),
+					level:            "compaction",
+					compactionType:   "start",
+					compactionReason: compEvt.Reason,
+				})
+				continue
+			}
+			// compaction_end
+			errMsg := compEvt.ErrorMessage
+			if compEvt.Aborted && errMsg == "" {
+				errMsg = "aborted"
+			}
+			var line string
+			if errMsg != "" {
+				line = fmt.Sprintf("[COMPACTION_END] (reason: %s) [ERROR] %s", compEvt.Reason, errMsg)
+			} else if compEvt.Result.TokensBefore > 0 {
+				line = fmt.Sprintf("[COMPACTION_END] (reason: %s, %d -> %d tokens)", compEvt.Reason, compEvt.Result.TokensBefore, compEvt.Result.EstimatedTokensAfter)
+			} else {
+				line = fmt.Sprintf("[COMPACTION_END] (reason: %s)", compEvt.Reason)
+			}
+			entries = append(entries, testLogEntry{
+				line:                   line,
+				level:                  "compaction",
+				compactionType:         "end",
+				compactionReason:       compEvt.Reason,
+				compactionSummary:      compEvt.Result.Summary,
+				compactionTokensBefore: compEvt.Result.TokensBefore,
+				compactionTokensAfter:  compEvt.Result.EstimatedTokensAfter,
+				compactionError:        errMsg != "",
+			})
 		}
 	}
 
@@ -193,16 +253,16 @@ func loadCaptureEntries(logPath, taskID, prompt string) []testLogEntry {
 		return nil
 	}
 	entries = append([]testLogEntry{
-		{"Task started", "system", "", "", "", "", "", false},
-		{fmt.Sprintf("Executing task %s", taskID), "system", "", "", "", "", "", false},
-		{fmt.Sprintf("Cloning https://github.com/example/repo.git -> /tmp/hotelier/tasks/%s/repo", taskID), "system", "", "", "", "", "", false},
-		{"Cloned https://github.com/example/repo.git", "system", "", "", "", "", "", false},
-		{fmt.Sprintf("Spawning pi subprocess in: /tmp/hotelier/tasks/%s/repo", taskID), "system", "", "", "", "", "", false},
-		{"[spawn] Checking pi binary...", "system", "", "", "", "", "", false},
-		{"[spawn] Checking configuration...", "system", "", "", "", "", "", false},
-		{"[spawn] Starting RPC server...", "system", "", "", "", "", "", false},
-		{"Sending prompt to pi", "system", "", "", "", "", "", false},
-		{"Prompt sent, waiting for events", "system", "", "", "", "", "", false},
+		{line: "Task started", level: "system"},
+		{line: fmt.Sprintf("Executing task %s", taskID), level: "system"},
+		{line: fmt.Sprintf("Cloning https://github.com/example/repo.git -> /tmp/hotelier/tasks/%s/repo", taskID), level: "system"},
+		{line: "Cloned https://github.com/example/repo.git", level: "system"},
+		{line: fmt.Sprintf("Spawning pi subprocess in: /tmp/hotelier/tasks/%s/repo", taskID), level: "system"},
+		{line: "[spawn] Checking pi binary...", level: "system"},
+		{line: "[spawn] Checking configuration...", level: "system"},
+		{line: "[spawn] Starting RPC server...", level: "system"},
+		{line: "Sending prompt to pi", level: "system"},
+		{line: "Prompt sent, waiting for events", level: "system"},
 	}, entries...)
 	return entries
 }
@@ -238,20 +298,38 @@ func testLogEntriesFailed(taskID string) []testLogEntry {
 	)
 }
 
+// testLogEntriesCompaction returns log entries for a task that underwent
+// context compaction, parsed from a real Pi RPC capture (issue #53). The
+// capture contains two trivial prompt exchanges followed by a manual
+// `compact` command, producing compaction_start and compaction_end events.
+func testLogEntriesCompaction(taskID string) []testLogEntry {
+	return loadCaptureEntries(
+		"test/integration/pi_rpc_capture_compaction_redacted.log",
+		taskID,
+		"Reply with just the word done",
+	)
+}
+
 // sendLogEntries sends a slice of log entries to the server via guest.log RPC.
 func sendLogEntries(t *testing.T, guestWS *websocket.Conn, taskID string, entries []testLogEntry) {
 	t.Helper()
 	for _, entry := range entries {
 		logParams, _ := json.Marshal(map[string]interface{}{
-			"task_id":     taskID,
-			"line":        entry.line,
-			"level":       entry.level,
-			"tool_type":   entry.toolType,
-			"tool_name":   entry.toolName,
-			"tool_id":     entry.toolID,
-			"tool_args":   entry.toolArgs,
-			"tool_output": entry.toolOutput,
-			"tool_error":  entry.toolError,
+			"task_id":                  taskID,
+			"line":                     entry.line,
+			"level":                    entry.level,
+			"tool_type":                entry.toolType,
+			"tool_name":                entry.toolName,
+			"tool_id":                  entry.toolID,
+			"tool_args":                entry.toolArgs,
+			"tool_output":              entry.toolOutput,
+			"tool_error":               entry.toolError,
+			"compaction_type":          entry.compactionType,
+			"compaction_reason":        entry.compactionReason,
+			"compaction_summary":       entry.compactionSummary,
+			"compaction_tokens_before": entry.compactionTokensBefore,
+			"compaction_tokens_after":  entry.compactionTokensAfter,
+			"compaction_error":         entry.compactionError,
 		})
 		if err := rpc.WriteMessage(guestWS, &rpc.JSONRPCMessage{
 			JSONRPC: "2.0", ID: jsonID(2), Method: "guest.log", Params: logParams,
@@ -495,7 +573,30 @@ func TestValidateToolUI(t *testing.T) {
 	}
 	t.Logf("Coloured task created: %s", colouredTaskID)
 
-	validateUI(t, baseURL, taskID, failedTaskID, completedTaskID, pendingTaskID, failureReason, projectRoot)
+	// Step 4f: Create a running task that underwent context compaction
+	// (issue #53). Log entries come from a real Pi RPC capture containing
+	// compaction_start and compaction_end events.
+	compactionTaskID := fmt.Sprintf("ui-test-compaction-task-%d", time.Now().UnixNano())
+	compactionTask := &queue.Task{
+		ID:     compactionTaskID,
+		Prompt: "Long-running task that triggers context compaction",
+		Tags:   []string{"business-default"},
+	}
+	if err := srv.TaskQueue().Add(compactionTask); err != nil {
+		t.Fatalf("add compaction task: %v", err)
+	}
+	if err := srv.TaskQueue().Assign(compactionTaskID, "ui-test-guest"); err != nil {
+		t.Fatalf("assign compaction task: %v", err)
+	}
+	if err := srv.TaskQueue().Start(compactionTaskID); err != nil {
+		t.Fatalf("start compaction task: %v", err)
+	}
+	compactionLogEntries := testLogEntriesCompaction(compactionTaskID)
+	sendLogEntries(t, guestWS, compactionTaskID, compactionLogEntries)
+	flushAccumulator(t, srv)
+	t.Logf("Compaction task created: %s", compactionTaskID)
+
+	validateUI(t, baseURL, taskID, compactionTaskID, failedTaskID, completedTaskID, pendingTaskID, failureReason, projectRoot)
 }
 
 func validateServerLogs(t *testing.T, srv *server.Server, taskID string, expectedEntries []testLogEntry) {
@@ -584,7 +685,7 @@ func validateServerLogs(t *testing.T, srv *server.Server, taskID string, expecte
 	}
 }
 
-func validateUI(t *testing.T, baseURL, taskID, failedTaskID, completedTaskID, pendingTaskID, failureReason, projectRoot string) {
+func validateUI(t *testing.T, baseURL, taskID, compactionTaskID, failedTaskID, completedTaskID, pendingTaskID, failureReason, projectRoot string) {
 	// Allow overriding the screenshot directory via env var for manual inspection.
 	// When set, screenshots survive t.TempDir() cleanup.
 	overrideDir := os.Getenv("SCREENSHOT_DIR")
@@ -617,6 +718,7 @@ const { chromium } = require('playwright');
   const screenshotDir = '%s';
   const baseURL = '%s';
   const taskId = '%s';
+  const compactionTaskId = '%s';
   const failedTaskId = '%s';
   const completedTaskId = '%s';
   const pendingTaskId = '%s';
@@ -881,9 +983,9 @@ const { chromium } = require('playwright');
   const visibleTaskCount = await page.evaluate(() => {
     return document.querySelectorAll('.task-item').length;
   });
-  // With 5 tasks (1 RUNNING + 1 FAILED + 1 PENDING + 1 COMPLETED + 1 RUNNING with persona)
-  // and PENDING/COMPLETED hidden, only 3 should be visible
-  if (visibleTaskCount !== 3) fail('Should show 3 tasks (PENDING and COMPLETED hidden by default), got ' + visibleTaskCount);
+  // With 6 tasks (1 RUNNING + 1 FAILED + 1 PENDING + 1 COMPLETED + 1 RUNNING with persona
+  // + 1 RUNNING with compaction) and PENDING/COMPLETED hidden, only 4 should be visible
+  if (visibleTaskCount !== 4) fail('Should show 4 tasks (PENDING and COMPLETED hidden by default), got ' + visibleTaskCount);
   console.log('PASS:', visibleTaskCount, 'task(s) visible with default filter (PENDING and COMPLETED hidden)');
 
   // Verify the "N pending" expand button is visible
@@ -958,12 +1060,12 @@ const { chromium } = require('playwright');
   // =====================================================================
   console.log('=== Phase 1d: Pending expand button ===');
 
-  // With 5 tasks (RUNNING + FAILED + PENDING + COMPLETED + RUNNING-with-persona)
-  // and PENDING/COMPLETED hidden, only 3 should be visible
+  // With 6 tasks (RUNNING + FAILED + PENDING + COMPLETED + RUNNING-with-persona
+  // + RUNNING-with-compaction) and PENDING/COMPLETED hidden, only 4 should be visible
   const visibleBefore = await page.evaluate(() => {
     return document.querySelectorAll('.task-item').length;
   });
-  if (visibleBefore !== 3) fail('Should show 3 tasks (PENDING and COMPLETED hidden by default), got ' + visibleBefore);
+  if (visibleBefore !== 4) fail('Should show 4 tasks (PENDING and COMPLETED hidden by default), got ' + visibleBefore);
   console.log('PASS:', visibleBefore, 'tasks visible (PENDING and COMPLETED hidden)');
 
   // Verify the pending task is NOT in the list
@@ -987,7 +1089,7 @@ const { chromium } = require('playwright');
   const visibleAfter = await page.evaluate(() => {
     return document.querySelectorAll('.task-item').length;
   });
-  if (visibleAfter !== 4) fail('Should show 4 tasks (PENDING now shown), got ' + visibleAfter);
+  if (visibleAfter !== 5) fail('Should show 5 tasks (PENDING now shown), got ' + visibleAfter);
   console.log('PASS:', visibleAfter, 'tasks visible (PENDING shown)');
 
   // Verify the pending task IS now in the list
@@ -1037,11 +1139,11 @@ const { chromium } = require('playwright');
   await clickEl('button[data-status="PENDING"]');
   await page.waitForTimeout(500);
 
-  // Back to 3 visible tasks, "N pending" button reappears
+  // Back to 4 visible tasks, "N pending" button reappears
   const visibleFinal = await page.evaluate(() => {
     return document.querySelectorAll('.task-item').length;
   });
-  if (visibleFinal !== 3) fail('Should show 3 tasks (PENDING hidden again), got ' + visibleFinal);
+  if (visibleFinal !== 4) fail('Should show 4 tasks (PENDING hidden again), got ' + visibleFinal);
   console.log('PASS:', visibleFinal, 'tasks visible (PENDING hidden again)');
 
   const pendingBtnReappeared = await page.evaluate(() => {
@@ -2090,16 +2192,16 @@ const { chromium } = require('playwright');
   await page.waitForLoadState('networkidle');
   await page.waitForSelector('.task-detail-body .tool-block', { timeout: 5000 });
 
-  // Completed tool blocks are rendered open by default. Close one via click.
+  // Tool blocks are collapsed by default (Issue #46). Open one via click.
   await clickEl('.tool-block-header');
 
-  // Verify the block is now closed (body should NOT have .open class)
-  const blockClosed = await page.evaluate(() => {
+  // Verify the block is now open (body should have .open class)
+  const blockOpen = await page.evaluate(() => {
     const body = document.querySelector('.tool-block-body');
-    return body && !body.classList.contains('open');
+    return body && body.classList.contains('open');
   });
-  if (!blockClosed) fail('Tool block should be closed after clicking header');
-  console.log('PASS: Tool block closed');
+  if (!blockOpen) fail('Tool block should be open after clicking header');
+  console.log('PASS: Tool block open');
 
   // Trigger a refresh cycle (simulates the periodic /api/tasks poll).
   // Before the fix, this would call refreshTaskDetail() which rebuilds
@@ -2109,12 +2211,12 @@ const { chromium } = require('playwright');
   // Allow the refresh to settle
   await page.waitForTimeout(1000);
 
-  // Verify the tool block is STILL closed — state must be preserved
-  const blockStillClosed = await page.evaluate(() => {
+  // Verify the tool block is STILL open — state must be preserved
+  const blockStillOpen = await page.evaluate(() => {
     const body = document.querySelector('.tool-block-body');
-    return body && !body.classList.contains('open');
+    return body && body.classList.contains('open');
   });
-  if (!blockStillClosed) fail('Tool block should remain closed after polling refresh');
+  if (!blockStillOpen) fail('Tool block should remain open after polling refresh');
   console.log('PASS: Tool block state preserved after polling refresh');
 
   // Also verify the detail view is still intact (header, prompt, body)
@@ -2219,11 +2321,14 @@ const { chromium } = require('playwright');
     return document.getElementById('tab-tasks').style.display === 'block';
   }, { timeout: 5000 });
 
-  // Ensure PENDING filter is active so the pending task is visible
-  const pendingFilterBtn = await page.evaluate(() => {
-    return document.querySelector('button[data-status="PENDING"]');
+  // Ensure PENDING filter is active so the pending task is visible.
+  // (Check the class inside the page context — page.evaluate returns an
+  // ElementHandle for DOM elements, which has no .classList property.)
+  const pendingFilterInactive = await page.evaluate(() => {
+    const btn = document.querySelector('button[data-status="PENDING"]');
+    return btn ? btn.classList.contains('inactive') : false;
   });
-  if (pendingFilterBtn && pendingFilterBtn.classList.contains('inactive')) {
+  if (pendingFilterInactive) {
     await clickEl('button[data-status="PENDING"]');
     await page.waitForTimeout(500);
   }
@@ -2299,10 +2404,103 @@ const { chromium } = require('playwright');
 
   await takeScreenshot('12-priority-badge');
 
+  // =====================================================================
+  // Phase 13: Compaction task — compaction events rendered as a block
+  // (issue #53)
+  // =====================================================================
+  console.log('=== Phase 13: Compaction block rendering ===');
+
+  // Navigate to Tasks tab
+  await page.locator('.tab').filter({ hasText: 'Tasks' }).click();
+  await page.waitForFunction(() => {
+    return document.getElementById('tab-tasks').style.display === 'block';
+  }, { timeout: 5000 });
+
+  // Click the compaction task
+  await page.evaluate((cid) => {
+    const items = document.querySelectorAll('.task-item');
+    for (const item of items) {
+      const idEl = item.querySelector('.task-id');
+      if (idEl && idEl.textContent.includes(cid)) {
+        item.click();
+        break;
+      }
+    }
+  }, compactionTaskId);
+
+  // Wait for the compaction block to render, then let any pending
+  // WebSocket updates settle.
+  await page.waitForSelector('.compaction-block', { timeout: 5000 });
+  await page.waitForTimeout(500);
+
+  await takeScreenshot('13-compaction-task-detail');
+
+  const compactionChecks = await page.evaluate(() => {
+    const results = {};
+    const blocks = document.querySelectorAll('.compaction-block');
+    results.blockCount = blocks.length;
+    if (blocks.length > 0) {
+      const block = blocks[0];
+      const header = block.querySelector('.compaction-block-header');
+      results.headerText = header ? header.textContent : '';
+      const reason = block.querySelector('.compaction-reason');
+      results.reason = reason ? reason.textContent.trim() : null;
+      const status = block.querySelector('.compaction-status');
+      results.status = status ? status.textContent.trim() : null;
+      const tokens = block.querySelector('.compaction-tokens');
+      results.tokens = tokens ? tokens.textContent.trim() : null;
+      const counter = block.querySelector('.block-counter');
+      results.counter = counter ? counter.textContent.trim() : null;
+      const body = block.querySelector('.compaction-block-body');
+      results.bodyOpen = body ? body.classList.contains('open') : false;
+      const summaryPre = block.querySelector('.compaction-block-body pre');
+      results.hasSummaryPre = !!summaryPre;
+      results.summaryText = summaryPre ? summaryPre.textContent : '';
+    }
+    // The raw [COMPACTION_*] lines must not leak as plain-text log lines.
+    const leaked = Array.from(document.querySelectorAll('.log-msg'))
+      .map(el => el.textContent)
+      .filter(t => t.includes('[COMPACTION_START]') || t.includes('[COMPACTION_END]'));
+    results.leakedPlainLines = leaked.length;
+    return results;
+  });
+
+  if (compactionChecks.blockCount !== 1) {
+    fail('Expected exactly 1 compaction block, got ' + compactionChecks.blockCount);
+  }
+  if (!compactionChecks.headerText.includes('Compaction')) {
+    fail('Compaction block header should contain "Compaction"');
+  }
+  if (compactionChecks.reason !== 'manual') {
+    fail('Compaction reason should be "manual", got: ' + compactionChecks.reason);
+  }
+  if (compactionChecks.status !== 'completed') {
+    fail('Compaction status should be "completed", got: ' + compactionChecks.status);
+  }
+  if (!compactionChecks.tokens || !/^\d+ → \d+ tokens$/.test(compactionChecks.tokens)) {
+    fail('Compaction token stats should be "<before> → <after> tokens", got: ' + compactionChecks.tokens);
+  }
+  if (compactionChecks.counter !== '2') {
+    fail('Compaction block counter should be 2 (start + end entries), got: ' + compactionChecks.counter);
+  }
+  if (!compactionChecks.hasSummaryPre) {
+    fail('Compaction summary should be inside a <pre> in the block body');
+  }
+  if (!compactionChecks.summaryText.includes('## Goal')) {
+    fail('Compaction summary should contain the generated summary (## Goal)');
+  }
+  if (!compactionChecks.bodyOpen) {
+    fail('Completed compaction block body should be open by default');
+  }
+  if (compactionChecks.leakedPlainLines !== 0) {
+    fail('[COMPACTION_*] lines leaked as plain text: ' + compactionChecks.leakedPlainLines);
+  }
+  console.log('PASS: Compaction block rendered with reason, status, tokens and summary');
+
   console.log('All UI validation checks passed!');
   await browser.close();
 })().catch(e => { console.error('Test failed:', e); process.exit(1); });
-`, screenshotDir, baseURL, taskID, failedTaskID, completedTaskID, pendingTaskID, failureReason, logDate)
+`, screenshotDir, baseURL, taskID, compactionTaskID, failedTaskID, completedTaskID, pendingTaskID, failureReason, logDate)
 
 	tmpScript := t.TempDir() + "/validate_ui.js"
 	if err := os.WriteFile(tmpScript, []byte(script), 0o644); err != nil {

@@ -28,6 +28,10 @@ type Event struct {
 	Args                  json.RawMessage `json:"args,omitempty"`
 	Result                json.RawMessage `json:"result,omitempty"`
 	PartialResult         json.RawMessage `json:"partialResult,omitempty"`
+	// Compaction event fields (compaction_start / compaction_end).
+	Reason       string `json:"reason,omitempty"`       // "manual", "threshold", "overflow"
+	Aborted      bool   `json:"aborted,omitempty"`      // true if compaction was aborted
+	ErrorMessage string `json:"errorMessage,omitempty"` // set on failed compaction
 }
 
 // maxStderrLines is the maximum number of stderr lines to retain.
@@ -634,6 +638,67 @@ func FinalText(event Event) string {
 	return lastAssistant
 }
 
+// IsCompaction checks if the event is a context compaction event.
+// pi emits compaction_start when it begins summarising the conversation
+// history and compaction_end when the summary is complete (or the
+// compaction failed/was aborted). See pi's rpc.md (Compaction events).
+func IsCompaction(event Event) bool {
+	return event.Type == "compaction_start" || event.Type == "compaction_end"
+}
+
+// CompactionType returns "start" or "end" for compaction events.
+func CompactionType(event Event) string {
+	if event.Type == "compaction_start" {
+		return "start"
+	}
+	return "end"
+}
+
+// CompactionReason returns the trigger reason for a compaction event:
+// "manual", "threshold" (context near the limit) or "overflow" (the request
+// exceeded the model's context window).
+func CompactionReason(event Event) string {
+	return event.Reason
+}
+
+// CompactionSummary extracts the generated summary from a compaction_end
+// result. Returns "" when the compaction produced no result (e.g. it was
+// aborted or failed).
+func CompactionSummary(event Event) string {
+	if event.Result == nil {
+		return ""
+	}
+	var result struct {
+		Summary string `json:"summary"`
+	}
+	if err := json.Unmarshal(event.Result, &result); err != nil {
+		return ""
+	}
+	return result.Summary
+}
+
+// CompactionTokens extracts the token counts from a compaction_end result:
+// tokensBefore is the context size before compaction, estimatedTokensAfter
+// is the estimated size after. Both are 0 when there is no result.
+func CompactionTokens(event Event) (tokensBefore, estimatedTokensAfter int) {
+	if event.Result == nil {
+		return 0, 0
+	}
+	var result struct {
+		TokensBefore         int `json:"tokensBefore"`
+		EstimatedTokensAfter int `json:"estimatedTokensAfter"`
+	}
+	if err := json.Unmarshal(event.Result, &result); err != nil {
+		return 0, 0
+	}
+	return result.TokensBefore, result.EstimatedTokensAfter
+}
+
+// CompactionErrorMessage returns the error message from a failed
+// compaction_end event, or "" when the compaction succeeded.
+func CompactionErrorMessage(event Event) string {
+	return event.ErrorMessage
+}
 // IsToolExecution checks if the event is a tool execution event.
 func IsToolExecution(event Event) bool {
 	return event.Type == "tool_execution_start" ||

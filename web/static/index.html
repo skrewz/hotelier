@@ -147,6 +147,27 @@
         .spawn-block-body { display: none; background: #0a1628; border-top: 1px solid #1e3a5f; }
         .spawn-block-body.open { display: block; }
         .spawn-block-body .spawn-content { padding: 0.5rem 0.75rem; font-size: 0.8rem; color: #64748b; font-family: 'SF Mono', 'Fira Code', monospace; white-space: pre-wrap; word-break: break-all; line-height: 1.6; }
+        /* Compaction block — context compaction events (issue #53) */
+        .compaction-block { margin-bottom: 0.75rem; border-radius: 0.5rem; overflow: hidden; border: 1px solid #134e4a; }
+        .compaction-block-header { display: flex; align-items: center; justify-content: space-between; padding: 0.5rem 0.75rem; background: #042f2e; cursor: pointer; user-select: none; font-size: 0.8rem; }
+        .compaction-block-header:hover { background: #134e4a; }
+        .compaction-block-header .compaction-icon { margin-right: 0.5rem; }
+        .compaction-block-header .compaction-label { font-weight: 600; color: #2dd4bf; font-size: 0.8rem; }
+        .compaction-block-header .compaction-reason { color: #5eead4; font-size: 0.7rem; margin-left: 0.5rem; background: rgba(45, 212, 191, 0.12); padding: 0.1rem 0.4rem; border-radius: 0.25rem; font-family: 'SF Mono', 'Fira Code', monospace; }
+        .compaction-block-header .compaction-tokens { color: #99f6e4; font-size: 0.7rem; margin-left: 0.5rem; font-family: 'SF Mono', 'Fira Code', monospace; }
+        .compaction-block-header .compaction-status { font-size: 0.7rem; font-weight: 600; text-transform: uppercase; }
+        .compaction-block-header .compaction-status.running { color: #f59e0b; }
+        .compaction-block-header .compaction-status.done { color: #2dd4bf; }
+        .compaction-block-header .compaction-status.error { color: #ef4444; }
+        .compaction-block-header .compaction-chevron { color: #2dd4bf; transition: transform 0.15s; font-size: 0.75rem; }
+        .compaction-block-header .compaction-chevron.open { transform: rotate(90deg); }
+        .compaction-block-body { display: none; background: #022c22; border-top: 1px solid #134e4a; }
+        .compaction-block-body.open { display: block; }
+        .compaction-block-body .compaction-summary { padding: 0.5rem 0.75rem; font-size: 0.75rem; color: #cbd5e1; font-family: 'SF Mono', 'Fira Code', monospace; }
+        .compaction-block-body .compaction-summary .output-label { color: #475569; font-size: 0.65rem; text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 0.25rem; }
+        .compaction-block-body .compaction-summary pre { margin: 0; white-space: pre-wrap; word-break: break-all; font-family: inherit; font-size: inherit; color: inherit; max-height: 300px; overflow-y: auto; }
+        .compaction-block-body .compaction-error-text { padding: 0.5rem 0.75rem; font-size: 0.75rem; color: #fca5a5; font-family: 'SF Mono', 'Fira Code', monospace; white-space: pre-wrap; word-break: break-all; }
+        .compaction-block-body .compaction-pending { padding: 0.5rem 0.75rem; font-size: 0.75rem; color: #64748b; font-style: italic; }
 
         /* Tool call blocks */
         .tool-block { margin-bottom: 0.75rem; border-radius: 0.5rem; overflow: hidden; border: 1px solid #334155; }
@@ -911,6 +932,78 @@
             </div>`;
         }
 
+        // =====================================================================
+        // Compaction block helpers — context compaction events (issue #53)
+        // =====================================================================
+
+        let _compactionBlockCounter = 0;
+
+        function nextCompactionBlockId() {
+            _compactionBlockCounter++;
+            return 'compaction-' + _compactionBlockCounter;
+        }
+
+        function toggleCompactionBlock(blockId) {
+            const body = document.getElementById('compaction-body-' + blockId);
+            if (!body) return;
+            const header = body.previousElementSibling;
+            const chevron = header?.querySelector('.compaction-chevron');
+            body.classList.toggle('open');
+            if (chevron) chevron.classList.toggle('open');
+        }
+
+        // compactionErrorFromLine extracts the error message from a
+        // [COMPACTION_END] ... [ERROR] <msg> log line.
+        function compactionErrorFromLine(line) {
+            const idx = line.indexOf('[ERROR] ');
+            return idx >= 0 ? line.slice(idx + 8) : line;
+        }
+
+        // buildCompactionBlockHTML creates a collapsible compaction block.
+        //   reason       — "manual", "threshold" or "overflow"
+        //   status       — "running", "done" or "error"
+        //   tokensBefore — context size before compaction (0 if unknown)
+        //   tokensAfter  — estimated context size after compaction (0 if unknown)
+        //   summary      — generated summary text (done)
+        //   errorText    — error message (error)
+        //   timestamp    — ISO timestamp for latest activity
+        //   entryCount   — number of log entries in this block (start + end)
+        function buildCompactionBlockHTML(reason, status, tokensBefore, tokensAfter, summary, errorText, timestamp, entryCount) {
+            const blockId = nextCompactionBlockId();
+            const statusClass = status === 'error' ? 'error' : (status === 'done' ? 'done' : 'running');
+            const statusLabel = status === 'error' ? 'failed' : (status === 'done' ? 'completed' : 'compacting…');
+            const tokensHtml = (tokensBefore > 0 || tokensAfter > 0)
+                ? `<span class="compaction-tokens">${tokensBefore} → ${tokensAfter} tokens</span>` : '';
+            const open = status === 'done' || status === 'error';
+            let bodyContent;
+            if (status === 'error') {
+                bodyContent = `<div class="compaction-error-text">${escapeHtml(errorText || 'Compaction failed')}</div>`;
+            } else if (summary) {
+                bodyContent = `<div class="compaction-summary"><div class="output-label">Summary</div><pre>${escapeHtml(summary)}</pre></div>`;
+            } else {
+                bodyContent = '<div class="compaction-pending">Compacting…</div>';
+            }
+            return `<div class="compaction-block" id="compaction-${blockId}">
+                <div class="compaction-block-header" onclick="toggleCompactionBlock('${blockId}')">
+                    <div>
+                        <span class="compaction-icon">🗜️</span>
+                        <span class="compaction-label">Compaction</span>
+                        ${reason ? `<span class="compaction-reason">${escapeHtml(reason)}</span>` : ''}
+                        ${tokensHtml}
+                        <span class="block-counter">${entryCount}</span>
+                    </div>
+                    <div style="display:flex;align-items:center;gap:0.5rem;">
+                        <span class="compaction-status ${statusClass}">${statusLabel}</span>
+                        <span class="block-timestamp">${formatTimestamp(timestamp)}</span>
+                        <span class="compaction-chevron${open ? ' open' : ''}">▶</span>
+                    </div>
+                </div>
+                <div class="compaction-block-body${open ? ' open' : ''}" id="compaction-body-${blockId}">
+                    ${bodyContent}
+                </div>
+            </div>`;
+        }
+
         // renderUnknownEvent renders an unrecognized RPC event in a grey <pre> block.
         function renderUnknownEvent(event) {
             const pre = document.createElement('pre');
@@ -1090,6 +1183,7 @@
             } else {
                 const isRunning = task.status === 'RUNNING' || task.status === 'ASSIGNED';
                 let currentToolBlock = null;
+                let currentCompaction = null;
 
                 // Accumulators for merging consecutive thinking/text/spawn entries
                 let pendingThinkingLines = '';
@@ -1187,6 +1281,63 @@
                         }
                     }
 
+                    // Compaction events (issue #53): pair start → end into a
+                    // single collapsible block.
+                    if (level === 'compaction' && log.compaction_type) {
+                        flushPendingThinking();
+                        flushPendingSpawn();
+                        flushPendingText();
+                        if (currentToolBlock) {
+                            logsHtml += buildToolBlockHTML(
+                                currentToolBlock.toolName, currentToolBlock.toolId,
+                                currentToolBlock.args, currentToolBlock.output, 'running',
+                                currentToolBlock.timestamp, currentToolBlock.entryCount
+                            );
+                            currentToolBlock = null;
+                        }
+                        if (log.compaction_type === 'start') {
+                            currentCompaction = {
+                                reason: log.compaction_reason || '',
+                                status: 'running', tokensBefore: 0, tokensAfter: 0,
+                                summary: '', errorText: '',
+                                timestamp: log.timestamp, entryCount: 1
+                            };
+                            return;
+                        }
+                        // compaction_type === 'end'
+                        const compStatus = log.compaction_error ? 'error' : 'done';
+                        const compErrorText = log.compaction_error ? compactionErrorFromLine(log.line) : '';
+                        if (currentCompaction) {
+                            if (log.compaction_reason) currentCompaction.reason = log.compaction_reason;
+                            currentCompaction.tokensBefore = log.compaction_tokens_before || 0;
+                            currentCompaction.tokensAfter = log.compaction_tokens_after || 0;
+                            currentCompaction.summary = log.compaction_summary || '';
+                            currentCompaction.errorText = compErrorText;
+                            currentCompaction.status = compStatus;
+                            currentCompaction.entryCount++;
+                            if (log.timestamp) currentCompaction.timestamp = log.timestamp;
+                        } else {
+                            // End without a start — render as a standalone block.
+                            currentCompaction = {
+                                reason: log.compaction_reason || '',
+                                status: compStatus,
+                                tokensBefore: log.compaction_tokens_before || 0,
+                                tokensAfter: log.compaction_tokens_after || 0,
+                                summary: log.compaction_summary || '',
+                                errorText: compErrorText,
+                                timestamp: log.timestamp, entryCount: 1
+                            };
+                        }
+                        logsHtml += buildCompactionBlockHTML(
+                            currentCompaction.reason, currentCompaction.status,
+                            currentCompaction.tokensBefore, currentCompaction.tokensAfter,
+                            currentCompaction.summary, currentCompaction.errorText,
+                            currentCompaction.timestamp, currentCompaction.entryCount
+                        );
+                        currentCompaction = null;
+                        return;
+                    }
+
                     // Non-tool log lines
                     if (currentToolBlock) {
                         logsHtml += buildToolBlockHTML(
@@ -1195,6 +1346,18 @@
                             currentToolBlock.timestamp, currentToolBlock.entryCount
                         );
                         currentToolBlock = null;
+                    }
+
+                    if (currentCompaction) {
+                        // A non-compaction entry arrived while a compaction was
+                        // open — flush it as running.
+                        logsHtml += buildCompactionBlockHTML(
+                            currentCompaction.reason, 'running',
+                            currentCompaction.tokensBefore, currentCompaction.tokensAfter,
+                            currentCompaction.summary, currentCompaction.errorText,
+                            currentCompaction.timestamp, currentCompaction.entryCount
+                        );
+                        currentCompaction = null;
                     }
 
                     if (level === 'thinking') {
@@ -1234,6 +1397,17 @@
                 flushPendingThinking();
                 flushPendingSpawn();
                 flushPendingText();
+
+                // Close any remaining open compaction block (start without end)
+                if (currentCompaction) {
+                    logsHtml += buildCompactionBlockHTML(
+                        currentCompaction.reason, 'running',
+                        currentCompaction.tokensBefore, currentCompaction.tokensAfter,
+                        currentCompaction.summary, currentCompaction.errorText,
+                        currentCompaction.timestamp, currentCompaction.entryCount
+                    );
+                    currentCompaction = null;
+                }
 
                 // Close any remaining open tool block
                 if (currentToolBlock) {
@@ -1438,6 +1612,12 @@
                             tool_args:   params.tool_args,
                             tool_output: params.tool_output,
                             tool_error:  params.tool_error,
+                            compaction_type:         params.compaction_type,
+                            compaction_reason:       params.compaction_reason,
+                            compaction_summary:      params.compaction_summary,
+                            compaction_tokens_before: params.compaction_tokens_before,
+                            compaction_tokens_after:  params.compaction_tokens_after,
+                            compaction_error:        params.compaction_error,
                         };
                         if (!taskLogs[params.task_id]) {
                             taskLogs[params.task_id] = [];
@@ -1643,6 +1823,89 @@
             }
         }
 
+        // _appendCompactionToDetail handles a compaction start/end entry in the
+        // streaming path (issue #53). A start creates a running block; an end
+        // completes the most recent open block (or creates a standalone one).
+        function _appendCompactionToDetail(body, logEntry, wasAtBottom) {
+            _closeLastThinkingBlock(body);
+            _closeLastSpawnBlock(body);
+
+            if (logEntry.compaction_type === 'start') {
+                const frag = document.createElement('div');
+                frag.innerHTML = buildCompactionBlockHTML(
+                    logEntry.compaction_reason || '', 'running', 0, 0, '', '',
+                    logEntry.timestamp, 1
+                );
+                const block = frag.firstElementChild;
+                block.setAttribute('data-compaction-open', '1');
+                body.appendChild(block);
+                scrollToBottomIfNeeded(body, wasAtBottom);
+                return;
+            }
+
+            // compaction_type === 'end'
+            const blocks = body.querySelectorAll('.compaction-block');
+            let target = null;
+            for (let i = blocks.length - 1; i >= 0; i--) {
+                if (blocks[i].getAttribute('data-compaction-open') === '1') {
+                    target = blocks[i];
+                    break;
+                }
+            }
+            if (!target && blocks.length > 0) target = blocks[blocks.length - 1];
+
+            const status = logEntry.compaction_error ? 'error' : 'done';
+            const statusClass = status === 'error' ? 'error' : 'done';
+            const statusLabel = status === 'error' ? 'failed' : 'completed';
+            const tokensBefore = logEntry.compaction_tokens_before || 0;
+            const tokensAfter = logEntry.compaction_tokens_after || 0;
+            const tokensHtml = (tokensBefore > 0 || tokensAfter > 0)
+                ? `<span class="compaction-tokens">${tokensBefore} → ${tokensAfter} tokens</span>` : '';
+            const reason = logEntry.compaction_reason || '';
+            const ts = formatTimestamp(logEntry.timestamp);
+            const errorText = logEntry.compaction_error ? compactionErrorFromLine(logEntry.line) : '';
+
+            if (!target) {
+                // End without a start — standalone block.
+                const frag = document.createElement('div');
+                frag.innerHTML = buildCompactionBlockHTML(
+                    reason, status, tokensBefore, tokensAfter,
+                    logEntry.compaction_summary || '', errorText, logEntry.timestamp, 1
+                );
+                body.appendChild(frag.firstElementChild);
+                scrollToBottomIfNeeded(body, wasAtBottom);
+                return;
+            }
+
+            // Complete the existing block: rebuild header, fill body, open it.
+            target.removeAttribute('data-compaction-open');
+            const counterEl = target.querySelector('.block-counter');
+            const entryCount = counterEl ? parseInt(counterEl.textContent, 10) + 1 : 2;
+            const header = target.querySelector('.compaction-block-header');
+            header.innerHTML = `
+                <div>
+                    <span class="compaction-icon">🗜️</span>
+                    <span class="compaction-label">Compaction</span>
+                    ${reason ? `<span class="compaction-reason">${escapeHtml(reason)}</span>` : ''}
+                    ${tokensHtml}
+                    <span class="block-counter">${entryCount}</span>
+                </div>
+                <div style="display:flex;align-items:center;gap:0.5rem;">
+                    <span class="compaction-status ${statusClass}">${statusLabel}</span>
+                    <span class="block-timestamp">${ts}</span>
+                    <span class="compaction-chevron open">▶</span>
+                </div>
+            `;
+            const bodyEl = target.querySelector('.compaction-block-body');
+            if (logEntry.compaction_error) {
+                bodyEl.innerHTML = `<div class="compaction-error-text">${escapeHtml(errorText)}</div>`;
+            } else if (logEntry.compaction_summary) {
+                bodyEl.innerHTML = `<div class="compaction-summary"><div class="output-label">Summary</div><pre>${escapeHtml(logEntry.compaction_summary)}</pre></div>`;
+            }
+            bodyEl.classList.add('open');
+            scrollToBottomIfNeeded(body, wasAtBottom);
+        }
+
         // _appendTextToDetail appends a text delta to the last text message div.
         // If no text message div exists, creates a new one.
         function _appendTextToDetail(body, line, wasAtBottom) {
@@ -1779,7 +2042,11 @@
             }
 
             // Non-tool log lines: render based on level
-            if (level === 'thinking') {
+            if (level === 'compaction' && logEntry.compaction_type) {
+                // Context compaction events — pair start/end into a block (issue #53)
+                _appendCompactionToDetail(body, logEntry, wasAtBottom);
+                _lastAppendedLevel = 'compaction';
+            } else if (level === 'thinking') {
                 // Append to the last thinking block (streaming), or create a new
                 // one that starts open so the user can see content arriving.
                 // Track cumulative count for this thinking block.
@@ -1957,6 +2224,7 @@
                 // Use rich tool-block rendering (same as task detail view)
                 const isRunning = false; // Logs view is static; streaming handled separately
                 let currentToolBlock = null;
+                let currentCompaction = null;
                 let entriesHtml = '';
 
                 // Accumulator for merging consecutive thinking entries into
@@ -2042,6 +2310,62 @@
                         }
                     }
 
+                    // Compaction events (issue #53): pair start → end into a
+                    // single collapsible block.
+                    if (level === 'compaction' && log.compaction_type) {
+                        flushPendingThinking();
+                        flushPendingSpawn();
+                        if (currentToolBlock) {
+                            entriesHtml += buildToolBlockHTML(
+                                currentToolBlock.toolName, currentToolBlock.toolId,
+                                currentToolBlock.args, currentToolBlock.output, 'running',
+                                currentToolBlock.timestamp, currentToolBlock.entryCount
+                            );
+                            currentToolBlock = null;
+                        }
+                        if (log.compaction_type === 'start') {
+                            currentCompaction = {
+                                reason: log.compaction_reason || '',
+                                status: 'running', tokensBefore: 0, tokensAfter: 0,
+                                summary: '', errorText: '',
+                                timestamp: log.timestamp, entryCount: 1
+                            };
+                            return;
+                        }
+                        // compaction_type === 'end'
+                        const compStatus = log.compaction_error ? 'error' : 'done';
+                        const compErrorText = log.compaction_error ? compactionErrorFromLine(log.line) : '';
+                        if (currentCompaction) {
+                            if (log.compaction_reason) currentCompaction.reason = log.compaction_reason;
+                            currentCompaction.tokensBefore = log.compaction_tokens_before || 0;
+                            currentCompaction.tokensAfter = log.compaction_tokens_after || 0;
+                            currentCompaction.summary = log.compaction_summary || '';
+                            currentCompaction.errorText = compErrorText;
+                            currentCompaction.status = compStatus;
+                            currentCompaction.entryCount++;
+                            if (log.timestamp) currentCompaction.timestamp = log.timestamp;
+                        } else {
+                            // End without a start — render as a standalone block.
+                            currentCompaction = {
+                                reason: log.compaction_reason || '',
+                                status: compStatus,
+                                tokensBefore: log.compaction_tokens_before || 0,
+                                tokensAfter: log.compaction_tokens_after || 0,
+                                summary: log.compaction_summary || '',
+                                errorText: compErrorText,
+                                timestamp: log.timestamp, entryCount: 1
+                            };
+                        }
+                        entriesHtml += buildCompactionBlockHTML(
+                            currentCompaction.reason, currentCompaction.status,
+                            currentCompaction.tokensBefore, currentCompaction.tokensAfter,
+                            currentCompaction.summary, currentCompaction.errorText,
+                            currentCompaction.timestamp, currentCompaction.entryCount
+                        );
+                        currentCompaction = null;
+                        return;
+                    }
+
                     // Non-tool log lines
                     if (currentToolBlock) {
                         entriesHtml += buildToolBlockHTML(
@@ -2082,6 +2406,17 @@
                 // Flush any remaining accumulated entries
                 flushPendingThinking();
                 flushPendingSpawn();
+
+                // Close any remaining open compaction block (start without end)
+                if (currentCompaction) {
+                    entriesHtml += buildCompactionBlockHTML(
+                        currentCompaction.reason, 'running',
+                        currentCompaction.tokensBefore, currentCompaction.tokensAfter,
+                        currentCompaction.summary, currentCompaction.errorText,
+                        currentCompaction.timestamp, currentCompaction.entryCount
+                    );
+                    currentCompaction = null;
+                }
 
                 // Close any remaining open tool block
                 if (currentToolBlock) {
