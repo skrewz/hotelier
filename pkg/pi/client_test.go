@@ -538,12 +538,29 @@ func TestPiClient_ProcessStateReadersConcurrentWithExit(t *testing.T) {
 	c.started = true
 	go c.waitProcess()
 
+	// Hammer the readers until the exit is recorded (or the deadline, as a
+	// safety net). Once processExited is closed the race window — Wait()
+	// writing ProcessState while the readers run — has fully elapsed, so
+	// spinning further only adds wall-clock time without widening coverage.
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
 		c.IsRunning()
 		c.GetProcessState()
 		c.GetExitCode()
+		select {
+		case <-c.processExited:
+			assertProcessStateAfterExit(t, c)
+			return
+		default:
+		}
 	}
+	assertProcessStateAfterExit(t, c)
+}
+
+// assertProcessStateAfterExit verifies the reader methods report a
+// consistent, recorded state once the process has exited.
+func assertProcessStateAfterExit(t *testing.T, c *PiClient) {
+	t.Helper()
 
 	// Wait for the exit to be recorded.
 	<-c.processExited
