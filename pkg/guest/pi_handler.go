@@ -25,6 +25,10 @@ type PIHandler struct {
 	debug   bool
 	debugMu sync.Mutex
 	mu      sync.Mutex
+	// removeDir removes a directory tree during the startup sweep
+	// (issue #180). Defaults to os.RemoveAll; overridable in tests to
+	// simulate removal failures.
+	removeDir func(string) error
 }
 
 // NewPIHandler creates a new PIHandler.
@@ -50,10 +54,11 @@ func NewPIHandlerDebug(cwd string, provider, model, thinkingLevel string, debug 
 		Debug:         debug,
 	}
 	return &PIHandler{
-		baseCWD: cwd,
-		client:  pi.NewClient(cfg),
-		log:     logger,
-		debug:   debug,
+		baseCWD:   cwd,
+		client:    pi.NewClient(cfg),
+		log:       logger,
+		debug:     debug,
+		removeDir: os.RemoveAll,
 	}
 }
 
@@ -61,10 +66,13 @@ func NewPIHandlerDebug(cwd string, provider, model, thinkingLevel string, debug 
 // It creates the base working directory first, since the pi subprocess is
 // started with it as its CWD and os/exec fails with a chdir error if the
 // directory does not exist (e.g. /tmp cleared by a reboot).
+// It then sweeps any stale task directories left behind by a previous,
+// dead execution (issue #180) before starting the pi subprocess.
 func (h *PIHandler) Start(ctx context.Context) error {
 	if err := os.MkdirAll(h.baseCWD, 0o755); err != nil {
 		return fmt.Errorf("create workdir %s: %w", h.baseCWD, err)
 	}
+	h.sweepStaleTaskDirs()
 	if err := h.client.Start(ctx); err != nil {
 		return fmt.Errorf("start pi client: %w", err)
 	}
@@ -73,6 +81,38 @@ func (h *PIHandler) Start(ctx context.Context) error {
 		h.log.Printf("[DEBUG] RPC debug logging enabled")
 	}
 	return nil
+}
+
+// sweepStaleTaskDirs removes every entry under <baseCWD>/tasks/.
+// A freshly started guest has no in-flight tasks by definition, so any
+// directory found there is an orphan from a previous, dead execution —
+// e.g. the guest was hard-killed (SIGKILL, OOM, power loss) before
+// ExecuteTask's deferred cleanup could run. Without this sweep the
+// orphaned directories (each a full git clone plus task scratch space)
+// accumulate unboundedly and can fill the RAM-backed /tmp (issue #180).
+//
+// The sweep is best-effort: each removed directory and any removal error
+// is logged at info level, and a failure to remove one entry never fails
+// Start. It only acts if tasks/ already exists and does not create it —
+// prepareTaskDir creates the directory on demand via MkdirAll.
+func (h *PIHandler) sweepStaleTaskDirs() {
+	tasksDir := filepath.Join(h.baseCWD, "tasks")
+	entries, err := os.ReadDir(tasksDir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return
+		}
+		h.log.Printf("[SWEEP] read tasks dir %s: %v", tasksDir, err)
+		return
+	}
+	for _, entry := range entries {
+		path := filepath.Join(tasksDir, entry.Name())
+		if err := h.removeDir(path); err != nil {
+			h.log.Printf("[SWEEP] failed to remove stale task dir %s: %v", path, err)
+			continue
+		}
+		h.log.Printf("[SWEEP] removed stale task dir: %s", path)
+	}
 }
 
 // Stop terminates the pi RPC subprocess.
