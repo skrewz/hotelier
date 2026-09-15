@@ -67,6 +67,29 @@ func TestJail_Cleanup_RemovesRoot(t *testing.T) {
 	}
 }
 
+// TestNewJail_NilLoggerDoesNotPanic verifies that the exported NewJail is
+// safe with a nil logger: copyDirTree logs unconditionally (e.g. the
+// dangling-symlink skip), so a nil logger must be defaulted rather than
+// panicking mid-populate (review feedback on PR #174).
+func TestNewJail_NilLoggerDoesNotPanic(t *testing.T) {
+	j := NewJail(filepath.Join(t.TempDir(), "jail"), nil)
+	if err := j.Setup(); err != nil {
+		t.Fatalf("Setup failed: %v", err)
+	}
+	hostDir := t.TempDir()
+	writeHostFile(t, hostDir, "keep.txt", "keep", 0o644)
+	if err := os.Symlink(filepath.Join(hostDir, "no-such-target"), filepath.Join(hostDir, "broken")); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := j.CopyDirResolved(hostDir, "/dst"); err != nil {
+		t.Fatalf("CopyDirResolved with nil logger should succeed, got: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(j.root, "dst", "keep.txt")); err != nil {
+		t.Errorf("keep.txt should be copied: %v", err)
+	}
+}
+
 func TestJail_CopyFile_PreservesPermissions(t *testing.T) {
 	j := newTestJail(t)
 	src := writeHostFile(t, t.TempDir(), "bin/tool", "#!/bin/sh\necho hi\n", 0o755)

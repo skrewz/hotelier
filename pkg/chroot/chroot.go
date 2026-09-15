@@ -79,10 +79,15 @@ type Jail struct {
 	log  *log.Logger
 }
 
-// NewJail creates a jail rooted at root. The root directory is created by
-// Setup.
-func NewJail(root string, log *log.Logger) *Jail {
-	return &Jail{root: root, log: log}
+// NewJail creates a Jail rooted at root (the root directory is created by
+// Setup). A nil logger is defaulted to a discarding one: copyDirTree logs
+// unconditionally (e.g. the dangling-symlink skip), so the exported API
+// must not panic mid-populate.
+func NewJail(root string, logger *log.Logger) *Jail {
+	if logger == nil {
+		logger = log.New(io.Discard, "", 0)
+	}
+	return &Jail{root: root, log: logger}
 }
 
 // Path returns the host path of the jail root.
