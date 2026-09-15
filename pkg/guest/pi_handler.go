@@ -98,6 +98,12 @@ func NewPIHandlerDebug(cwd string, provider, model, thinkingLevel string, debug 
 // directory does not exist (e.g. /tmp cleared by a reboot).
 // It then sweeps any stale task directories left behind by a previous,
 // dead execution (issue #180) before starting the pi subprocess.
+//
+// Note: like the transient restart client (see restartClient), this
+// initial client runs WITHOUT a chroot jail (issue #51). It is replaced
+// by resetClientWithEnv — which builds the task's jail — before any task
+// prompt is sent, so no task ever runs outside the jail; the no-jail
+// window spans guest startup until the first task.
 func (h *PIHandler) Start(ctx context.Context) error {
 	if err := os.MkdirAll(h.baseCWD, 0o755); err != nil {
 		return fmt.Errorf("create workdir %s: %w", h.baseCWD, err)
