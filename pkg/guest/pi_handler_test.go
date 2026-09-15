@@ -1973,8 +1973,11 @@ func TestPIHandler_ExecuteTask_ChrootSpawnFailure(t *testing.T) {
 		t.Fatal("ExecuteTask should fail when chroot(2) is not permitted")
 	}
 
-	// The jail must be cleaned up even on failure.
-	leftovers, _ := filepath.Glob(filepath.Join(baseDir, "tasks", "*", "*.chroot"))
+	// The jail must be cleaned up even on failure. The jail is a direct
+	// child of tasks/ (tasks/<taskID>-<rand>.chroot), so the glob must not
+	// add an extra path level — tasks/*/*.chroot never matches and the
+	// assertion would be vacuous (review feedback on PR #174).
+	leftovers, _ := filepath.Glob(filepath.Join(baseDir, "tasks", "*.chroot"))
 	if len(leftovers) > 0 {
 		t.Errorf("chroot jail(s) left behind: %v", leftovers)
 	}
@@ -2039,13 +2042,12 @@ printf '{"type":"agent_settled"}\n'
 		t.Fatalf("expected successful result, got %+v", result)
 	}
 
-	// Both the jail and the task directory must be gone.
-	leftovers, _ := filepath.Glob(filepath.Join(baseDir, "tasks", "*", "*.chroot"))
+	// Both the jail and the task directory must be gone. Both are direct
+	// children of tasks/ (tasks/<taskID>-<rand> and tasks/<taskID>-<rand>
+	// .chroot), so a two-level glob would never match and the assertion
+	// would be vacuous (review feedback on PR #174).
+	leftovers, _ := filepath.Glob(filepath.Join(baseDir, "tasks", "*"))
 	if len(leftovers) > 0 {
-		t.Errorf("chroot jail(s) left behind: %v", leftovers)
-	}
-	taskDirs, _ := filepath.Glob(filepath.Join(baseDir, "tasks", "*", "*"))
-	if len(taskDirs) > 0 {
-		t.Errorf("task dir(s) left behind: %v", taskDirs)
+		t.Errorf("task dir(s) or chroot jail(s) left behind: %v", leftovers)
 	}
 }
