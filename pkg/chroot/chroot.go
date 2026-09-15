@@ -241,6 +241,34 @@ func (j *Jail) PopulateEssentialBins() error {
 			j.log.Printf("chroot: failed to copy python3 stdlib: %v", err)
 		}
 	}
+	// npm and npx are JS scripts, not binaries: ldd reports nothing and
+	// CopyBinary copies only the script content, leaving the package's
+	// lib/ and node_modules/ behind — `npm` inside the jail would fail
+	// with MODULE_NOT_FOUND. When the script belongs to an npm package
+	// (its package.json "bin" field resolves to it), copy the whole
+	// package at its host path (best effort). npm and npx share one
+	// package, so dedupe by package root.
+	seenNodePackages := map[string]bool{}
+	for _, name := range []string{"npm", "npx"} {
+		hostPath, err := exec.LookPath(name)
+		if err != nil {
+			continue
+		}
+		resolved, err := filepath.EvalSymlinks(hostPath)
+		if err != nil {
+			continue
+		}
+		pkgRoot := findPackageRoot(resolved)
+		if pkgRoot == "" || seenNodePackages[pkgRoot] {
+			continue
+		}
+		seenNodePackages[pkgRoot] = true
+		if err := j.CopyDirResolved(pkgRoot, pkgRoot); err != nil {
+			j.log.Printf("chroot: failed to copy npm package %s: %v", pkgRoot, err)
+		} else {
+			j.log.Printf("chroot: copied npm package %s into jail", pkgRoot)
+		}
+	}
 	return nil
 }
 

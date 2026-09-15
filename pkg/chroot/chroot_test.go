@@ -479,6 +479,52 @@ func TestJail_PopulateEssentialBins_CopiesPythonStdlib(t *testing.T) {
 	}
 }
 
+// TestJail_PopulateEssentialBins_CopiesNpmPackage verifies that when npm
+// (and npx) belong to an npm package — the package.json "bin" field
+// resolves to the script — the whole package is copied into the jail. npm
+// is a JS script: ldd reports nothing and CopyBinary alone leaves the
+// package's lib/ and node_modules/ behind, so `npm` inside the jail fails
+// with MODULE_NOT_FOUND (review feedback on PR #174).
+func TestJail_PopulateEssentialBins_CopiesNpmPackage(t *testing.T) {
+	j := newTestJail(t)
+
+	// A fake npm package at an absolute host path (Debian-like layout:
+	// the bin field points at the -cli.js entry scripts).
+	pkgRoot := filepath.Join(t.TempDir(), "share", "nodejs", "npm")
+	writeHostFile(t, pkgRoot, "package.json",
+		`{"name":"npm","bin":{"npm":"bin/npm-cli.js","npx":"bin/npx-cli.js"}}`, 0o644)
+	writeHostFile(t, pkgRoot, "bin/npm-cli.js", "#!/usr/bin/env node\n", 0o755)
+	writeHostFile(t, pkgRoot, "bin/npx-cli.js", "#!/usr/bin/env node\n", 0o755)
+	writeHostFile(t, pkgRoot, "lib/cli.js", "module.exports = 1\n", 0o644)
+	writeHostFile(t, pkgRoot, "node_modules/dep/index.js", "module.exports = 2\n", 0o644)
+
+	// A fake bin dir with the usual PATH symlinks into the package.
+	binDir := t.TempDir()
+	if err := os.Symlink(filepath.Join(pkgRoot, "bin", "npm-cli.js"), filepath.Join(binDir, "npm")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join(pkgRoot, "bin", "npx-cli.js"), filepath.Join(binDir, "npx")); err != nil {
+		t.Fatal(err)
+	}
+	withFakePath(t, binDir)
+
+	if err := j.PopulateEssentialBins(); err != nil {
+		t.Fatalf("PopulateEssentialBins failed: %v", err)
+	}
+
+	for _, rel := range []string{
+		"bin/npm-cli.js", "lib/cli.js", "node_modules/dep/index.js",
+	} {
+		if _, err := os.Stat(filepath.Join(j.root, pkgRoot, rel)); err != nil {
+			t.Errorf("npm package file %s should be in the jail: %v", rel, err)
+		}
+	}
+	// The PATH entry is copied at its own location (symlink resolved).
+	if _, err := os.Stat(filepath.Join(j.root, binDir, "npm")); err != nil {
+		t.Errorf("npm should be copied at its PATH location: %v", err)
+	}
+}
+
 // TestJail_PopulateEssentialBins_CopiesGitExecPath verifies that git's
 // plumbing (the directory reported by `git --exec-path`, e.g.
 // /usr/lib/git-core) is copied into the jail. The old sibling-directory

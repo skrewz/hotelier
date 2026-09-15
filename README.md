@@ -287,7 +287,9 @@ cp config/guest.example.yaml config/guest.yaml
 Every task runs inside its own **chroot jail** (issue #51). Before spawning
 the pi subprocess, the guest copies into a private directory tree: the pi
 executable (and its npm package), essential host binaries with their shared
-libraries, `~/.pi`, `~/.certs`, `~/.forgejo-gitconfigs`, `~/.tokens`, the
+libraries — plus the runtime *data* files `ldd` never reports (the python3
+stdlib, git's exec path, and the npm/npx package directory, where
+detectable), `~/.pi`, `~/.certs`, `~/.forgejo-gitconfigs`, `~/.tokens`, the
 required `/etc` files, basic `/dev` nodes, and the task's working directory.
 Files are placed at the same absolute paths they have on the host, so
 existing path references (shebangs, git credential paths, persona
