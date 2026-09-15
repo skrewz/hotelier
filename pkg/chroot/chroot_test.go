@@ -525,6 +525,29 @@ func TestJail_PopulateEssentialBins_CopiesNpmPackage(t *testing.T) {
 	}
 }
 
+// TestIsUnderAny verifies the nested-path check used by copyPythonStdlib:
+// on RHEL/Fedora layouts platstdlib is a subdirectory of stdlib, and
+// without the check it would be copied twice (review feedback on PR #174).
+func TestIsUnderAny(t *testing.T) {
+	cases := []struct {
+		p     string
+		paths []string
+		want  bool
+	}{
+		{"/a/b/c", []string{"/a/b"}, true},
+		{"/a/b", []string{"/a/b"}, true},
+		{"/a/b", []string{"/a/b/c"}, false},
+		{"/a/bx", []string{"/a/b"}, false},
+		{"/a/b/c", []string{"/x", "/a/b"}, true},
+		{"/a/b/c", nil, false},
+	}
+	for _, tc := range cases {
+		if got := isUnderAny(tc.p, tc.paths); got != tc.want {
+			t.Errorf("isUnderAny(%q, %v) = %v, want %v", tc.p, tc.paths, got, tc.want)
+		}
+	}
+}
+
 // TestJail_PopulateEssentialBins_CopiesGitExecPath verifies that git's
 // plumbing (the directory reported by `git --exec-path`, e.g.
 // /usr/lib/git-core) is copied into the jail. The old sibling-directory

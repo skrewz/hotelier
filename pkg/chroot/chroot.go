@@ -286,13 +286,16 @@ func (j *Jail) copyPythonStdlib(python3Path string) error {
 	if err != nil {
 		return fmt.Errorf("query stdlib paths: %w", err)
 	}
-	seen := map[string]bool{}
+	seen := []string{}
 	for _, line := range strings.Split(string(out), "\n") {
 		stdlib := strings.TrimSpace(line)
-		if !filepath.IsAbs(stdlib) || seen[stdlib] {
+		// Skip paths nested inside an already-copied one: on RHEL/Fedora
+		// layouts platstdlib is a subdirectory of stdlib, and copying it
+		// again would duplicate the whole tree (review feedback on #174).
+		if !filepath.IsAbs(stdlib) || isUnderAny(stdlib, seen) {
 			continue
 		}
-		seen[stdlib] = true
+		seen = append(seen, stdlib)
 		if _, err := os.Stat(stdlib); err != nil {
 			j.log.Printf("chroot: python3 stdlib %s not present, skipping", stdlib)
 			continue
@@ -303,6 +306,18 @@ func (j *Jail) copyPythonStdlib(python3Path string) error {
 		j.log.Printf("chroot: copied python3 stdlib %s into jail", stdlib)
 	}
 	return nil
+}
+
+// isUnderAny reports whether p is identical to, or nested inside, any of
+// the given paths. The separator suffix avoids the classic prefix trap
+// ("/a/bx" is not under "/a/b").
+func isUnderAny(p string, paths []string) bool {
+	for _, s := range paths {
+		if p == s || strings.HasPrefix(p, s+string(filepath.Separator)) {
+			return true
+		}
+	}
+	return false
 }
 
 // PopulatePi copies the pi executable (and, when pi is an npm package, the
