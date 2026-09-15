@@ -160,7 +160,7 @@ func (j *Jail) CopyDir(src, dstAbs string) error {
 	if err := os.MkdirAll(dst, 0o755); err != nil {
 		return fmt.Errorf("create %s: %w", dst, err)
 	}
-	return copyDirTree(src, dst, false, nil)
+	return copyDirTree(src, dst, false, nil, j.log)
 }
 
 // CopyDirResolved is like CopyDir but follows symlinks: a symlink to a file
@@ -182,7 +182,7 @@ func (j *Jail) CopyDirResolved(src, dstAbs string) error {
 	if err := os.MkdirAll(dst, 0o755); err != nil {
 		return fmt.Errorf("create %s: %w", dst, err)
 	}
-	return copyDirTree(src, dst, true, map[devIno]struct{}{})
+	return copyDirTree(src, dst, true, map[devIno]struct{}{}, j.log)
 }
 
 // CopyBinary copies a binary found on the host PATH (by name) into the jail
@@ -549,16 +549,22 @@ func devInoOf(path string) (devIno, bool) {
 }
 
 // copyDirTree recursively copies srcDir to dstDir. When follow is true,
-// symlinks are followed (their targets' content is copied) and directories
-// are tracked by (device, inode) so a symlink pointing at an ancestor —
-// or at / — terminates instead of recursing unboundedly; otherwise
-// symlinks are preserved as symlinks and visited may be nil.
-func copyDirTree(srcDir, dstDir string, follow bool, visited map[devIno]struct{}) error {
+// symlinks are followed (their targets' content is copied, with the
+// target's mode), dangling symlinks are logged and skipped, and
+// directories are tracked by (device, inode) so a symlink pointing at an
+// ancestor — or at / — terminates instead of recursing unboundedly;
+// otherwise symlinks are preserved as symlinks and visited may be nil.
+func copyDirTree(srcDir, dstDir string, follow bool, visited map[devIno]struct{}, log *log.Logger) error {
 	if follow {
 		if key, ok := devInoOf(srcDir); ok {
 			if _, seen := visited[key]; seen {
-				// Cycle: this directory's content is already being copied
-				// elsewhere in the tree — skip to avoid unbounded recursion.
+				// Already copied elsewhere in this tree. Besides breaking
+				// cycles, this means a second symlink pointing at the same
+				// external directory is skipped with no entry created at
+				// all (the path simply does not exist in the jail). That
+				// dedup side effect is accepted: cycle protection takes
+				// priority over duplicating an already-copied directory
+				// (review feedback on PR #174).
 				return nil
 			}
 			visited[key] = struct{}{}
@@ -595,7 +601,16 @@ func copyDirTree(srcDir, dstDir string, follow bool, visited map[devIno]struct{}
 			if !filepath.IsAbs(resolved) {
 				resolved = filepath.Join(filepath.Dir(src), resolved)
 			}
-			if stat, err := os.Stat(resolved); err == nil && stat.IsDir() {
+			stat, err := os.Stat(resolved)
+			if err != nil {
+				// Dangling symlink: the target is gone, so there is nothing
+				// worth copying. Log and skip instead of failing the whole
+				// tree — one stale link in ~/.pi or the pi package must not
+				// brick every task's jail setup (review feedback on PR #174).
+				log.Printf("chroot: skipping dangling symlink %s -> %s: %v", src, target, err)
+				continue
+			}
+			if stat.IsDir() {
 				if key, ok := devInoOf(resolved); ok {
 					if _, seen := visited[key]; seen {
 						// Cycle (e.g. a symlink back at an ancestor): skip
@@ -603,14 +618,18 @@ func copyDirTree(srcDir, dstDir string, follow bool, visited map[devIno]struct{}
 						continue
 					}
 				}
-				if err := os.MkdirAll(dst, 0o755); err != nil {
+				if err := os.MkdirAll(dst, stat.Mode().Perm()); err != nil {
 					return err
 				}
-				if err := copyDirTree(resolved, dst, true, visited); err != nil {
+				if err := copyDirTree(resolved, dst, true, visited, log); err != nil {
 					return err
 				}
 			} else {
-				if err := copyFileContents(resolved, dst, 0o644); err != nil {
+				// Use the target's mode: a hard-coded 0644 would drop the
+				// exec bit and would leave a credential reached via symlink
+				// world-readable inside the 0755 jail (review feedback on
+				// PR #174).
+				if err := copyFileContents(resolved, dst, stat.Mode().Perm()); err != nil {
 					return fmt.Errorf("copy symlink target %s -> %s: %w", src, dst, err)
 				}
 			}
@@ -618,7 +637,7 @@ func copyDirTree(srcDir, dstDir string, follow bool, visited map[devIno]struct{}
 			if err := os.MkdirAll(dst, mode.Perm()); err != nil {
 				return err
 			}
-			if err := copyDirTree(src, dst, follow, visited); err != nil {
+			if err := copyDirTree(src, dst, follow, visited, log); err != nil {
 				return err
 			}
 		default:

@@ -719,14 +719,76 @@ func TestJail_CopyDirResolved_Errors(t *testing.T) {
 	if err := j.CopyDirResolved(t.TempDir(), "/"); err == nil {
 		t.Error("CopyDirResolved with root destination should fail")
 	}
+}
 
-	// A broken symlink in the tree: following it must fail.
+// TestJail_CopyDirResolved_DanglingSymlinkSkipped verifies that a symlink
+// whose target does not exist is logged and skipped instead of failing the
+// whole copy — one stale link inside ~/.pi or the pi package must not
+// brick every task's jail setup (review feedback on PR #174).
+func TestJail_CopyDirResolved_DanglingSymlinkSkipped(t *testing.T) {
+	j := newTestJail(t)
 	hostDir := t.TempDir()
+	writeHostFile(t, hostDir, "keep.txt", "keep", 0o644)
 	if err := os.Symlink(filepath.Join(hostDir, "no-such-target"), filepath.Join(hostDir, "broken")); err != nil {
 		t.Fatal(err)
 	}
-	if err := j.CopyDirResolved(hostDir, "/dst"); err == nil {
-		t.Error("CopyDirResolved with a broken symlink should fail")
+
+	if err := j.CopyDirResolved(hostDir, "/dst"); err != nil {
+		t.Fatalf("CopyDirResolved should skip dangling symlinks, got: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(j.root, "dst", "keep.txt")); err != nil {
+		t.Errorf("keep.txt should be copied: %v", err)
+	}
+	if _, err := os.Lstat(filepath.Join(j.root, "dst", "broken")); !os.IsNotExist(err) {
+		t.Errorf("dangling symlink should not be materialised in the jail, stat err=%v", err)
+	}
+}
+
+// TestJail_CopyDirResolved_PreservesSymlinkTargetMode verifies that
+// followed symlinks are copied with the target's mode rather than a
+// hard-coded 0644/0755 — a credential reached via a symlink must not
+// become world-readable inside the jail, and an executable target must
+// keep its exec bit (review feedback on PR #174).
+func TestJail_CopyDirResolved_PreservesSymlinkTargetMode(t *testing.T) {
+	j := newTestJail(t)
+	hostDir := t.TempDir()
+	secret := writeHostFile(t, hostDir, "secret", "s", 0o600)
+	execFile := writeHostFile(t, hostDir, "run.sh", "#!/bin/sh\n", 0o755)
+	privDir := filepath.Join(hostDir, "priv")
+	if err := os.MkdirAll(privDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	writeHostFile(t, privDir, "inner.txt", "i", 0o644)
+	linkDir := filepath.Join(hostDir, "links")
+	if err := os.MkdirAll(linkDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for name, target := range map[string]string{
+		"secret-link": secret,
+		"exec-link":   execFile,
+		"priv-link":   privDir,
+	} {
+		if err := os.Symlink(target, filepath.Join(linkDir, name)); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	if err := j.CopyDirResolved(hostDir, "/dst"); err != nil {
+		t.Fatalf("CopyDirResolved failed: %v", err)
+	}
+	for name, want := range map[string]os.FileMode{
+		"secret-link": 0o600,
+		"exec-link":   0o755,
+		"priv-link":   0o700,
+	} {
+		info, err := os.Stat(filepath.Join(j.root, "dst", "links", name))
+		if err != nil {
+			t.Errorf("%s should be copied: %v", name, err)
+			continue
+		}
+		if info.Mode().Perm() != want {
+			t.Errorf("%s mode = %o, want %o", name, info.Mode().Perm(), want)
+		}
 	}
 }
 
