@@ -856,6 +856,9 @@
         // its raw args JSON. Returns '' when there is nothing diffable:
         // missing/unparseable args, non-edit shape (no edits array), or
         // identical old/new text.
+        // The diff is computed here from oldText/newText rather than from
+        // Pi's result details.patch: the args are available at tool start,
+        // before any result, and details is not guaranteed across providers.
         function buildEditDiffHTML(argsJSON) {
             if (!argsJSON) return '';
             let parsed;
