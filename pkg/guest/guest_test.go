@@ -17,6 +17,7 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -37,6 +38,33 @@ func newTestGuest(t *testing.T) *Guest {
 		return &TaskResult{TaskID: task.TaskID, Success: true, Output: "test result"}, nil
 	}
 	return New(cfg, handler)
+}
+
+// startTestServer starts an in-process hotelier server on a random
+// localhost port and returns the server and its WebSocket URL. The
+// hub run loop and listener are stopped via t.Cleanup.
+func startTestServer(t *testing.T) (*server.Server, string) {
+	t.Helper()
+	cfg := config.ServerConfig{
+		Host:      "127.0.0.1",
+		Port:      0,
+		MaxGuests: 0,
+	}
+	srv := server.New(cfg)
+	hub := srv.Hub()
+	go hub.Run()
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/ws", srv.HandleWebSocket)
+
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	go func() { _ = http.Serve(ln, mux) }()
+	t.Cleanup(func() { _ = ln.Close() })
+
+	return srv, fmt.Sprintf("ws://127.0.0.1:%d/ws", ln.Addr().(*net.TCPAddr).Port)
 }
 
 func TestNewGuest(t *testing.T) {
@@ -1316,35 +1344,152 @@ func TestGuestUnregister_NilClient(t *testing.T) {
 	}
 }
 
+// TestGuestExecuteTask_NilClient verifies that ExecuteTask is safe when
+// the RPC client is nil (issue #72): the task.acknowledge call is skipped
+// (observable via the intercepted hub handler receiving zero calls), the
+// handler still runs, and the result is returned without a panic. A real
+// connection is established first and then cleared, mirroring the
+// reconnect window in which a task is still in flight.
+func TestGuestExecuteTask_NilClient(t *testing.T) {
+	srv, wsURL := startTestServer(t)
+
+	var ackCount int64
+	srv.Hub().RegisterMethod("task.acknowledge",
+		func(_ context.Context, _ json.RawMessage) (interface{}, *rpc.RPCError) {
+			atomic.AddInt64(&ackCount, 1)
+			return map[string]interface{}{"status": "ok"}, nil
+		})
+
+	gcfg := config.GuestConfig{
+		Name: "Ack Guest",
+		Tags: []string{"test"},
+		URL:  wsURL,
+	}
+	handlerRan := false
+	g := New(gcfg, func(_ context.Context, task TaskAssignment, _ LogCallback) (*TaskResult, error) {
+		handlerRan = true
+		return &TaskResult{TaskID: task.TaskID, Success: true, Output: "ok"}, nil
+	})
+	if err := g.Connect(); err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	if err := g.Register(); err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	t.Cleanup(func() {
+		g.Stop()
+		if c := g.rpcClient(); c != nil {
+			c.Close()
+		}
+	})
+
+	// Simulate the reconnect window: the connection is lost and the
+	// client is cleared while a task is about to be executed.
+	g.setRPCClient(nil)
+
+	result, err := g.ExecuteTask(TaskAssignment{TaskID: "task-1", Prompt: "p"})
+	if err != nil {
+		t.Fatalf("ExecuteTask with nil client: %v", err)
+	}
+	if result == nil || !result.Success {
+		t.Fatalf("expected successful result, got %+v", result)
+	}
+	if !handlerRan {
+		t.Error("handler did not run")
+	}
+	if n := atomic.LoadInt64(&ackCount); n != 0 {
+		t.Errorf("task.acknowledge should be skipped with a nil client, got %d calls", n)
+	}
+}
+
+// TestGuestExecuteTask_LiveClient verifies that ExecuteTask sends
+// task.acknowledge when the RPC client is connected (issue #72): the
+// intercepted hub handler observes exactly one call carrying the task
+// and guest IDs.
+func TestGuestExecuteTask_LiveClient(t *testing.T) {
+	srv, wsURL := startTestServer(t)
+
+	var (
+		ackMu    sync.Mutex
+		ackCount int
+		ackTask  string
+		ackGuest string
+	)
+	srv.Hub().RegisterMethod("task.acknowledge",
+		func(_ context.Context, params json.RawMessage) (interface{}, *rpc.RPCError) {
+			var req struct {
+				TaskID  string `json:"task_id"`
+				GuestID string `json:"guest_id"`
+			}
+			_ = json.Unmarshal(params, &req)
+			ackMu.Lock()
+			ackCount++
+			ackTask = req.TaskID
+			ackGuest = req.GuestID
+			ackMu.Unlock()
+			return map[string]interface{}{"status": "ok"}, nil
+		})
+
+	gcfg := config.GuestConfig{
+		Name: "Ack Guest",
+		Tags: []string{"test"},
+		URL:  wsURL,
+	}
+	g := New(gcfg, func(_ context.Context, task TaskAssignment, _ LogCallback) (*TaskResult, error) {
+		return &TaskResult{TaskID: task.TaskID, Success: true, Output: "ok"}, nil
+	})
+	if err := g.Connect(); err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	if err := g.Register(); err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	t.Cleanup(func() {
+		g.Stop()
+		if c := g.rpcClient(); c != nil {
+			c.Close()
+		}
+	})
+
+	result, err := g.ExecuteTask(TaskAssignment{TaskID: "task-1", Prompt: "p"})
+	if err != nil {
+		t.Fatalf("ExecuteTask with live client: %v", err)
+	}
+	if result == nil || !result.Success {
+		t.Fatalf("expected successful result, got %+v", result)
+	}
+
+	// ExecuteTask's task.acknowledge Call is synchronous, so by the time
+	// it returns the hub handler has already run (happens-before via the
+	// return) and the values below are safe to read without a lock.
+	ackMu.Lock()
+	count, taskID, guestID := ackCount, ackTask, ackGuest
+	ackMu.Unlock()
+	if count != 1 {
+		t.Fatalf("expected exactly one task.acknowledge call, got %d", count)
+	}
+	if taskID != "task-1" {
+		t.Errorf("acknowledged task %q, want %q", taskID, "task-1")
+	}
+	if guestID != g.id {
+		t.Errorf("acknowledged guest %q, want %q", guestID, g.id)
+	}
+}
+
 // TestGuestSendLog_ConcurrentWithClientClear verifies that SendLog is safe
 // to call concurrently with the reconnect loop clearing the client: no
-// panic, no data race (issue #72). Before the fix, SendLog read g.client
-// without the mutex while the writer flipped it, which the race detector
-// flags; the nil window also produced the production SIGSEGV. A real
-// connection is used so that a non-nil client always has a live conn —
-// the production invariant (a client is only stored after Connect
-// succeeds, and cleared to nil when the connection is lost).
+// panic, no data race (issue #72). One goroutine hammers SendLog as the
+// pi event loop does while another flips g.client between the live client
+// and nil as the reconnect loop does; they are joined with a WaitGroup
+// and a stop channel. Before the fix, SendLog read g.client without the
+// mutex while the writer flipped it, which the race detector flags; the
+// nil window also produced the production SIGSEGV. A real connection is
+// used so that a non-nil client always has a live conn — the production
+// invariant (a client is only stored after Connect succeeds, and cleared
+// to nil when the connection is lost).
 func TestGuestSendLog_ConcurrentWithClientClear(t *testing.T) {
-	cfg := config.ServerConfig{
-		Host:      "127.0.0.1",
-		Port:      0,
-		MaxGuests: 0,
-	}
-	srv := server.New(cfg)
-	hub := srv.Hub()
-	go hub.Run()
+	_, wsURL := startTestServer(t)
 
-	mux := http.NewServeMux()
-	mux.HandleFunc("/ws", srv.HandleWebSocket)
-
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("listen: %v", err)
-	}
-	go func() { _ = http.Serve(ln, mux) }()
-	t.Cleanup(func() { _ = ln.Close() })
-
-	wsURL := fmt.Sprintf("ws://127.0.0.1:%d/ws", ln.Addr().(*net.TCPAddr).Port)
 	gcfg := config.GuestConfig{
 		Name:              "Race Guest",
 		Tags:              []string{"test"},
@@ -1368,28 +1513,51 @@ func TestGuestSendLog_ConcurrentWithClientClear(t *testing.T) {
 		}
 	})
 
-	done := make(chan struct{})
-	var panicked bool
+	stop := make(chan struct{})
+	var wg sync.WaitGroup
+	var panicked atomic.Bool
+
+	// Hammer SendLog in a tight loop, as the pi event loop does.
+	wg.Add(1)
 	go func() {
+		defer wg.Done()
 		defer func() {
 			if r := recover(); r != nil {
-				panicked = true
+				panicked.Store(true)
 			}
-			close(done)
+		}()
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			_ = g.SendLog(LogEntry{TaskID: "task-1", Line: "x"})
+		}
+	}()
+
+	// Flip the client between the live client and nil, as the reconnect
+	// loop does, then signal the hammer to stop.
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		defer func() {
+			if r := recover(); r != nil {
+				panicked.Store(true)
+			}
 		}()
 		for i := 0; i < 2000; i++ {
-			_ = g.SendLog(LogEntry{TaskID: "task-1", Line: "x"})
-			// Flip the client between the live client and nil, as the
-			// reconnect loop does, to exercise the check-then-use window.
 			if i%100 == 0 {
 				g.setRPCClient(connected)
 			} else if i%100 == 50 {
 				g.setRPCClient(nil)
 			}
 		}
+		close(stop)
 	}()
-	<-done
-	if panicked {
-		t.Fatal("SendLog panicked while client was being cleared")
+
+	wg.Wait()
+	if panicked.Load() {
+		t.Fatal("SendLog panicked while the client was being flipped concurrently")
 	}
 }
