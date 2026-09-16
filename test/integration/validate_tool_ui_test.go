@@ -2655,6 +2655,83 @@ const { chromium } = require('playwright');
   // =====================================================================
   console.log('=== Phase 13: Compaction block rendering ===');
 
+  // --- Unit-style regression: compaction flushes a pending tool block ---
+  // When a compaction event arrives while a tool block is still open, both
+  // render paths must flush it with the full 8-argument
+  // buildToolBlockHTML signature (argsJSON included). The compaction-flush
+  // call sites once kept the pre-argsJSON 7-argument signature after a
+  // rebase, which rendered the literal string "running" as the block's
+  // output, dropped the real output and entry counter, and shifted the
+  // timestamp to the epoch. The compaction capture contains no tool calls,
+  // so the user-flow checks below cannot reach this branch — drive it
+  // directly with a synthetic start → output → compaction-end sequence.
+  const flushResult = await page.evaluate(() => {
+    const startTs = '2026-09-15T10:00:00Z';
+    const logs = [
+      { level: 'tool', tool_type: 'start', tool_name: 'bash', tool_id: 'unit-flush-1',
+        tool_args: 'command: ls', tool_args_json: '{"command":"ls"}',
+        timestamp: startTs, line: '[TOOL_START] bash' },
+      { level: 'tool', tool_type: 'output', tool_id: 'unit-flush-1',
+        tool_output: 'real-output-here\n', timestamp: startTs,
+        line: '[TOOL_OUTPUT] real-output-here' },
+      { level: 'compaction', compaction_type: 'end', compaction_reason: 'manual',
+        compaction_tokens_before: 100, compaction_tokens_after: 50,
+        compaction_summary: 'unit summary', timestamp: startTs,
+        line: '[COMPACTION_END] manual' },
+    ];
+    const task = { id: 'unit-flush-task', status: 'RUNNING', prompt: 'unit flush check' };
+
+    function inspect(scope) {
+      if (!scope) return { hasBlock: false, hasCompaction: false };
+      const block = scope.querySelector('.tool-block');
+      const pre = block ? block.querySelector('.tool-output pre') : null;
+      const ts = block ? block.querySelector('.block-timestamp') : null;
+      const counter = block ? block.querySelector('.block-counter') : null;
+      const status = block ? block.querySelector('.tool-status') : null;
+      return {
+        hasBlock: !!block,
+        output: pre ? pre.textContent.trim() : null,
+        timestamp: ts ? ts.textContent.trim() : null,
+        counter: counter ? counter.textContent.trim() : null,
+        statusLabel: status ? status.textContent.trim() : null,
+        hasCompaction: scope.querySelector('.compaction-block') !== null,
+      };
+    }
+
+    const out = {};
+    // Task-detail render path (renderTaskDetail)
+    renderTaskDetail(task, logs, logs.length);
+    out.detail = inspect(document.querySelector('#log-view .task-detail-body'));
+    // Log-entries render path (renderLogEntries)
+    renderLogEntries('2026-09-15', 'unit-flush-task', logs, logs.length);
+    out.entries = inspect(document.querySelector('#log-entries-list'));
+    out.expectedTimestamp = formatTimestamp(startTs);
+    return out;
+  });
+
+  const flushChecks = [];
+  for (const [pathName, r] of [['detail', flushResult.detail], ['entries', flushResult.entries]]) {
+    flushChecks.push(
+      { name: pathName + ': pending tool block flushed before compaction block', pass: r.hasBlock && r.hasCompaction },
+      { name: pathName + ': flushed output is the real output, not "running"', pass: r.output === 'real-output-here' },
+      { name: pathName + ': flushed status label is done', pass: r.statusLabel === 'done' },
+      { name: pathName + ': flushed timestamp is the entry timestamp, not the epoch', pass: r.timestamp === flushResult.expectedTimestamp },
+      { name: pathName + ': flushed entry counter is 2 (start + output)', pass: r.counter === '2' },
+    );
+  }
+  let flushFailed = false;
+  for (const check of flushChecks) {
+    if (!check.pass) { console.error('FAIL:', check.name); flushFailed = true; }
+    else { console.log('PASS:', check.name); }
+  }
+  if (flushFailed) {
+    console.error('flush detail result:', JSON.stringify(flushResult.detail));
+    console.error('flush entries result:', JSON.stringify(flushResult.entries));
+    await takeScreenshot('13-compaction-flush-failed');
+    process.exit(1);
+  }
+  await takeScreenshot('13-compaction-flush');
+
   // Navigate to Tasks tab
   await page.locator('.tab').filter({ hasText: 'Tasks' }).click();
   await page.waitForFunction(() => {

@@ -1447,7 +1447,7 @@
                         if (currentToolBlock) {
                             logsHtml += buildToolBlockHTML(
                                 currentToolBlock.toolName, currentToolBlock.toolId,
-                                currentToolBlock.args, currentToolBlock.output, 'running',
+                                currentToolBlock.args, currentToolBlock.argsJSON, currentToolBlock.output, 'running',
                                 currentToolBlock.timestamp, currentToolBlock.entryCount
                             );
                             currentToolBlock = null;
@@ -2477,7 +2477,7 @@
                         if (currentToolBlock) {
                             entriesHtml += buildToolBlockHTML(
                                 currentToolBlock.toolName, currentToolBlock.toolId,
-                                currentToolBlock.args, currentToolBlock.output, 'running',
+                                currentToolBlock.args, currentToolBlock.argsJSON, currentToolBlock.output, 'running',
                                 currentToolBlock.timestamp, currentToolBlock.entryCount
                             );
                             currentToolBlock = null;
