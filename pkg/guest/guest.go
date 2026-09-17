@@ -331,24 +331,70 @@ func (g *Guest) Register() error {
 }
 
 // taskDispatcher runs tasks sequentially as they arrive.
-func (g *Guest) taskDispatcher() {
+//
+// The context is cancelled when the connection is lost (or the guest stops),
+// which exits the dispatcher. Without this, each reconnection in Start()
+// spawned a new dispatcher while the old one lingered on taskCh; an idle
+// duplicate dispatcher would pick up a task while the guest was still busy
+// with a task from the previous connection and decline it, driving the
+// server into an assign→decline→reassign loop (issue #186).
+func (g *Guest) taskDispatcher(ctx context.Context) {
 	for {
 		select {
+		case <-ctx.Done():
+			return
 		case <-g.stopCh:
 			return
 		case task := <-g.taskCh:
 			g.log.Printf("[DISPATCH] starting task %s", task.TaskID)
+			// Wait for the guest to become idle before executing. The server
+			// can assign a task to a guest it believes is idle while the
+			// guest is still running a task from a previous connection (the
+			// registry marks the guest IDLE when its connection drops).
+			// Declining that assignment used to send the task back to the
+			// server, which reassigned it to another busy guest that declined
+			// it again — an infinite loop (issue #186). Running the task
+			// after the current one completes is safe: the server's liveness
+			// probe keys off the guest's heartbeat, not the exact task ID.
+			if !g.waitForIdle(ctx) {
+				return
+			}
 			result, err := g.ExecuteTask(task)
 			if err != nil {
 				g.log.Printf("[DISPATCH] task %s error: %v", task.TaskID, err)
-				// If the guest is already running a task, decline the assignment
-				// so the server can re-queue it for another guest.
+				// Defensive fallback: the guest became busy between the idle
+				// check and ExecuteTask. Decline so the server can re-queue
+				// the task. Only reachable if two dispatchers transiently
+				// overlap during a reconnection; the decline is one-shot and
+				// cannot re-form the #186 loop.
 				if strings.Contains(err.Error(), "already running a task") {
 					g.DeclineTask(task.TaskID, err.Error())
 				}
 			} else {
 				g.log.Printf("[DISPATCH] task %s finished: success=%v output=%q", task.TaskID, result.Success, result.Output)
 			}
+		}
+	}
+}
+
+// waitForIdle blocks until the guest is no longer running a task. It
+// returns false if the context is cancelled (connection lost) or the guest
+// is stopping; the dispatcher then exits and the server re-queues any
+// assigned task when the connection drops.
+func (g *Guest) waitForIdle(ctx context.Context) bool {
+	for {
+		g.mu.Lock()
+		running := g.running
+		g.mu.Unlock()
+		if !running {
+			return true
+		}
+		select {
+		case <-ctx.Done():
+			return false
+		case <-g.stopCh:
+			return false
+		case <-time.After(50 * time.Millisecond):
 		}
 	}
 }
@@ -498,20 +544,28 @@ func (g *Guest) Start() error {
 			continue
 		}
 
+		// Per-connection context: cancelled when the connection is lost so
+		// the goroutines below exit instead of lingering and competing with
+		// their replacements after reconnection.
+		connCtx, cancelConn := context.WithCancel(context.Background())
+
 		// Start heartbeat goroutine
-		go g.heartbeatLoop()
+		go g.heartbeatLoop(connCtx)
 
 		// Start task dispatcher — handles incoming task.assign notifications
-		go g.taskDispatcher()
+		go g.taskDispatcher(connCtx)
 
 		// Wait for shutdown or connection loss
 		g.log.Printf("guest ready, waiting for tasks...")
 		select {
 		case <-g.stopCh:
+			cancelConn()
 			g.log.Printf("guest shutting down")
 			return nil
 		case <-g.connLost:
 			g.log.Printf("connection lost, reconnecting...")
+			// Cancel the connection context so the old goroutines exit.
+			cancelConn()
 			// Clean up the dead connection
 			if c := g.rpcClient(); c != nil {
 				c.Close()
@@ -573,7 +627,7 @@ func isGuestNotFound(err error) bool {
 	return false
 }
 
-func (g *Guest) heartbeatLoop() {
+func (g *Guest) heartbeatLoop(ctx context.Context) {
 	interval := g.config.HeartbeatInterval
 	if interval == 0 {
 		interval = 30 // default 30 seconds
@@ -584,6 +638,8 @@ func (g *Guest) heartbeatLoop() {
 
 	for {
 		select {
+		case <-ctx.Done():
+			return
 		case <-ticker.C:
 			heartbeatFn := g.heartbeatForTest
 			if heartbeatFn == nil {
