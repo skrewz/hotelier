@@ -364,7 +364,9 @@ func (g *Guest) taskDispatcher(ctx context.Context) {
 				g.log.Printf("[DISPATCH] task %s error: %v", task.TaskID, err)
 				// Defensive fallback: the guest became busy between the idle
 				// check and ExecuteTask. Decline so the server can re-queue
-				// the task. Unreachable with a single dispatcher.
+				// the task. Only reachable if two dispatchers transiently
+				// overlap during a reconnection; the decline is one-shot and
+				// cannot re-form the #186 loop.
 				if strings.Contains(err.Error(), "already running a task") {
 					g.DeclineTask(task.TaskID, err.Error())
 				}
