@@ -133,6 +133,7 @@ type Task struct {
 	Timeout    int        `json:"timeout,omitempty"`     // seconds, 0 = unlimited
 	Result     string     `json:"result,omitempty"`
 	Error      string     `json:"error,omitempty"`
+	DedupKey   string     `json:"dedup_key,omitempty"` // optional dedup key: submissions matching a PENDING task's key are squelched
 }
 
 // TaskQueue manages pending and active tasks.
@@ -157,6 +158,39 @@ func (q *TaskQueue) Add(task *Task) error {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 
+	return q.addLocked(task)
+}
+
+// AddOrDedup adds a new task to the queue, with deduplication on the task's
+// DedupKey. If the task has a non-empty DedupKey and a PENDING task with the
+// same key already exists, the new task is not added; the existing pending
+// task is returned with deduplicated=true. Only PENDING tasks are compared —
+// ASSIGNED, RUNNING, and terminal states do not block a new submission. An
+// empty DedupKey disables deduplication entirely.
+//
+// The check and the add happen under a single lock, so concurrent
+// submissions with the same key cannot both be added.
+func (q *TaskQueue) AddOrDedup(task *Task) (existing *Task, deduplicated bool, err error) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+
+	if task.DedupKey != "" {
+		for _, t := range q.ordered {
+			if t.Status == TaskStatusPending && t.DedupKey == task.DedupKey {
+				q.logf("task %s squelched: dedup_key %q matches pending task %s", task.ID, task.DedupKey, t.ID)
+				return t, true, nil
+			}
+		}
+	}
+
+	if err := q.addLocked(task); err != nil {
+		return nil, false, err
+	}
+	return task, false, nil
+}
+
+// addLocked adds a task to the queue. The caller must hold q.mu.
+func (q *TaskQueue) addLocked(task *Task) error {
 	if _, exists := q.tasks[task.ID]; exists {
 		return fmt.Errorf("task %s already exists", task.ID)
 	}

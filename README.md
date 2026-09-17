@@ -109,13 +109,31 @@ Via REST API:
 curl -X POST http://localhost:8080/api/tasks \
   -H 'Content-Type: application/json' \
   -d '{
-    "repos": ["/path/to/repo"],
     "prompt": "Implement feature X",
     "tags": ["business-default"]
   }'
 ```
 
 Or through the web UI dashboard.
+
+### Deduplication
+
+Tasks may carry an optional `dedup_key`. When a task is submitted with a
+`dedup_key` that matches a currently **pending** task, the new submission is
+silently squelched — no new task is created — and the existing task is
+returned with HTTP 200 and `"dedup": true`. Assigned, running, and finished
+tasks do not block a new submission, and tasks without a `dedup_key` are
+never deduplicated.
+
+```bash
+curl -X POST http://localhost:8080/api/tasks \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "prompt": "Deploy service 42",
+    "dedup_key": "deploy-service-42"
+  }'
+# 200 { "task": { ...existing pending task... }, "dedup": true, "dedup_key": "deploy-service-42" }
+```
 
 ## API Endpoints
 

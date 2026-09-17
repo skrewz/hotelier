@@ -121,6 +121,51 @@ func TestAddTask(t *testing.T) {
 	}
 }
 
+// --- AddTaskOrDedup ---
+
+func TestAddTaskOrDedup_MatchReturnsExistingPending(t *testing.T) {
+	orch := newTestOrchestrator(t)
+
+	first := &queue.Task{ID: "task-1", Prompt: "first", DedupKey: "key-1"}
+	if err := orch.AddTask(first); err != nil {
+		t.Fatalf("AddTask failed: %v", err)
+	}
+
+	second := &queue.Task{ID: "task-2", Prompt: "duplicate", DedupKey: "key-1"}
+	existing, deduplicated, err := orch.AddTaskOrDedup(second)
+	if err != nil {
+		t.Fatalf("AddTaskOrDedup failed: %v", err)
+	}
+	if !deduplicated {
+		t.Fatal("expected deduplicated=true")
+	}
+	if existing.ID != "task-1" {
+		t.Errorf("expected existing task task-1, got %s", existing.ID)
+	}
+	if _, ok := orch.GetTask("task-2"); ok {
+		t.Error("expected task-2 not to be added")
+	}
+}
+
+func TestAddTaskOrDedup_NoMatchAddsTask(t *testing.T) {
+	orch := newTestOrchestrator(t)
+
+	task := &queue.Task{ID: "task-1", Prompt: "first", DedupKey: "key-1"}
+	existing, deduplicated, err := orch.AddTaskOrDedup(task)
+	if err != nil {
+		t.Fatalf("AddTaskOrDedup failed: %v", err)
+	}
+	if deduplicated {
+		t.Fatal("expected deduplicated=false")
+	}
+	if existing.ID != "task-1" {
+		t.Errorf("expected task-1, got %s", existing.ID)
+	}
+	if got, ok := orch.GetTask("task-1"); !ok || got.Status != queue.TaskStatusPending {
+		t.Errorf("expected task-1 to exist in PENDING state")
+	}
+}
+
 // --- AssignTask (atomic: task PENDING→ASSIGNED, guest IDLE→RUNNING) ---
 
 func TestAssignTask_AtomicStateChange(t *testing.T) {

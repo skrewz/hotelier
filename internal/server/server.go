@@ -1380,6 +1380,7 @@ func (s *Server) handleGetTasks(w http.ResponseWriter, r *http.Request) {
 			"timeout":     t.Timeout,
 			"result":      t.Result,
 			"error":       t.Error,
+			"dedup_key":   t.DedupKey,
 			"log_count":   s.logStore.Count(t.ID),
 		}
 		taskList[i] = taskMap
@@ -1435,8 +1436,23 @@ func (s *Server) handleCreateTask(w http.ResponseWriter, r *http.Request) {
 		task.ID = fmt.Sprintf("task-%d", time.Now().UnixNano())
 	}
 
-	if err := s.orchestrator.AddTask(&task); err != nil {
+	// Add with deduplication: if the task carries a dedup_key that matches a
+	// PENDING task, the submission is squelched and the existing task is
+	// returned instead (no new task is created or assigned).
+	added, deduplicated, err := s.orchestrator.AddTaskOrDedup(&task)
+	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	if deduplicated {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"task":      added,
+			"dedup":     true,
+			"dedup_key": added.DedupKey,
+		})
 		return
 	}
 

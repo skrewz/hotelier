@@ -107,6 +107,16 @@ func (o *Orchestrator) AddTask(task *queue.Task) error {
 	return o.queue.Add(task)
 }
 
+// AddTaskOrDedup adds a new task to the queue in PENDING state, with
+// deduplication on the task's DedupKey. See TaskQueue.AddOrDedup for the
+// deduplication semantics.
+func (o *Orchestrator) AddTaskOrDedup(task *queue.Task) (*queue.Task, bool, error) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+
+	return o.queue.AddOrDedup(task)
+}
+
 // GetTask returns a task by ID.
 func (o *Orchestrator) GetTask(taskID string) (*queue.Task, bool) {
 	o.mu.Lock()

@@ -4272,3 +4272,180 @@ func TestHandleGuestDisconnect_NoTask(t *testing.T) {
 		t.Errorf("expected guest IDLE, got %s", guest.State)
 	}
 }
+
+// --- dedup_key tests ---
+
+// TestHandleTasks_POST_DedupKeySquelchesDuplicate verifies that submitting a
+// task with a dedup_key that matches a PENDING task is squelched: the
+// response is 200 with dedup=true and the existing task, and no new task is
+// created.
+func TestHandleTasks_POST_DedupKeySquelchesDuplicate(t *testing.T) {
+	srv := newTestServer(t)
+
+	task := map[string]interface{}{
+		"prompt":    "Deploy service",
+		"dedup_key": "deploy-service-42",
+	}
+	body, _ := json.Marshal(task)
+	req := httptest.NewRequest(http.MethodPost, "/api/tasks", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	srv.HandleTasks(w, req)
+
+	if w.Code != http.StatusCreated {
+		t.Fatalf("expected 201 for first task, got %d", w.Code)
+	}
+	var createdTask queue.Task
+	if err := json.Unmarshal(w.Body.Bytes(), &createdTask); err != nil {
+		t.Fatalf("failed to unmarshal first response: %v", err)
+	}
+
+	// Submit a duplicate with the same dedup_key
+	body2, _ := json.Marshal(task)
+	req2 := httptest.NewRequest(http.MethodPost, "/api/tasks", bytes.NewReader(body2))
+	req2.Header.Set("Content-Type", "application/json")
+	w2 := httptest.NewRecorder()
+	srv.HandleTasks(w2, req2)
+
+	if w2.Code != http.StatusOK {
+		t.Fatalf("expected 200 for squelched duplicate, got %d", w2.Code)
+	}
+
+	var dedupResponse struct {
+		Task     queue.Task `json:"task"`
+		Dedup    bool       `json:"dedup"`
+		DedupKey string     `json:"dedup_key"`
+	}
+	if err := json.Unmarshal(w2.Body.Bytes(), &dedupResponse); err != nil {
+		t.Fatalf("failed to unmarshal dedup response: %v", err)
+	}
+	if !dedupResponse.Dedup {
+		t.Error("expected dedup=true in response")
+	}
+	if dedupResponse.DedupKey != "deploy-service-42" {
+		t.Errorf("expected dedup_key 'deploy-service-42', got %q", dedupResponse.DedupKey)
+	}
+	if dedupResponse.Task.ID != createdTask.ID {
+		t.Errorf("expected existing task %s, got %s", createdTask.ID, dedupResponse.Task.ID)
+	}
+
+	if got := srv.TaskQueue().Count(); got != 1 {
+		t.Errorf("expected 1 task in queue, got %d", got)
+	}
+}
+
+// TestHandleTasks_POST_DedupKeyAllowsAfterNonPending verifies that a task
+// with the same dedup_key is allowed once the original task is no longer
+// PENDING.
+func TestHandleTasks_POST_DedupKeyAllowsAfterNonPending(t *testing.T) {
+	srv := newTestServer(t)
+
+	task := map[string]interface{}{
+		"prompt":    "Deploy service",
+		"dedup_key": "deploy-service-43",
+	}
+	body, _ := json.Marshal(task)
+	req := httptest.NewRequest(http.MethodPost, "/api/tasks", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	srv.HandleTasks(w, req)
+
+	if w.Code != http.StatusCreated {
+		t.Fatalf("expected 201 for first task, got %d", w.Code)
+	}
+	var createdTask queue.Task
+	if err := json.Unmarshal(w.Body.Bytes(), &createdTask); err != nil {
+		t.Fatalf("failed to unmarshal first response: %v", err)
+	}
+
+	// Move the original task out of PENDING
+	if err := srv.TaskQueue().Assign(createdTask.ID, "guest-1"); err != nil {
+		t.Fatalf("assign failed: %v", err)
+	}
+
+	// A new task with the same dedup_key must now be accepted
+	body2, _ := json.Marshal(task)
+	req2 := httptest.NewRequest(http.MethodPost, "/api/tasks", bytes.NewReader(body2))
+	req2.Header.Set("Content-Type", "application/json")
+	w2 := httptest.NewRecorder()
+	srv.HandleTasks(w2, req2)
+
+	if w2.Code != http.StatusCreated {
+		t.Fatalf("expected 201 for new task after original left PENDING, got %d", w2.Code)
+	}
+	var newTask queue.Task
+	if err := json.Unmarshal(w2.Body.Bytes(), &newTask); err != nil {
+		t.Fatalf("failed to unmarshal second response: %v", err)
+	}
+	if newTask.ID == createdTask.ID {
+		t.Error("expected a new task ID, got the original")
+	}
+	if got := srv.TaskQueue().Count(); got != 2 {
+		t.Errorf("expected 2 tasks in queue, got %d", got)
+	}
+}
+
+// TestHandleTasks_POST_NoDedupKeyAlwaysCreates verifies that tasks without a
+// dedup_key are never squelched, even with identical prompts.
+func TestHandleTasks_POST_NoDedupKeyAlwaysCreates(t *testing.T) {
+	srv := newTestServer(t)
+
+	task := map[string]interface{}{
+		"prompt": "Identical prompt",
+	}
+	for i := 0; i < 2; i++ {
+		body, _ := json.Marshal(task)
+		req := httptest.NewRequest(http.MethodPost, "/api/tasks", bytes.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		w := httptest.NewRecorder()
+		srv.HandleTasks(w, req)
+		if w.Code != http.StatusCreated {
+			t.Fatalf("expected 201 for task %d, got %d", i+1, w.Code)
+		}
+	}
+
+	if got := srv.TaskQueue().Count(); got != 2 {
+		t.Errorf("expected 2 tasks in queue, got %d", got)
+	}
+}
+
+// TestHandleTasks_GET_IncludesDedupKey verifies that GET /api/tasks exposes
+// the dedup_key field.
+func TestHandleTasks_GET_IncludesDedupKey(t *testing.T) {
+	srv := newTestServer(t)
+
+	task := map[string]interface{}{
+		"prompt":    "Deploy service",
+		"dedup_key": "deploy-service-44",
+	}
+	body, _ := json.Marshal(task)
+	req := httptest.NewRequest(http.MethodPost, "/api/tasks", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	srv.HandleTasks(w, req)
+
+	if w.Code != http.StatusCreated {
+		t.Fatalf("expected 201, got %d", w.Code)
+	}
+
+	listReq := httptest.NewRequest(http.MethodGet, "/api/tasks", nil)
+	listW := httptest.NewRecorder()
+	srv.HandleTasks(listW, listReq)
+
+	if listW.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", listW.Code)
+	}
+
+	var response struct {
+		Tasks []map[string]interface{} `json:"tasks"`
+	}
+	if err := json.Unmarshal(listW.Body.Bytes(), &response); err != nil {
+		t.Fatalf("failed to unmarshal: %v", err)
+	}
+	if len(response.Tasks) != 1 {
+		t.Fatalf("expected 1 task, got %d", len(response.Tasks))
+	}
+	if got := response.Tasks[0]["dedup_key"]; got != "deploy-service-44" {
+		t.Errorf("expected dedup_key 'deploy-service-44', got %v", got)
+	}
+}
