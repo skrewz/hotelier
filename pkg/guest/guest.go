@@ -216,16 +216,18 @@ func (g *Guest) registerNotificationHandlers() {
 		// Confirm cancellation to the server. The guest is the authority on
 		// whether the task was actually stopped. The client may be nil while
 		// no connection exists (the handlers now live from construction
-		// time); skip the confirmation rather than panic.
-		if g.client == nil {
+		// time); skip the confirmation rather than panic. The accessor
+		// makes the check-then-use atomic with the reconnect loop clearing
+		// the client (issue #72).
+		if c := g.rpcClient(); c != nil {
+			_, _ = c.Call("guest.cancelled", map[string]interface{}{
+				"task_id":  cancel.TaskID,
+				"guest_id": g.id,
+				"reason":   cancel.Reason,
+			})
+		} else {
 			g.log.Printf("[RPC] no connection, skipping guest.cancelled confirmation for %s", cancel.TaskID)
-			return
 		}
-		_, _ = g.client.Call("guest.cancelled", map[string]interface{}{
-			"task_id":  cancel.TaskID,
-			"guest_id": g.id,
-			"reason":   cancel.Reason,
-		})
 	})
 }
 
@@ -259,10 +261,28 @@ func (g *Guest) Connect() error {
 			return fmt.Errorf("connect: %w", err)
 		}
 	}
-	g.client = client
-	g.client.SetOnClose(g.setConnLost)
+	g.setRPCClient(client)
+	client.SetOnClose(g.setConnLost)
 	g.log.Printf("connected to host")
 	return nil
+}
+
+// rpcClient returns the current RPC client, or nil if the guest is not
+// connected (e.g. while the Start loop is reconnecting). The read is
+// mutex-protected so concurrent callers never race with the reconnect
+// loop clearing the client (issue #72).
+func (g *Guest) rpcClient() *rpc.Client {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return g.client
+}
+
+// setRPCClient stores the current RPC client. Pass nil to mark the guest
+// as disconnected.
+func (g *Guest) setRPCClient(c *rpc.Client) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.client = c
 }
 
 // setConnLost signals that the connection has been lost.
@@ -296,7 +316,12 @@ func (g *Guest) Register() error {
 		"tags": g.tags,
 	}
 
-	_, err := g.client.Call("guest.register", params)
+	c := g.rpcClient()
+	if c == nil {
+		return fmt.Errorf("register: not connected")
+	}
+
+	_, err := c.Call("guest.register", params)
 	if err != nil {
 		return fmt.Errorf("register: %w", err)
 	}
@@ -334,7 +359,12 @@ func (g *Guest) Unregister() error {
 		"id": g.id,
 	}
 
-	_, err := g.client.Call("guest.unregister", params)
+	c := g.rpcClient()
+	if c == nil {
+		return fmt.Errorf("unregister: not connected")
+	}
+
+	_, err := c.Call("guest.unregister", params)
 	if err != nil {
 		return fmt.Errorf("unregister: %w", err)
 	}
@@ -357,9 +387,14 @@ func (g *Guest) Heartbeat() error {
 		"task_id": taskID,
 	}
 
+	c := g.rpcClient()
+	if c == nil {
+		return fmt.Errorf("heartbeat: not connected")
+	}
+
 	var lastErr error
 	for attempt := 0; attempt < 3; attempt++ {
-		_, err := g.client.Call("guest.heartbeat", params)
+		_, err := c.Call("guest.heartbeat", params)
 		if err == nil {
 			return nil
 		}
@@ -381,7 +416,14 @@ func (g *Guest) SendLog(entry LogEntry) error {
 		entry.Level = "info"
 	}
 
-	err := g.client.SendNotification("guest.log", entry)
+	c := g.rpcClient()
+	if c == nil {
+		// The guest is reconnecting; the log line is dropped rather than
+		// crashing the process (issue #72).
+		return fmt.Errorf("send log: not connected")
+	}
+
+	err := c.SendNotification("guest.log", entry)
 	if err != nil {
 		return fmt.Errorf("send log: %w", err)
 	}
@@ -391,9 +433,14 @@ func (g *Guest) SendLog(entry LogEntry) error {
 // SendResult submits the final result of a task to the Check-In Host.
 // Retries with exponential backoff (3 attempts) on failure.
 func (g *Guest) SendResult(result TaskResult) error {
+	c := g.rpcClient()
+	if c == nil {
+		return fmt.Errorf("send result: not connected")
+	}
+
 	var lastErr error
 	for attempt := 0; attempt < 3; attempt++ {
-		err := g.client.SendNotification("guest.result", result)
+		err := c.SendNotification("guest.result", result)
 		if err == nil {
 			return nil
 		}
@@ -416,9 +463,15 @@ func (g *Guest) DeclineTask(taskID, reason string) {
 		"reason":   reason,
 	}
 
+	c := g.rpcClient()
+	if c == nil {
+		g.log.Printf("[DISPATCH] cannot decline task %s: not connected", taskID)
+		return
+	}
+
 	var lastErr error
 	for attempt := 0; attempt < 3; attempt++ {
-		_, err := g.client.Call("guest.task_declined", params)
+		_, err := c.Call("guest.task_declined", params)
 		if err == nil {
 			g.log.Printf("[DISPATCH] declined task %s: %s", taskID, reason)
 			return
@@ -460,9 +513,9 @@ func (g *Guest) Start() error {
 		case <-g.connLost:
 			g.log.Printf("connection lost, reconnecting...")
 			// Clean up the dead connection
-			if g.client != nil {
-				g.client.Close()
-				g.client = nil
+			if c := g.rpcClient(); c != nil {
+				c.Close()
+				g.setRPCClient(nil)
 			}
 		}
 
@@ -479,8 +532,10 @@ func (g *Guest) connectAndRegister() error {
 	}
 
 	if err := g.Register(); err != nil {
-		g.client.Close()
-		g.client = nil
+		if c := g.rpcClient(); c != nil {
+			c.Close()
+		}
+		g.setRPCClient(nil)
 		return err
 	}
 
@@ -564,14 +619,21 @@ func (g *Guest) ExecuteTask(task TaskAssignment) (*TaskResult, error) {
 	// prevents the server from reassigning the task to this guest if
 	// ExecuteTask fails and the guest declines — FindAvailableGuests
 	// will not return a guest whose registry state is RUNNING.
-	_, err := g.client.Call("task.acknowledge", map[string]interface{}{
-		"task_id":  task.TaskID,
-		"guest_id": g.id,
-	})
-	if err != nil {
-		g.log.Printf("[DISPATCH] failed to acknowledge task %s: %v",
-			task.TaskID, err)
-		// Continue anyway — the server may already know via heartbeat.
+	// g.mu is already held, so read the field directly instead of via
+	// g.rpcClient() (which would deadlock). The client may be nil if the
+	// connection was lost while a task was in flight (issue #72).
+	if c := g.client; c != nil {
+		_, err := c.Call("task.acknowledge", map[string]interface{}{
+			"task_id":  task.TaskID,
+			"guest_id": g.id,
+		})
+		if err != nil {
+			g.log.Printf("[DISPATCH] failed to acknowledge task %s: %v",
+				task.TaskID, err)
+			// Continue anyway — the server may already know via heartbeat.
+		}
+	} else {
+		g.log.Printf("[DISPATCH] no connection, skipping task.acknowledge for %s", task.TaskID)
 	}
 
 	g.running = true
