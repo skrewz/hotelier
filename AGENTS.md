@@ -26,9 +26,8 @@ details.
 
 Forgejo adds `Reviewed-on:` and `Reviewed-by:` trailers automatically when a
 PR is merged. These carry the internal forge host and cannot be prevented from
-the client side. This is a known limitation of the mirror; a follow-up should
-strip or rewrite these trailers before mirroring. Until then, be aware that
-merged commit messages will still expose the internal host in these trailers.
+the client side. This is a known limitation of the mirror: merged commit
+messages will expose the internal host in these trailers.
 
 # Browser-side validation
 
