@@ -1817,3 +1817,245 @@ func TestGuestSendLog_ConcurrentWithClientClear(t *testing.T) {
 		t.Fatal("SendLog panicked while the client was being flipped concurrently")
 	}
 }
+
+// resultCapture intercepts the guest.result and guest.log hub methods so
+// tests can assert on what the guest sends to the server.
+type resultCapture struct {
+	resultsMu sync.Mutex
+	results   []TaskResult
+	logsMu    sync.Mutex
+	logs      []LogEntry
+}
+
+func (c *resultCapture) capturedResults() []TaskResult {
+	c.resultsMu.Lock()
+	defer c.resultsMu.Unlock()
+	out := make([]TaskResult, len(c.results))
+	copy(out, c.results)
+	return out
+}
+
+func (c *resultCapture) logLines() []string {
+	c.logsMu.Lock()
+	defer c.logsMu.Unlock()
+	lines := make([]string, 0, len(c.logs))
+	for _, e := range c.logs {
+		lines = append(lines, e.Line)
+	}
+	return lines
+}
+
+// waitForResults polls until at least n results have been captured or the
+// timeout elapses. Returns true when the condition is met.
+func (c *resultCapture) waitForResults(n int, timeout time.Duration) bool {
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if len(c.capturedResults()) >= n {
+			return true
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	return len(c.capturedResults()) >= n
+}
+
+// hasLogContaining reports whether any captured log line contains the
+// given substring (case-insensitive).
+func (c *resultCapture) hasLogContaining(substr string) bool {
+	for _, line := range c.logLines() {
+		if strings.Contains(strings.ToLower(line), strings.ToLower(substr)) {
+			return true
+		}
+	}
+	return false
+}
+
+// startTestServerWithCapture starts a test server with the guest.result
+// and guest.log hub methods intercepted for capture.
+func startTestServerWithCapture(t *testing.T) (*server.Server, string, *resultCapture) {
+	t.Helper()
+	srv, wsURL := startTestServer(t)
+	cap := &resultCapture{}
+	srv.Hub().RegisterMethod("guest.result",
+		func(_ context.Context, params json.RawMessage) (interface{}, *rpc.RPCError) {
+			var r TaskResult
+			_ = json.Unmarshal(params, &r)
+			cap.resultsMu.Lock()
+			cap.results = append(cap.results, r)
+			cap.resultsMu.Unlock()
+			return nil, nil
+		})
+	srv.Hub().RegisterMethod("guest.log",
+		func(_ context.Context, params json.RawMessage) (interface{}, *rpc.RPCError) {
+			var e LogEntry
+			_ = json.Unmarshal(params, &e)
+			cap.logsMu.Lock()
+			cap.logs = append(cap.logs, e)
+			cap.logsMu.Unlock()
+			return nil, nil
+		})
+	return srv, wsURL, cap
+}
+
+// newConnectedGuest connects and registers a guest against the test
+// server, wiring cleanup to close the connection.
+func newConnectedGuest(t *testing.T, wsURL string, handler Handler) *Guest {
+	t.Helper()
+	gcfg := config.GuestConfig{
+		Name: "Capture Guest",
+		Tags: []string{"test"},
+		URL:  wsURL,
+	}
+	g := New(gcfg, handler)
+	if err := g.Connect(); err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	if err := g.Register(); err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	t.Cleanup(func() {
+		g.Stop()
+		if c := g.rpcClient(); c != nil {
+			c.Close()
+		}
+	})
+	return g
+}
+
+// TestGuestExecuteTask_SkipsFailureResultWhenStopping verifies that a
+// failed in-flight task is NOT reported to the server when the guest is
+// shutting down (issue #184). The failure is an artefact of the shutdown
+// (the pi subprocess is killed before it can emit agent_settled), not an
+// agent fault; the server re-queues the task when the connection drops.
+func TestGuestExecuteTask_SkipsFailureResultWhenStopping(t *testing.T) {
+	_, wsURL, cap := startTestServerWithCapture(t)
+	g := newConnectedGuest(t, wsURL, func(_ context.Context, task TaskAssignment, _ LogCallback) (*TaskResult, error) {
+		return &TaskResult{
+			TaskID:  task.TaskID,
+			Success: false,
+			Error:   "pi subprocess exited without settling (no agent_settled received)",
+		}, nil
+	})
+
+	// The guest is shutting down while the task is in flight.
+	g.Stop()
+
+	result, err := g.ExecuteTask(TaskAssignment{TaskID: "task-1", Prompt: "p"})
+	if err != nil {
+		t.Fatalf("ExecuteTask: %v", err)
+	}
+	if result == nil || result.Success {
+		t.Fatalf("expected failure result, got %+v", result)
+	}
+
+	if got := cap.capturedResults(); len(got) != 0 {
+		t.Errorf("failure result must not be reported while stopping, got %+v", got)
+	}
+	if !cap.hasLogContaining("interrupted") {
+		t.Errorf("expected an interruption log entry, got %v", cap.logLines())
+	}
+	if cap.hasLogContaining("Task completed successfully") {
+		t.Error("failed task must not be logged as 'Task completed successfully'")
+	}
+}
+
+// TestGuestExecuteTask_ReportsFailureWhenNotStopping verifies the
+// non-shutdown path is unchanged: a failed task is still reported to the
+// server, and is not logged as completed successfully (issue #184).
+func TestGuestExecuteTask_ReportsFailureWhenNotStopping(t *testing.T) {
+	_, wsURL, cap := startTestServerWithCapture(t)
+	g := newConnectedGuest(t, wsURL, func(_ context.Context, task TaskAssignment, _ LogCallback) (*TaskResult, error) {
+		return &TaskResult{
+			TaskID:  task.TaskID,
+			Success: false,
+			Error:   "pi subprocess exited without settling (no agent_settled received)",
+		}, nil
+	})
+
+	result, err := g.ExecuteTask(TaskAssignment{TaskID: "task-1", Prompt: "p"})
+	if err != nil {
+		t.Fatalf("ExecuteTask: %v", err)
+	}
+	if result == nil || result.Success {
+		t.Fatalf("expected failure result, got %+v", result)
+	}
+
+	if !cap.waitForResults(1, 2*time.Second) {
+		t.Fatal("expected the failure result to be reported")
+	}
+	if got := cap.capturedResults()[0]; got.Success || got.TaskID != "task-1" {
+		t.Errorf("unexpected reported result: %+v", got)
+	}
+	if cap.hasLogContaining("Task completed successfully") {
+		t.Error("failed task must not be logged as 'Task completed successfully'")
+	}
+}
+
+// TestGuestExecuteTask_SendsSuccessResultWhenStopping verifies that a
+// task which genuinely succeeded is still reported (best effort) when the
+// guest is shutting down — re-queueing a completed task would be wasteful
+// (issue #184).
+func TestGuestExecuteTask_SendsSuccessResultWhenStopping(t *testing.T) {
+	_, wsURL, cap := startTestServerWithCapture(t)
+	g := newConnectedGuest(t, wsURL, func(_ context.Context, task TaskAssignment, _ LogCallback) (*TaskResult, error) {
+		return &TaskResult{TaskID: task.TaskID, Success: true, Output: "ok"}, nil
+	})
+
+	g.Stop()
+
+	result, err := g.ExecuteTask(TaskAssignment{TaskID: "task-1", Prompt: "p"})
+	if err != nil {
+		t.Fatalf("ExecuteTask: %v", err)
+	}
+	if result == nil || !result.Success {
+		t.Fatalf("expected success result, got %+v", result)
+	}
+
+	if !cap.waitForResults(1, 2*time.Second) {
+		t.Fatal("expected the success result to be reported even while stopping")
+	}
+	if !cap.hasLogContaining("Task completed successfully") {
+		t.Errorf("expected 'Task completed successfully' log, got %v", cap.logLines())
+	}
+}
+
+// TestGuestExecuteTask_SkipsErrorResultWhenStopping verifies that a
+// handler error (as opposed to a failed TaskResult) is also not reported
+// while the guest is shutting down (issue #184).
+func TestGuestExecuteTask_SkipsErrorResultWhenStopping(t *testing.T) {
+	_, wsURL, cap := startTestServerWithCapture(t)
+	g := newConnectedGuest(t, wsURL, func(_ context.Context, task TaskAssignment, _ LogCallback) (*TaskResult, error) {
+		return nil, fmt.Errorf("send prompt: write: broken pipe")
+	})
+
+	g.Stop()
+
+	_, err := g.ExecuteTask(TaskAssignment{TaskID: "task-1", Prompt: "p"})
+	if err == nil {
+		t.Fatal("expected handler error to be returned")
+	}
+
+	if got := cap.capturedResults(); len(got) != 0 {
+		t.Errorf("error result must not be reported while stopping, got %+v", got)
+	}
+}
+
+// TestGuestExecuteTask_ReportsErrorWhenNotStopping verifies the
+// non-shutdown handler-error path is unchanged (issue #184).
+func TestGuestExecuteTask_ReportsErrorWhenNotStopping(t *testing.T) {
+	_, wsURL, cap := startTestServerWithCapture(t)
+	g := newConnectedGuest(t, wsURL, func(_ context.Context, task TaskAssignment, _ LogCallback) (*TaskResult, error) {
+		return nil, fmt.Errorf("send prompt: write: broken pipe")
+	})
+
+	_, err := g.ExecuteTask(TaskAssignment{TaskID: "task-1", Prompt: "p"})
+	if err == nil {
+		t.Fatal("expected handler error to be returned")
+	}
+
+	if !cap.waitForResults(1, 2*time.Second) {
+		t.Fatal("expected the failure result to be reported")
+	}
+	if got := cap.capturedResults()[0]; got.Success || got.TaskID != "task-1" {
+		t.Errorf("unexpected reported result: %+v", got)
+	}
+}
