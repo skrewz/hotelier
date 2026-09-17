@@ -1,6 +1,7 @@
 package guest
 
 import (
+	"bytes"
 	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
@@ -11,6 +12,7 @@ import (
 	"encoding/json"
 	"encoding/pem"
 	"fmt"
+	"log"
 	"math/big"
 	"net"
 	"net/http"
@@ -1251,6 +1253,112 @@ func TestGuest_TaskDispatcher_ExitsOnCtxCancelled(t *testing.T) {
 		// expected
 	case <-time.After(2 * time.Second):
 		t.Fatal("taskDispatcher did not exit after context cancellation")
+	}
+}
+
+// TestGuest_TaskDispatcher_DropsTaskWhenStoppedWhileWaitingIdle verifies
+// the drop-on-stop path of taskDispatcher: a task dequeued while the guest
+// is busy is silently dropped (neither executed nor declined) when the
+// dispatcher is stopped while parked in waitForIdle. Recovery relies on the
+// server's disconnect re-queue (issue #186).
+func TestGuest_TaskDispatcher_DropsTaskWhenStoppedWhileWaitingIdle(t *testing.T) {
+	stopKinds := []struct {
+		name string
+		stop func(g *Guest, cancel context.CancelFunc)
+	}{
+		{"ctx cancelled", func(g *Guest, cancel context.CancelFunc) { cancel() }},
+		{"guest stopped", func(g *Guest, cancel context.CancelFunc) { g.Stop() }},
+	}
+
+	for _, tc := range stopKinds {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := config.GuestConfig{ID: "test", Name: "Test", Tags: []string{"test"}}
+
+			release1 := make(chan struct{})
+			started2 := make(chan string, 1)
+
+			handler := func(ctx context.Context, task TaskAssignment, _ LogCallback) (*TaskResult, error) {
+				if task.TaskID == "task-1" {
+					// Long-running task: blocks until released.
+					<-release1
+					return &TaskResult{TaskID: task.TaskID, Success: true}, nil
+				}
+				started2 <- task.TaskID
+				return &TaskResult{TaskID: task.TaskID, Success: true}, nil
+			}
+			g := New(cfg, handler)
+			defer g.Stop()
+
+			// Capture log output so we can assert DeclineTask is never called
+			// (with no RPC client, a decline attempt is logged).
+			var logBuf bytes.Buffer
+			g.log = log.New(&logBuf, "", 0)
+
+			// Dispatcher 1 (the original connection) picks up task-1 and
+			// keeps the guest busy until it is released.
+			go g.taskDispatcher(context.Background())
+			g.taskCh <- TaskAssignment{TaskID: "task-1", Prompt: "long task"}
+
+			// Wait until task-1 is actually running (g.running == true).
+			deadline := time.Now().Add(2 * time.Second)
+			for {
+				g.mu.Lock()
+				running := g.running
+				g.mu.Unlock()
+				if running {
+					break
+				}
+				if time.Now().After(deadline) {
+					t.Fatal("task-1 never started")
+				}
+				time.Sleep(5 * time.Millisecond)
+			}
+
+			// Dispatcher 2 (a new connection) picks up task-2 and parks in
+			// waitForIdle because the guest is still busy.
+			ctx, cancel := context.WithCancel(context.Background())
+			done := make(chan struct{})
+			go func() {
+				g.taskDispatcher(ctx)
+				close(done)
+			}()
+			g.taskCh <- TaskAssignment{TaskID: "task-2", Prompt: "queued task"}
+
+			// Wait until task-2 has been consumed, i.e. dispatcher 2 is now
+			// blocked in waitForIdle.
+			deadline = time.Now().Add(2 * time.Second)
+			for len(g.taskCh) > 0 {
+				if time.Now().After(deadline) {
+					t.Fatal("task-2 was never consumed from the queue")
+				}
+				time.Sleep(5 * time.Millisecond)
+			}
+
+			tc.stop(g, cancel)
+
+			select {
+			case <-done:
+				// expected
+			case <-time.After(2 * time.Second):
+				t.Fatal("taskDispatcher did not exit while waiting for idle")
+			}
+
+			// The task must have been dropped, not executed.
+			select {
+			case taskID := <-started2:
+				t.Fatalf("task-2 was executed after its dispatcher exited: %s", taskID)
+			default:
+			}
+
+			// And it must not have been declined — the server re-queues it
+			// when the connection drops.
+			if out := logBuf.String(); strings.Contains(out, "declin") {
+				t.Fatalf("task-2 was declined instead of dropped:\n%s", out)
+			}
+
+			// Let dispatcher 1's long task finish.
+			close(release1)
+		})
 	}
 }
 
