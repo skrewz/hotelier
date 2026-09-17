@@ -51,6 +51,7 @@ type PiClient struct {
 	eventCh       chan Event
 	doneCh        chan struct{}
 	started       bool
+	execPath      string // full path to the pi executable ("" = resolve "pi" via PATH)
 	cwd           string
 	provider      string
 	model         string
@@ -105,6 +106,11 @@ type PiClientConfig struct {
 	// Env is a map of extra environment variables to set for the pi subprocess.
 	// These are merged with the current process environment.
 	Env map[string]string
+	// ExecPath is the full path to the pi executable. When set, it is used
+	// verbatim instead of resolving "pi" via PATH. This lets the caller pin
+	// the exact binary that was resolved at startup so that restarts use the
+	// same executable. See issue #33.
+	ExecPath string
 	// SpawnOutput is called for each line of combined stderr/stdout output
 	// during the initial spawn phase (first 10 lines total). After the limit
 	// is reached, regular logging takes over. Useful for troubleshooting spawn
@@ -119,6 +125,7 @@ func NewClient(cfg PiClientConfig) *PiClient {
 	}
 	c := &PiClient{
 		log:           cfg.Log,
+		execPath:      cfg.ExecPath,
 		cwd:           cfg.CWD,
 		provider:      cfg.Provider,
 		model:         cfg.Model,
@@ -152,7 +159,13 @@ func (c *PiClient) Start(ctx context.Context) error {
 		args = append(args, "--session-dir", c.guestDir)
 	}
 
-	c.cmd = exec.CommandContext(ctx, "pi", args...)
+	// Use the pinned executable path when set; otherwise fall back to
+	// resolving "pi" via PATH. See issue #33.
+	piBin := "pi"
+	if c.execPath != "" {
+		piBin = c.execPath
+	}
+	c.cmd = exec.CommandContext(ctx, piBin, args...)
 	c.cmd.Dir = c.cwd
 
 	// Apply extra environment variables (persona env vars)

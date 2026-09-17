@@ -23,8 +23,11 @@ type PIHandler struct {
 	client  *pi.PiClient
 	log     *log.Logger
 	debug   bool
-	debugMu sync.Mutex
-	mu      sync.Mutex
+	// piExecPath is the resolved full path to the pi executable
+	// ("" = resolve via PATH).
+	piExecPath string
+	debugMu    sync.Mutex
+	mu         sync.Mutex
 	// removeDir removes a directory tree during the startup sweep
 	// (issue #180). Defaults to os.RemoveAll; overridable in tests to
 	// simulate removal failures.
@@ -43,8 +46,25 @@ func (h *PIHandler) BaseCWD() string {
 
 // NewPIHandlerDebug creates a new PIHandler with optional RPC debug logging.
 // When debug is true, all RPC communication is logged to stdout.
+//
+// The pi executable is resolved once at construction time so that every
+// subsequent spawn (initial, restart, per-task reset) uses the same binary
+// as the one that was available at guest startup. Without this, a restart
+// re-resolves "pi" via PATH and can fail with 'executable file not found in
+// $PATH' even though the initial spawn succeeded. See issue #33.
 func NewPIHandlerDebug(cwd string, provider, model, thinkingLevel string, debug bool) *PIHandler {
 	logger := log.New(os.Stdout, "[pi-handler] ", log.LstdFlags)
+
+	// Resolve the pi executable path once. If pi is not on PATH the path
+	// stays empty and Start() fails with the usual descriptive error.
+	var piExecPath string
+	if path, err := exec.LookPath("pi"); err == nil {
+		piExecPath = path
+		logger.Printf("resolved pi executable: %s", piExecPath)
+	} else {
+		logger.Printf("pi not found on PATH (%v); will resolve at start time", err)
+	}
+
 	cfg := pi.PiClientConfig{
 		CWD:           cwd,
 		Provider:      provider,
@@ -52,13 +72,15 @@ func NewPIHandlerDebug(cwd string, provider, model, thinkingLevel string, debug 
 		ThinkingLevel: thinkingLevel,
 		Log:           logger,
 		Debug:         debug,
+		ExecPath:      piExecPath,
 	}
 	return &PIHandler{
-		baseCWD:   cwd,
-		client:    pi.NewClient(cfg),
-		log:       logger,
-		debug:     debug,
-		removeDir: os.RemoveAll,
+		baseCWD:    cwd,
+		client:     pi.NewClient(cfg),
+		log:        logger,
+		debug:      debug,
+		piExecPath: piExecPath,
+		removeDir:  os.RemoveAll,
 	}
 }
 
@@ -756,12 +778,15 @@ func (h *PIHandler) restartClient(ctx context.Context) error {
 	maxRetries := 3
 	var lastErr error
 	for attempt := 1; attempt <= maxRetries; attempt++ {
-		// Create a new client with the base working directory
+		// Create a new client with the base working directory.
+		// Preserve the resolved pi executable path so the restart uses the
+		// same binary as the initial spawn. See issue #33.
 		h.log.Printf("[PI] restarting pi client in base dir: %s (attempt %d/%d)", h.baseCWD, attempt, maxRetries)
 		cfg := pi.PiClientConfig{
-			CWD:   h.baseCWD,
-			Log:   h.log,
-			Debug: h.debug,
+			CWD:      h.baseCWD,
+			Log:      h.log,
+			Debug:    h.debug,
+			ExecPath: h.piExecPath,
 		}
 		h.client = pi.NewClient(cfg)
 		if err := h.client.Start(ctx); err != nil {
@@ -820,7 +845,9 @@ func (h *PIHandler) resetClientWithEnv(ctx context.Context, workDir string, task
 	maxRetries := 3
 	var lastErr error
 	for attempt := 1; attempt <= maxRetries; attempt++ {
-		// Create a new client with the task-specific working directory
+		// Create a new client with the task-specific working directory.
+		// Preserve the resolved pi executable path so the spawn uses the
+		// same binary as the initial spawn. See issue #33.
 		h.log.Printf("[PI] creating new pi client for working dir: %s (attempt %d/%d)", workDir, attempt, maxRetries)
 		cfg := pi.PiClientConfig{
 			CWD:           workDir,
@@ -829,6 +856,7 @@ func (h *PIHandler) resetClientWithEnv(ctx context.Context, workDir string, task
 			ThinkingLevel: "",
 			Log:           h.log,
 			Env:           env,
+			ExecPath:      h.piExecPath,
 			SpawnOutput: func(line string) {
 				// Echo spawn-phase output to guest logs for troubleshooting.
 				// See issue #19: without this, spawn failures produce silence.
