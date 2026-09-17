@@ -35,12 +35,13 @@ type TaskLogEntry struct {
 	Timestamp time.Time `json:"timestamp"`
 
 	// Structured tool call fields (only set when Level == "tool")
-	ToolType   string `json:"tool_type,omitempty"`   // "start", "output", "end"
-	ToolName   string `json:"tool_name,omitempty"`   // e.g. "bash", "read"
-	ToolID     string `json:"tool_id,omitempty"`     // unique tool call identifier
-	ToolArgs   string `json:"tool_args,omitempty"`   // arguments/parameters
-	ToolOutput string `json:"tool_output,omitempty"` // captured output
-	ToolError  bool   `json:"tool_error,omitempty"`  // true if tool ended with error
+	ToolType     string `json:"tool_type,omitempty"`      // "start", "output", "end"
+	ToolName     string `json:"tool_name,omitempty"`      // e.g. "bash", "read"
+	ToolID       string `json:"tool_id,omitempty"`        // unique tool call identifier
+	ToolArgs     string `json:"tool_args,omitempty"`      // arguments/parameters
+	ToolArgsJSON string `json:"tool_args_json,omitempty"` // raw argument JSON (UI diff rendering, issue #2)
+	ToolOutput   string `json:"tool_output,omitempty"`    // captured output
+	ToolError    bool   `json:"tool_error,omitempty"`     // true if tool ended with error
 
 	// Structured compaction fields (only set when Level == "compaction")
 	CompactionType         string `json:"compaction_type,omitempty"`          // "start", "end"
@@ -680,15 +681,16 @@ func (s *Server) broadcastTaskUpdated(taskID, status string) {
 // tool_name, tool_id, etc.) alongside the formatted line string.
 func (s *Server) handleGuestLog(ctx context.Context, params json.RawMessage) (interface{}, *rpc.RPCError) {
 	var req struct {
-		TaskID     string `json:"task_id"`
-		Line       string `json:"line"`
-		Level      string `json:"level,omitempty"`
-		ToolType   string `json:"tool_type,omitempty"`
-		ToolName   string `json:"tool_name,omitempty"`
-		ToolID     string `json:"tool_id,omitempty"`
-		ToolArgs   string `json:"tool_args,omitempty"`
-		ToolOutput string `json:"tool_output,omitempty"`
-		ToolError  bool   `json:"tool_error,omitempty"`
+		TaskID       string `json:"task_id"`
+		Line         string `json:"line"`
+		Level        string `json:"level,omitempty"`
+		ToolType     string `json:"tool_type,omitempty"`
+		ToolName     string `json:"tool_name,omitempty"`
+		ToolID       string `json:"tool_id,omitempty"`
+		ToolArgs     string `json:"tool_args,omitempty"`
+		ToolArgsJSON string `json:"tool_args_json,omitempty"`
+		ToolOutput   string `json:"tool_output,omitempty"`
+		ToolError    bool   `json:"tool_error,omitempty"`
 		// Structured compaction fields (level "compaction").
 		CompactionType         string `json:"compaction_type,omitempty"`
 		CompactionReason       string `json:"compaction_reason,omitempty"`
@@ -722,6 +724,7 @@ func (s *Server) handleGuestLog(ctx context.Context, params json.RawMessage) (in
 				e.ToolName = req.ToolName
 				e.ToolID = req.ToolID
 				e.ToolArgs = req.ToolArgs
+				e.ToolArgsJSON = req.ToolArgsJSON
 				e.ToolOutput = req.ToolOutput
 				e.ToolError = req.ToolError
 			}
@@ -751,6 +754,7 @@ func (s *Server) handleGuestLog(ctx context.Context, params json.RawMessage) (in
 					ToolName:               e.ToolName,
 					ToolID:                 e.ToolID,
 					ToolArgs:               e.ToolArgs,
+					ToolArgsJSON:           e.ToolArgsJSON,
 					ToolOutput:             e.ToolOutput,
 					ToolError:              e.ToolError,
 					CompactionType:         e.CompactionType,
@@ -772,6 +776,7 @@ func (s *Server) handleGuestLog(ctx context.Context, params json.RawMessage) (in
 				"tool_name":                e.ToolName,
 				"tool_id":                  e.ToolID,
 				"tool_args":                e.ToolArgs,
+				"tool_args_json":           e.ToolArgsJSON,
 				"tool_output":              e.ToolOutput,
 				"tool_error":               e.ToolError,
 				"compaction_type":          e.CompactionType,

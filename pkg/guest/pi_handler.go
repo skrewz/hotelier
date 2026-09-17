@@ -378,6 +378,9 @@ func (h *PIHandler) ExecuteTask(ctx context.Context, task TaskAssignment, sendLo
 						ToolName: toolName,
 						ToolID:   toolID,
 						ToolArgs: args,
+						// Raw argument JSON so the UI can render a diff for
+						// edit tool calls (issue #2).
+						ToolArgsJSON: string(event.Args),
 					}
 					if err := sendLog(entry); err != nil {
 						h.log.Printf("[PI] failed to send tool log: %v", err)

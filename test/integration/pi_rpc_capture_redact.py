@@ -141,6 +141,11 @@ def run_rpc_capture():
 
         log("INFO", f"Starting pi RPC, capture \u2192 {CAPTURE_FILE}", f)
 
+        # Create the edit target file the prompt refers to, so the agent
+        # has something concrete to edit with the edit tool.
+        with open("/tmp/pi-rpc-edit-target.txt", "w") as tf:
+            tf.write('def greet(name):\n    return "hello " + name\n')
+
         # Start pi in RPC mode with no session persistence, using the
         # isolated HOME (compaction.keepRecentTokens override).
         proc = subprocess.Popen(
@@ -255,8 +260,11 @@ def redact_capture(offset):
 
     # Model name - use a generic placeholder (GGUF model paths)
     content = re.sub(r"[A-Z][A-Z0-9]+-\d+\.\d+-[A-Za-z]+-[A-Z0-9_]+\.gguf", "actual-model-name", content)
-    # responseModel - replace any GGUF model path with a generic placeholder
-    content = re.sub(r'"responseModel":"[^"]*"', '"responseModel":"actual-model-name"', content)
+    # Response model - field-level redaction. The GGUF name regex above only
+    # matches one name shape; the responseModel field can also carry model
+    # serving paths (e.g. "/models/<org>/<name>.gguf"), so redact the whole
+    # field regardless of its value.
+    content = re.sub(r'"responseModel":"[^"]*"', '"responseModel":"example-response-model"', content)
 
     # Hostname - replace any hostname-like patterns with a generic one
     # Match the hostname in tool output and thinking content
@@ -273,7 +281,10 @@ def redact_capture(offset):
 
 
     # Capture file path - replace with generic placeholder
-    content = re.sub(r"/tmp/pi-rpc-capture\.log", "/tmp/example-capture.log", content)
+    content = re.sub(r"/tmp/pi-rpc-capture(-\w+)?\.log", "/tmp/example-capture.log", content)
+
+    # Edit target file path - replace with generic placeholder
+    content = re.sub(r"/tmp/pi-rpc-edit-target\.txt", "/tmp/example-edit-target.txt", content)
 
     # PID - replace with generic placeholder
     content = re.sub(r'PID:\s*\d+', 'PID: 12345', content)
