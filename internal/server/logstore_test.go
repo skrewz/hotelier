@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -338,5 +339,204 @@ func TestLogAPI_InvalidMethod(t *testing.T) {
 		if w.Code != http.StatusMethodNotAllowed {
 			t.Errorf("%s /api/logs/2026-05-10: expected 405, got %d", method, w.Code)
 		}
+	}
+}
+
+// TestLogAPI_Download_Success verifies /api/logs/:date/:task/download returns
+// the raw JSONL log file as a downloadable attachment.
+func TestLogAPI_Download_Success(t *testing.T) {
+	dir, err := os.MkdirTemp("", "hotelier-logdownload-*")
+	if err != nil {
+		t.Fatalf("create temp dir: %v", err)
+	}
+	defer os.RemoveAll(dir)
+
+	cfg := config.ServerConfig{
+		Host:   "127.0.0.1",
+		Port:   0,
+		LogDir: dir,
+	}
+	srv := New(cfg)
+
+	srv.diskLogStore.Append(logstore.Entry{
+		TaskID:    "my-task",
+		Line:      "Hello world",
+		Level:     "text",
+		Timestamp: time.Date(2026, 5, 10, 12, 0, 0, 0, time.UTC),
+	})
+	srv.diskLogStore.Append(logstore.Entry{
+		TaskID:    "my-task",
+		Line:      "[TOOL] read file",
+		Level:     "tool",
+		Timestamp: time.Date(2026, 5, 10, 12, 0, 1, 0, time.UTC),
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/api/logs/2026-05-10/my-task/download", nil)
+	w := httptest.NewRecorder()
+	srv.HandleLogEntry(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+
+	if ct := w.Header().Get("Content-Type"); ct != "application/x-ndjson" {
+		t.Errorf("expected Content-Type application/x-ndjson, got %q", ct)
+	}
+	if cd := w.Header().Get("Content-Disposition"); cd != `attachment; filename="my-task.jsonl"` {
+		t.Errorf("unexpected Content-Disposition: %q", cd)
+	}
+
+	body := w.Body.String()
+	if !strings.Contains(body, "Hello world") {
+		t.Errorf("download body should contain raw JSONL, got %q", body)
+	}
+	lines := strings.Split(strings.TrimSpace(body), "\n")
+	if len(lines) != 2 {
+		t.Errorf("expected 2 JSONL lines, got %d", len(lines))
+	}
+}
+
+// TestLogAPI_Download_NotFound verifies 404 when no log file exists for the task.
+func TestLogAPI_Download_NotFound(t *testing.T) {
+	dir, err := os.MkdirTemp("", "hotelier-logdownload-nf-*")
+	if err != nil {
+		t.Fatalf("create temp dir: %v", err)
+	}
+	defer os.RemoveAll(dir)
+
+	cfg := config.ServerConfig{
+		Host:   "127.0.0.1",
+		Port:   0,
+		LogDir: dir,
+	}
+	srv := New(cfg)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/logs/2026-05-10/no-such-task/download", nil)
+	w := httptest.NewRecorder()
+	srv.HandleLogEntry(w, req)
+
+	if w.Code != http.StatusNotFound {
+		t.Errorf("expected 404, got %d", w.Code)
+	}
+}
+
+// TestLogAPI_Download_Disabled verifies 503 when log_dir is not configured.
+func TestLogAPI_Download_Disabled(t *testing.T) {
+	cfg := config.ServerConfig{
+		Host: "127.0.0.1",
+		Port: 0,
+	}
+	srv := New(cfg)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/logs/2026-05-10/my-task/download", nil)
+	w := httptest.NewRecorder()
+	srv.HandleLogEntry(w, req)
+
+	if w.Code != http.StatusServiceUnavailable {
+		t.Errorf("expected 503 when log store disabled, got %d", w.Code)
+	}
+}
+
+// TestLogAPI_Download_MethodNotAllowed verifies 405 for non-GET methods.
+func TestLogAPI_Download_MethodNotAllowed(t *testing.T) {
+	dir, err := os.MkdirTemp("", "hotelier-logdownload-meth-*")
+	if err != nil {
+		t.Fatalf("create temp dir: %v", err)
+	}
+	defer os.RemoveAll(dir)
+
+	cfg := config.ServerConfig{
+		Host:   "127.0.0.1",
+		Port:   0,
+		LogDir: dir,
+	}
+	srv := New(cfg)
+
+	for _, method := range []string{"POST", "PUT", "DELETE"} {
+		req := httptest.NewRequest(method, "/api/logs/2026-05-10/my-task/download", nil)
+		w := httptest.NewRecorder()
+		srv.HandleLogEntry(w, req)
+		if w.Code != http.StatusMethodNotAllowed {
+			t.Errorf("%s download: expected 405, got %d", method, w.Code)
+		}
+	}
+}
+
+// TestLogAPI_Download_InvalidDate verifies 400 when the date segment does
+// not match YYYY-MM-DD.
+func TestLogAPI_Download_InvalidDate(t *testing.T) {
+	dir, err := os.MkdirTemp("", "hotelier-logdownload-baddate-*")
+	if err != nil {
+		t.Fatalf("create temp dir: %v", err)
+	}
+	defer os.RemoveAll(dir)
+
+	cfg := config.ServerConfig{
+		Host:   "127.0.0.1",
+		Port:   0,
+		LogDir: dir,
+	}
+	srv := New(cfg)
+
+	for _, date := range []string{"not-a-date", "2026-5-10", "2026-05-10x"} {
+		req := httptest.NewRequest(http.MethodGet, "/api/logs/"+date+"/my-task/download", nil)
+		w := httptest.NewRecorder()
+		srv.HandleLogEntry(w, req)
+		if w.Code != http.StatusBadRequest {
+			t.Errorf("date %q: expected 400, got %d", date, w.Code)
+		}
+	}
+}
+
+// TestLogAPI_Download_InvalidTaskID verifies 400 when the task ID segment
+// contains characters that would produce a malformed Content-Disposition
+// header (quotes, whitespace).
+func TestLogAPI_Download_InvalidTaskID(t *testing.T) {
+	dir, err := os.MkdirTemp("", "hotelier-logdownload-badtask-*")
+	if err != nil {
+		t.Fatalf("create temp dir: %v", err)
+	}
+	defer os.RemoveAll(dir)
+
+	cfg := config.ServerConfig{
+		Host:   "127.0.0.1",
+		Port:   0,
+		LogDir: dir,
+	}
+	srv := New(cfg)
+
+	// Percent-encoded double quote and space in the task ID segment.
+	for _, taskID := range []string{"bad%22task", "bad%20task", "tab%09id"} {
+		req := httptest.NewRequest(http.MethodGet, "/api/logs/2026-05-10/"+taskID+"/download", nil)
+		w := httptest.NewRecorder()
+		srv.HandleLogEntry(w, req)
+		if w.Code != http.StatusBadRequest {
+			t.Errorf("task id %q: expected 400, got %d", taskID, w.Code)
+		}
+	}
+}
+
+// TestLogAPI_3PartPathNonDownloadReturns404 verifies that a 3-segment path
+// where the third segment is not "download" returns 404.
+func TestLogAPI_3PartPathNonDownloadReturns404(t *testing.T) {
+	dir, err := os.MkdirTemp("", "hotelier-log3part-*")
+	if err != nil {
+		t.Fatalf("create temp dir: %v", err)
+	}
+	defer os.RemoveAll(dir)
+
+	cfg := config.ServerConfig{
+		Host:   "127.0.0.1",
+		Port:   0,
+		LogDir: dir,
+	}
+	srv := New(cfg)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/logs/2026-05-10/some-task/foo", nil)
+	w := httptest.NewRecorder()
+	srv.HandleLogEntry(w, req)
+
+	if w.Code != http.StatusNotFound {
+		t.Errorf("expected 404 for non-download 3-part path, got %d", w.Code)
 	}
 }

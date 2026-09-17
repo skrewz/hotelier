@@ -2106,6 +2106,9 @@ const { chromium } = require('playwright');
       return content ? content.textContent.substring(0, 100) : '';
     });
 
+    // Download button in the log breadcrumb (Issue #6)
+    const downloadBtn = document.querySelector('.log-breadcrumb .download-btn');
+
     return {
       entryCount: entries.length,
       systemMsgCount: systemMsgs.length,
@@ -2122,6 +2125,8 @@ const { chromium } = require('playwright');
       hasToolMarkersOutsideBlocks,
       thinkingBlockCount: thinkingBlocks.length,
       thinkingBlockContents,
+      hasDownloadBtn: downloadBtn !== null,
+      downloadBtnOnclick: downloadBtn ? (downloadBtn.getAttribute('onclick') || '') : '',
     };
   });
 
@@ -2148,6 +2153,9 @@ const { chromium } = require('playwright');
     // entries separated by non-thinking entries get separate blocks.
     { name: 'thinking blocks present in log entries view', pass: logEntryResult.thinkingBlockCount > 0 },
     { name: 'thinking blocks have non-empty content', pass: logEntryResult.thinkingBlockContents.every(c => c.length > 0) },
+    // --- Download button in log breadcrumb (Issue #6) ---
+    { name: 'download button present in log breadcrumb', pass: logEntryResult.hasDownloadBtn },
+    { name: 'download button calls downloadLog()', pass: logEntryResult.downloadBtnOnclick.includes('downloadLog') },
     // Operational system messages in log entries view
     { name: 'operational message: Executing task', pass: logEntryResult.systemMsgTexts.some(t => t.includes('Executing task')) },
     { name: 'operational message: Cloning', pass: logEntryResult.systemMsgTexts.some(t => t.includes('Cloning')) },
@@ -2166,6 +2174,21 @@ const { chromium } = require('playwright');
   }
 
   await takeScreenshot('06-log-entries');
+
+  // --- Exercise the download button end-to-end (Issue #6) ---
+  // Clicking the button must start a real browser download of the raw
+  // JSONL file. This exercises downloadLog() (URL construction, anchor
+  // click, download attribute) and the endpoint's attachment response.
+  const [download] = await Promise.all([
+    page.waitForEvent('download'),
+    page.click('.log-breadcrumb .download-btn'),
+  ]);
+  const suggestedFilename = download.suggestedFilename();
+  if (suggestedFilename !== taskId + '.jsonl') {
+    fail('download filename should be ' + taskId + '.jsonl, got ' + suggestedFilename);
+  }
+  console.log('PASS: download button triggers download of ' + suggestedFilename);
+  await download.cancel();
 
   // --- Click "All Dates" breadcrumb crumb to navigate back ---
   console.log('--- Clicking All Dates breadcrumb ---');

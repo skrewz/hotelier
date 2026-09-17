@@ -3,9 +3,11 @@ package logstore
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -556,5 +558,187 @@ func TestLogStore_JSONLFormat(t *testing.T) {
 	}
 	if parsed.Line != "multi\nline" {
 		t.Errorf("line preserved newline: got %q", parsed.Line)
+	}
+}
+
+func TestLogStore_ReadRawJSONL_Compressed(t *testing.T) {
+	s, dir := newTestLogStore(t)
+	defer os.RemoveAll(dir)
+
+	ts := time.Date(2026, 5, 10, 12, 0, 0, 0, time.UTC)
+	s.Append(Entry{TaskID: "task-1", Line: "raw one", Level: "info", Timestamp: ts})
+	s.Append(Entry{TaskID: "task-1", Line: "raw two", Level: "text", Timestamp: ts.Add(time.Second)})
+
+	raw, err := s.ReadRawJSONL("2026-05-10", "task-1")
+	if err != nil {
+		t.Fatalf("read raw: %v", err)
+	}
+
+	lines := splitLines([]byte(raw))
+	if len(lines) != 2 {
+		t.Fatalf("expected 2 lines, got %d", len(lines))
+	}
+	var first Entry
+	if err := json.Unmarshal(lines[0], &first); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if first.Line != "raw one" {
+		t.Errorf("expected 'raw one', got %q", first.Line)
+	}
+}
+
+func TestLogStore_ReadRawJSONL_UncompressedFallback(t *testing.T) {
+	s, dir := newTestLogStore(t)
+	defer os.RemoveAll(dir)
+
+	// Manually create a legacy uncompressed logs.jsonl file
+	taskDir := filepath.Join(dir, "2026-05-10", "legacy-task")
+	if err := os.MkdirAll(taskDir, 0o755); err != nil {
+		t.Fatalf("create task dir: %v", err)
+	}
+	ts := time.Date(2026, 5, 10, 12, 0, 0, 0, time.UTC)
+	entry := Entry{TaskID: "legacy-task", Line: "legacy raw", Timestamp: ts}
+	data, _ := json.Marshal(entry)
+	if err := os.WriteFile(filepath.Join(taskDir, "logs.jsonl"), append(data, '\n'), 0o644); err != nil {
+		t.Fatalf("write legacy file: %v", err)
+	}
+
+	raw, err := s.ReadRawJSONL("2026-05-10", "legacy-task")
+	if err != nil {
+		t.Fatalf("read raw: %v", err)
+	}
+	if !strings.Contains(raw, "legacy raw") {
+		t.Errorf("expected raw to contain 'legacy raw', got %q", raw)
+	}
+}
+
+func TestLogStore_ReadRawJSONL_PrefersCompressed(t *testing.T) {
+	s, dir := newTestLogStore(t)
+	defer os.RemoveAll(dir)
+
+	// Write both a bz2 (via Append) and a legacy jsonl with different content.
+	ts := time.Date(2026, 5, 10, 12, 0, 0, 0, time.UTC)
+	s.Append(Entry{TaskID: "task-both", Line: "compressed wins", Timestamp: ts})
+
+	taskDir := filepath.Join(dir, "2026-05-10", "task-both")
+	entry := Entry{TaskID: "task-both", Line: "legacy loses", Timestamp: ts}
+	data, _ := json.Marshal(entry)
+	if err := os.WriteFile(filepath.Join(taskDir, "logs.jsonl"), append(data, '\n'), 0o644); err != nil {
+		t.Fatalf("write legacy file: %v", err)
+	}
+
+	raw, err := s.ReadRawJSONL("2026-05-10", "task-both")
+	if err != nil {
+		t.Fatalf("read raw: %v", err)
+	}
+	if !strings.Contains(raw, "compressed wins") {
+		t.Errorf("expected bz2 content, got %q", raw)
+	}
+	if strings.Contains(raw, "legacy loses") {
+		t.Errorf("bz2 should be preferred, got %q", raw)
+	}
+}
+
+func TestLogStore_ReadRawJSONL_NotFound(t *testing.T) {
+	s, dir := newTestLogStore(t)
+	defer os.RemoveAll(dir)
+
+	_, err := s.ReadRawJSONL("2026-05-10", "no-such-task")
+	if !errors.Is(err, ErrLogNotFound) {
+		t.Fatalf("expected ErrLogNotFound, got %v", err)
+	}
+}
+
+func TestLogStore_ReadRawJSONL_EmptyUncompressed(t *testing.T) {
+	s, dir := newTestLogStore(t)
+	defer os.RemoveAll(dir)
+
+	// An existing but empty legacy file is not a "not found" — it yields
+	// an empty body.
+	taskDir := filepath.Join(dir, "2026-05-10", "empty-task")
+	if err := os.MkdirAll(taskDir, 0o755); err != nil {
+		t.Fatalf("create task dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(taskDir, "logs.jsonl"), nil, 0o644); err != nil {
+		t.Fatalf("write empty file: %v", err)
+	}
+
+	raw, err := s.ReadRawJSONL("2026-05-10", "empty-task")
+	if err != nil {
+		t.Fatalf("read raw: %v", err)
+	}
+	if raw != "" {
+		t.Errorf("expected empty raw, got %q", raw)
+	}
+}
+
+func TestLogStore_ReadRawJSONL_EmptyCompressed(t *testing.T) {
+	s, dir := newTestLogStore(t)
+	defer os.RemoveAll(dir)
+
+	// An existing but empty bz2 file is a present log with zero content,
+	// not a missing log.
+	taskDir := filepath.Join(dir, "2026-05-10", "empty-bz2-task")
+	if err := os.MkdirAll(taskDir, 0o755); err != nil {
+		t.Fatalf("create task dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(taskDir, "logs.jsonl.bz2"), nil, 0o644); err != nil {
+		t.Fatalf("write empty bz2: %v", err)
+	}
+
+	raw, err := s.ReadRawJSONL("2026-05-10", "empty-bz2-task")
+	if err != nil {
+		t.Fatalf("read raw: %v", err)
+	}
+	if raw != "" {
+		t.Errorf("expected empty raw, got %q", raw)
+	}
+}
+
+func TestLogStore_ReadRawJSONL_CorruptCompressed(t *testing.T) {
+	s, dir := newTestLogStore(t)
+	defer os.RemoveAll(dir)
+
+	// Create a valid bz2 via Append, then truncate it to simulate a
+	// crash mid-append leaving a truncated final stream block.
+	ts := time.Date(2026, 5, 10, 12, 0, 0, 0, time.UTC)
+	s.Append(Entry{TaskID: "task-trunc", Line: "first", Level: "info", Timestamp: ts})
+	s.Append(Entry{TaskID: "task-trunc", Line: "second", Level: "info", Timestamp: ts.Add(time.Second)})
+	s.CloseAll()
+
+	bz2Path := filepath.Join(dir, "2026-05-10", "task-trunc", "logs.jsonl.bz2")
+	full, err := os.ReadFile(bz2Path)
+	if err != nil {
+		t.Fatalf("read bz2: %v", err)
+	}
+
+	// Find a truncation length that actually fails to decompress (a
+	// truncation landing exactly on a stream boundary would still be
+	// valid and make the test vacuous).
+	var corrupt []byte
+	for n := len(full) / 2; n > 3; n-- {
+		r, rerr := bzip2.NewReader(bytes.NewReader(full[:n]), nil)
+		if rerr != nil {
+			corrupt = full[:n]
+			break
+		}
+		if _, err := io.ReadAll(r); err != nil {
+			corrupt = full[:n]
+			break
+		}
+	}
+	if corrupt == nil {
+		t.Fatal("could not construct a corrupt bz2 prefix")
+	}
+	if err := os.WriteFile(bz2Path, corrupt, 0o644); err != nil {
+		t.Fatalf("truncate bz2: %v", err)
+	}
+
+	_, err = s.ReadRawJSONL("2026-05-10", "task-trunc")
+	if err == nil {
+		t.Fatal("expected error for corrupt bz2, got nil")
+	}
+	if errors.Is(err, ErrLogNotFound) {
+		t.Errorf("corrupt bz2 must not be masked as ErrLogNotFound, got %v", err)
 	}
 }
