@@ -2,6 +2,34 @@
 
 - This repository uses TDD. Immediately load the skill `test-driven-development`.
 
+# Public mirror — what must not leak
+
+This repository is mirrored to a public GitHub remote, so **anything committed
+becomes public**: commit messages, PR titles and bodies, and the code, config
+and docs themselves. Be conscious not to leak internal Forgejo / infrastructure
+details.
+
+- **No internal hostnames.** Never reference the internal forge host (the host
+  this repository's `origin` remote points at) — or any other internal
+  hostname — in commit messages, PR titles/bodies, or code/config/docs. Link
+  issues and PRs by number only (e.g. `Fixes #22`), never by full URL.
+- **No internal identities.** Don't put internal identities (internal-domain
+  email addresses, personal names) in commit metadata or in commit/PR
+  messages.
+- **No personal asides.** Keep commit and PR bodies free of personal asides
+  (e.g. "(Hi, it's X, here!)").
+- **Prefer neutral names.** In code, config and examples, prefer neutral,
+  generic names over internal project and persona names. Where a provider or
+  integration is named, use a generic example rather than the internal one.
+
+## Known limitation: forge merge trailers
+
+Forgejo adds `Reviewed-on:` and `Reviewed-by:` trailers automatically when a
+PR is merged. These carry the internal forge host and cannot be prevented from
+the client side. This is a known limitation of the mirror; a follow-up should
+strip or rewrite these trailers before mirroring. Until then, be aware that
+merged commit messages will still expose the internal host in these trailers.
+
 # Browser-side validation
 
 Changes that touch JavaScript, HTML, CSS, or WebSocket communication **must** be validated in a headless browser. Go tests cannot catch client-side regressions.
