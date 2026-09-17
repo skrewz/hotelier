@@ -62,6 +62,7 @@ write_timeout: 30
 max_log_size: 1048576
 task_timeout: 3600
 heartbeat_interval: 30
+silence_timeout: 180
 max_guests: 0
 ```
 
