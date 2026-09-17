@@ -29,9 +29,11 @@ type ServerConfig struct {
 	TaskTimeout int `yaml:"task_timeout"`
 	// HeartbeatInterval is how often guests must send heartbeats (seconds).
 	HeartbeatInterval int `yaml:"heartbeat_interval"`
-	// SilenceTimeout is the duration of RPC silence before killing a running task.
-	// When a guest stops sending heartbeats for this long, the server kills its
-	// pi subprocess and marks the task as failed. Set to 0 to disable.
+	// SilenceTimeout is the duration a guest may be silent (no heartbeats)
+	// before the server considers it stale: any running task is failed and the
+	// guest is removed from the registry. Set to 0 to disable stale-guest
+	// removal. Default: 180 seconds (6 missed heartbeats at the default 30s
+	// interval).
 	SilenceTimeout int `yaml:"silence_timeout"`
 	// TaskAssignmentTimeout is the duration before an ASSIGNED task is considered
 	// stuck. If a task has been ASSIGNED for longer than this and the guest has
@@ -94,10 +96,10 @@ func DefaultServerConfig() ServerConfig {
 		MaxLogSize:            1024 * 1024, // 1MB
 		TaskTimeout:           3600,        // 1 hour
 		HeartbeatInterval:     30,
-		SilenceTimeout:        1800, // 30 minutes
-		TaskAssignmentTimeout: 90,   // 3 heartbeats missed (3 * 30s)
-		TaskSilenceTimeout:    600,  // 10 minutes of silence while running
-		MaxGuests:             0,    // unlimited
+		SilenceTimeout:        180, // 6 heartbeats missed (6 * 30s)
+		TaskAssignmentTimeout: 90,  // 3 heartbeats missed (3 * 30s)
+		TaskSilenceTimeout:    600, // 10 minutes of silence while running
+		MaxGuests:             0,   // unlimited
 	}
 }
 

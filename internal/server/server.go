@@ -257,7 +257,8 @@ type Server struct {
 //   - MaxGuests: updates the registry capacity
 //   - LogDir: recreates the disk log store if the path changed
 //   - Personas: rebuilds the persona store
-//   - TaskTimeout, HeartbeatInterval, SilenceTimeout, MaxLogSize: stored for future use
+//   - TaskTimeout, HeartbeatInterval, MaxLogSize: stored for future use
+//   - SilenceTimeout, TaskSilenceTimeout, TaskAssignmentTimeout: read live by the cleanup loop
 func (s *Server) Reload(cfg config.ServerConfig) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -1175,8 +1176,8 @@ func (s *Server) tryAssignTask(guestID string) {
 
 // staleGuestCleanup periodically removes stale guests and kills their running tasks.
 // When a guest's RPC connection has been silent for longer than SilenceTimeout,
-// the server sends a task.cancel RPC to the guest to abort the pi subprocess,
-// then marks the task as failed and re-queues it.
+// the server marks any running task as failed and removes the guest from the
+// registry.
 func (s *Server) staleGuestCleanup() {
 	interval := time.Duration(s.cfg.HeartbeatInterval) * time.Second
 	if interval == 0 {
@@ -1197,17 +1198,31 @@ func (s *Server) staleGuestCleanup() {
 			// This runs before stale guest removal so we can send task.cancel.
 			s.checkSilentGuests()
 
-			// Then: Remove guests that have been completely silent (no heartbeat).
+			// Then: remove guests that have been completely silent (no heartbeat).
 			// The orchestrator fails any running tasks before removing the guest.
-			stale := s.orchestrator.RemoveStaleGuests(time.Duration(s.cfg.HeartbeatInterval) * time.Second)
-			for _, sg := range stale {
-				s.log.Printf("stale guest removed: %s", sg.GuestID)
-				if sg.TaskWasRunning {
-					s.broadcastTaskUpdated(sg.TaskID, "FAILED")
-				}
-			}
+			s.removeStaleGuests()
+
 			// After removing stale guests, try to assign pending tasks to remaining idle guests.
 			s.tryAssignPendingTasks()
+		}
+	}
+}
+
+// removeStaleGuests removes guests that have been silent (no heartbeat) for
+// longer than the configured SilenceTimeout. Any running task is failed
+// atomically before the guest is removed. Set SilenceTimeout to 0 to disable
+// stale-guest removal.
+func (s *Server) removeStaleGuests() {
+	timeout := time.Duration(s.cfg.SilenceTimeout) * time.Second
+	if timeout == 0 {
+		return // Stale-guest removal disabled
+	}
+
+	stale := s.orchestrator.RemoveStaleGuests(timeout)
+	for _, sg := range stale {
+		s.log.Printf("stale guest removed: %s", sg.GuestID)
+		if sg.TaskWasRunning {
+			s.broadcastTaskUpdated(sg.TaskID, "FAILED")
 		}
 	}
 }

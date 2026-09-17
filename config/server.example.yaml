@@ -6,6 +6,10 @@ write_timeout: 30
 max_log_size: 1048576
 task_timeout: 3600
 heartbeat_interval: 30
+# How long a guest may be silent (no heartbeats) before it is considered
+# stale: its running task is failed and it is removed from the registry.
+# 0 disables stale-guest removal.
+silence_timeout: 180
 max_guests: 0
 # log_dir: "/var/log/hotelier"  # Persist task logs to disk (empty = in-memory only)
 

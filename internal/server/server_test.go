@@ -2402,6 +2402,107 @@ func TestCheckSilentGuests_ActiveGuest(t *testing.T) {
 	}
 }
 
+// TestRemoveStaleGuests_UsesSilenceTimeout verifies that stale-guest removal
+// uses the configured SilenceTimeout rather than the HeartbeatInterval: a
+// guest that has missed several heartbeats but is still within the silence
+// window is kept, while a guest beyond it is removed and its running task is
+// failed (issue #182).
+func TestRemoveStaleGuests_UsesSilenceTimeout(t *testing.T) {
+	cfg := config.ServerConfig{
+		Host:              "127.0.0.1",
+		Port:              0,
+		HeartbeatInterval: 1,  // 1 second — a few missed heartbeats is normal
+		SilenceTimeout:    10, // 10 seconds
+	}
+	srv := New(cfg)
+
+	registerRunningTask := func(guestID, taskID string) {
+		t.Helper()
+		if _, err := srv.Registry().Register(guestID, guestID, []string{"tag"}); err != nil {
+			t.Fatalf("register %s failed: %v", guestID, err)
+		}
+		task := &queue.Task{ID: taskID, Prompt: "Test task", Tags: []string{"tag"}}
+		if err := srv.TaskQueue().Add(task); err != nil {
+			t.Fatalf("add %s failed: %v", taskID, err)
+		}
+		if err := srv.TaskQueue().Assign(taskID, guestID); err != nil {
+			t.Fatalf("assign %s failed: %v", taskID, err)
+		}
+		if err := srv.TaskQueue().Start(taskID); err != nil {
+			t.Fatalf("start %s failed: %v", taskID, err)
+		}
+		if err := srv.Registry().SetGuestTask(guestID, taskID); err != nil {
+			t.Fatalf("set guest task %s failed: %v", guestID, err)
+		}
+	}
+
+	registerRunningTask("kept-guest", "kept-task")
+	registerRunningTask("stale-guest", "stale-task")
+
+	// kept-guest missed several heartbeats (5s > 5x the 1s interval) but is
+	// still within the 10s silence window.
+	if err := srv.Registry().SetLastHeartbeat("kept-guest", time.Now().Add(-5*time.Second)); err != nil {
+		t.Fatalf("set last heartbeat failed: %v", err)
+	}
+	// stale-guest is beyond the 10s silence window.
+	if err := srv.Registry().SetLastHeartbeat("stale-guest", time.Now().Add(-15*time.Second)); err != nil {
+		t.Fatalf("set last heartbeat failed: %v", err)
+	}
+
+	srv.removeStaleGuests()
+
+	// kept-guest is still registered with its task still running.
+	kept, ok := srv.Registry().GetGuest("kept-guest")
+	if !ok {
+		t.Fatal("expected kept-guest to still be registered")
+	}
+	if kept.TaskID != "kept-task" {
+		t.Errorf("expected kept-guest task kept-task, got %s", kept.TaskID)
+	}
+	keptTask, _ := srv.TaskQueue().Get("kept-task")
+	if keptTask.Status != queue.TaskStatusRunning {
+		t.Errorf("expected kept-task RUNNING, got %s", keptTask.Status)
+	}
+
+	// stale-guest is removed and its task is failed.
+	if _, ok := srv.Registry().GetGuest("stale-guest"); ok {
+		t.Error("expected stale-guest to be removed")
+	}
+	staleTask, ok := srv.TaskQueue().Get("stale-task")
+	if !ok {
+		t.Fatal("expected stale-task to still exist")
+	}
+	if staleTask.Status != queue.TaskStatusFailed {
+		t.Errorf("expected stale-task FAILED, got %s", staleTask.Status)
+	}
+	if !strings.Contains(staleTask.Error, "stale (no heartbeat for") {
+		t.Errorf("expected stale error reason, got %q", staleTask.Error)
+	}
+}
+
+// TestRemoveStaleGuests_Disabled verifies that SilenceTimeout=0 disables
+// stale-guest removal entirely, even for a long-silent guest.
+func TestRemoveStaleGuests_Disabled(t *testing.T) {
+	cfg := config.ServerConfig{
+		Host:              "127.0.0.1",
+		Port:              0,
+		HeartbeatInterval: 1,
+		SilenceTimeout:    0, // disabled
+	}
+	srv := New(cfg)
+
+	srv.Registry().Register("stale-guest", "Stale Guest", []string{"tag"})
+	if err := srv.Registry().SetLastHeartbeat("stale-guest", time.Now().Add(-time.Hour)); err != nil {
+		t.Fatalf("set last heartbeat failed: %v", err)
+	}
+
+	srv.removeStaleGuests()
+
+	if _, ok := srv.Registry().GetGuest("stale-guest"); !ok {
+		t.Error("expected stale-guest to still be registered (removal disabled)")
+	}
+}
+
 func TestServerReload_MaxGuests(t *testing.T) {
 	srv := newTestServer(t)
 

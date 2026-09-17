@@ -41,8 +41,8 @@ func TestDefaultServerConfig(t *testing.T) {
 	if cfg.HeartbeatInterval != 30 {
 		t.Errorf("expected heartbeat_interval 30, got %d", cfg.HeartbeatInterval)
 	}
-	if cfg.SilenceTimeout != 1800 {
-		t.Errorf("expected silence_timeout 1800, got %d", cfg.SilenceTimeout)
+	if cfg.SilenceTimeout != 180 {
+		t.Errorf("expected silence_timeout 180, got %d", cfg.SilenceTimeout)
 	}
 	if cfg.TaskAssignmentTimeout != 90 {
 		t.Errorf("expected task_assignment_timeout 90, got %d", cfg.TaskAssignmentTimeout)
