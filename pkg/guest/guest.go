@@ -596,6 +596,20 @@ func (g *Guest) connectAndRegister() error {
 	return nil
 }
 
+// isStopping reports whether Stop has been called. Used to suppress
+// failure reporting for in-flight tasks during shutdown: the failure is
+// an artefact of the guest going away (the pi subprocess is killed before
+// it can emit agent_settled), not an agent fault, and the server re-queues
+// the task when the connection drops. See issue #184.
+func (g *Guest) isStopping() bool {
+	select {
+	case <-g.stopCh:
+		return true
+	default:
+		return false
+	}
+}
+
 // Stop gracefully stops the guest.
 func (g *Guest) Stop() {
 	g.mu.Lock()
@@ -739,6 +753,15 @@ func (g *Guest) ExecuteTask(task TaskAssignment) (*TaskResult, error) {
 	result, err := g.handler(ctx, task, g.SendLog)
 	if err != nil {
 		g.log.Printf("task %s failed: %v", task.TaskID, err)
+		if g.isStopping() {
+			// Shutdown artefact — do not report the failure. The server
+			// re-queues the task when the connection drops (see issue #184).
+			g.log.Printf("[TASK] task %s interrupted by guest shutdown; not reporting failure", task.TaskID)
+			if sendErr := g.SendLog(LogEntry{TaskID: task.TaskID, Line: "Task interrupted by guest shutdown; will be re-queued", Level: "system"}); sendErr != nil {
+				g.log.Printf("failed to send interruption log: %v", sendErr)
+			}
+			return nil, err
+		}
 		failureResult := TaskResult{
 			TaskID:  task.TaskID,
 			Success: false,
@@ -750,9 +773,28 @@ func (g *Guest) ExecuteTask(task TaskAssignment) (*TaskResult, error) {
 		return nil, err
 	}
 
-	g.log.Printf("[TASK] task %s completed successfully", task.TaskID)
-	if err := g.SendLog(LogEntry{TaskID: task.TaskID, Line: "Task completed successfully", Level: "system"}); err != nil {
-		g.log.Printf("failed to send task complete log: %v", err)
+	if !result.Success && g.isStopping() {
+		// The guest is shutting down: the pi subprocess was killed before it
+		// could emit agent_settled, so the failure is a shutdown artefact,
+		// not an agent fault. Do not report it — the server re-queues the
+		// task when the connection drops. See issue #184.
+		g.log.Printf("[TASK] task %s interrupted by guest shutdown; not reporting failure", task.TaskID)
+		if sendErr := g.SendLog(LogEntry{TaskID: task.TaskID, Line: "Task interrupted by guest shutdown; will be re-queued", Level: "system"}); sendErr != nil {
+			g.log.Printf("failed to send interruption log: %v", sendErr)
+		}
+		return result, nil
+	}
+
+	if result.Success {
+		g.log.Printf("[TASK] task %s completed successfully", task.TaskID)
+		if err := g.SendLog(LogEntry{TaskID: task.TaskID, Line: "Task completed successfully", Level: "system"}); err != nil {
+			g.log.Printf("failed to send task complete log: %v", err)
+		}
+	} else {
+		g.log.Printf("[TASK] task %s failed: %s", task.TaskID, result.Error)
+		if err := g.SendLog(LogEntry{TaskID: task.TaskID, Line: fmt.Sprintf("Task failed: %s", result.Error), Level: "error"}); err != nil {
+			g.log.Printf("failed to send task failure log: %v", err)
+		}
 	}
 
 	if err := g.SendResult(*result); err != nil {

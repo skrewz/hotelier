@@ -85,10 +85,14 @@ func main() {
 shutdown:
 	log.Println("shutting down guest...")
 
+	// Signal the guest before tearing down the pi handler: an in-flight
+	// task must observe the stop so it does not report a spurious failure
+	// (the pi subprocess is killed before it can emit agent_settled). The
+	// server re-queues the task when the connection drops. See issue #184.
+	g.Stop()
+
 	// Clean up handler resources (pi subprocess)
 	cleanup()
-
-	g.Stop()
 
 	log.Println("guest stopped")
 }
