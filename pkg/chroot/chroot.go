@@ -46,7 +46,11 @@ var essentialBins = []string{
 // homeDotDirs are the guest home subdirectories copied into every jail
 // (best effort — missing directories are skipped). They carry the pi agent
 // configuration, TLS certificates, git configs and API tokens that agents
-// rely on.
+// rely on. ~/.ssh is deliberately not copied: the guest's git flow
+// authenticates over HTTPS (client certs in ~/.certs, tokens in
+// ~/.forgejo-gitconfigs and ~/.tokens), so SSH keys are not needed — and
+// excluding them keeps the per-task credential surface minimal (review
+// feedback on PR #174).
 var homeDotDirs = []string{".pi", ".certs", ".forgejo-gitconfigs", ".tokens"}
 
 // etcFiles are the /etc files copied into every jail (best effort).
