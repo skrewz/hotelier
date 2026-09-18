@@ -979,8 +979,19 @@ func (h *PIHandler) setupChrootJail(taskDir, taskID string, sendLog func(LogEntr
 		return fail(fmt.Errorf("populate essential binaries: %w", err))
 	}
 	// The pi executable (and its npm package, when applicable). Fatal — a
-	// guest without pi cannot run tasks.
-	if err := jail.PopulatePi(); err != nil {
+	// guest without pi cannot run tasks. The pinned execPath (issue #33) is
+	// used verbatim so the jail always contains the exact binary the client
+	// spawns; only a handler that could not resolve pi at construction
+	// falls back to PATH.
+	piPath := h.piExecPath
+	if piPath == "" {
+		resolved, err := exec.LookPath("pi")
+		if err != nil {
+			return fail(fmt.Errorf("resolve pi: %w", err))
+		}
+		piPath = resolved
+	}
+	if err := jail.PopulatePi(piPath); err != nil {
 		return fail(fmt.Errorf("populate pi: %w", err))
 	}
 	// Guest home dot-directories (~/.pi, ~/.certs, ~/.forgejo-gitconfigs,

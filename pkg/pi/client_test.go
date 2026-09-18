@@ -953,7 +953,7 @@ read -r _ || true
 	t.Cleanup(func() { os.Setenv("PATH", origPath) })
 	os.Setenv("PATH", binDir+string(os.PathListSeparator)+origPath)
 
-	if err := j.PopulatePi(); err != nil {
+	if err := j.PopulatePi(fakePi); err != nil {
 		t.Fatalf("populate pi: %v", err)
 	}
 	for _, bin := range []string{"sh", "env"} {

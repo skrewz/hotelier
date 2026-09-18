@@ -325,13 +325,15 @@ func isUnderAny(p string, paths []string) bool {
 	return false
 }
 
-// PopulatePi copies the pi executable (and, when pi is an npm package, the
-// whole package) into the jail at their host paths. It fails if pi is not
-// found on the host PATH — a guest without pi cannot run tasks.
-func (j *Jail) PopulatePi() error {
-	piPath, err := exec.LookPath("pi")
-	if err != nil {
-		return fmt.Errorf("look up pi: %w", err)
+// PopulatePi copies the pi executable at piPath (and, when pi is an npm
+// package, the whole package) into the jail at their host paths. piPath
+// must be the absolute host path of the executable the client will spawn —
+// the caller resolves it (the guest pins it at construction, issue #33) so
+// the jail always contains exactly the binary that will be executed. It
+// fails if the path is missing — a guest without pi cannot run tasks.
+func (j *Jail) PopulatePi(piPath string) error {
+	if !filepath.IsAbs(piPath) {
+		return fmt.Errorf("pi path %q must be absolute", piPath)
 	}
 	resolved, err := filepath.EvalSymlinks(piPath)
 	if err != nil {

@@ -336,11 +336,11 @@ func TestJail_PopulatePi_Package(t *testing.T) {
 	binDir := makeFakePiPackage(t)
 	withFakePath(t, binDir)
 
-	if err := j.PopulatePi(); err != nil {
+	piHostPath := filepath.Join(binDir, "pi")
+	if err := j.PopulatePi(piHostPath); err != nil {
 		t.Fatalf("PopulatePi failed: %v", err)
 	}
 
-	piHostPath := filepath.Join(binDir, "pi")
 	piDst := filepath.Join(j.root, piHostPath)
 	info, err := os.Lstat(piDst)
 	if err != nil {
@@ -365,7 +365,7 @@ func TestJail_PopulatePi_PlainScript(t *testing.T) {
 	writeHostFile(t, binDir, "pi", "#!/bin/sh\necho fake pi\n", 0o755)
 	withFakePath(t, binDir)
 
-	if err := j.PopulatePi(); err != nil {
+	if err := j.PopulatePi(filepath.Join(binDir, "pi")); err != nil {
 		t.Fatalf("PopulatePi failed: %v", err)
 	}
 	dst := filepath.Join(j.root, binDir, "pi")
@@ -374,15 +374,37 @@ func TestJail_PopulatePi_PlainScript(t *testing.T) {
 	}
 }
 
-func TestJail_PopulatePi_NotFound(t *testing.T) {
+// TestJail_PopulatePi_UsesGivenPath verifies that PopulatePi copies exactly
+// the path the caller passes — it must not re-resolve "pi" via PATH, or a
+// jail could end up with a different binary than the one the client spawns
+// (review feedback on PR #174).
+func TestJail_PopulatePi_UsesGivenPath(t *testing.T) {
 	j := newTestJail(t)
-	// Point PATH at an empty dir so "pi" cannot be found.
-	empty := t.TempDir()
-	orig := os.Getenv("PATH")
-	t.Cleanup(func() { os.Setenv("PATH", orig) })
-	os.Setenv("PATH", empty)
-	if err := j.PopulatePi(); err == nil {
-		t.Error("PopulatePi should fail when pi is not in PATH")
+	// A pi on PATH (which must be ignored)...
+	pathDir := t.TempDir()
+	writeHostFile(t, pathDir, "pi", "#!/bin/sh\necho path pi\n", 0o755)
+	withFakePath(t, pathDir)
+	// ...and the pi the caller actually wants, off PATH.
+	offPathPi := writeHostFile(t, t.TempDir(), "pi", "#!/bin/sh\necho off-path pi\n", 0o755)
+
+	if err := j.PopulatePi(offPathPi); err != nil {
+		t.Fatalf("PopulatePi failed: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(j.root, offPathPi)); err != nil {
+		t.Errorf("given pi path should be copied into the jail: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(j.root, pathDir, "pi")); !os.IsNotExist(err) {
+		t.Errorf("the PATH pi must NOT be copied into the jail (err=%v)", err)
+	}
+}
+
+// TestJail_PopulatePi_RelativePathRejected verifies that PopulatePi rejects
+// a relative path: the caller must pass the absolute host path of the
+// executable it will spawn, so the jail mirrors exactly that path.
+func TestJail_PopulatePi_RelativePathRejected(t *testing.T) {
+	j := newTestJail(t)
+	if err := j.PopulatePi("pi"); err == nil {
+		t.Error("PopulatePi should reject a relative path")
 	}
 }
 
@@ -732,7 +754,7 @@ func TestJail_PopulatePi_StrayPackageJSON(t *testing.T) {
 	writeHostFile(t, binDir, "pi", "#!/bin/sh\necho fake pi\n", 0o755)
 	withFakePath(t, binDir)
 
-	if err := j.PopulatePi(); err != nil {
+	if err := j.PopulatePi(filepath.Join(binDir, "pi")); err != nil {
 		t.Fatalf("PopulatePi failed: %v", err)
 	}
 	// The bin file is copied...
@@ -925,7 +947,7 @@ func TestJail_PopulatePi_StringBinForm(t *testing.T) {
 	}
 	withFakePath(t, binDir)
 
-	if err := j.PopulatePi(); err != nil {
+	if err := j.PopulatePi(filepath.Join(binDir, "pi")); err != nil {
 		t.Fatalf("PopulatePi failed: %v", err)
 	}
 	if _, err := os.Stat(filepath.Join(j.root, pkgDir, "dist", "cli.js")); err != nil {
@@ -953,7 +975,7 @@ func TestJail_PopulatePi_BinPointsElsewhere(t *testing.T) {
 	writeHostFile(t, binDir, "pi", "#!/bin/sh\necho fake pi\n", 0o755)
 	withFakePath(t, binDir)
 
-	if err := j.PopulatePi(); err != nil {
+	if err := j.PopulatePi(filepath.Join(binDir, "pi")); err != nil {
 		t.Fatalf("PopulatePi failed: %v", err)
 	}
 	// pi is copied as a plain file...

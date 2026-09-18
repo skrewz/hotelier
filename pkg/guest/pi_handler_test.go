@@ -1926,6 +1926,34 @@ func TestPIHandler_SetupChrootJail(t *testing.T) {
 	}
 }
 
+// TestPIHandler_SetupChrootJail_PiUnresolvable verifies that
+// setupChrootJail fails — and removes the partial jail — when pi is neither
+// pinned at construction nor resolvable via PATH.
+func TestPIHandler_SetupChrootJail_PiUnresolvable(t *testing.T) {
+	// Point PATH at an empty dir before construction so the handler cannot
+	// pin a pi path and the fallback lookup also fails.
+	empty := t.TempDir()
+	origPath := os.Getenv("PATH")
+	t.Cleanup(func() { os.Setenv("PATH", origPath) })
+	os.Setenv("PATH", empty)
+
+	h := NewPIHandler(t.TempDir(), "", "", "")
+	if h.piExecPath != "" {
+		t.Fatalf("precondition: piExecPath should be empty, got %q", h.piExecPath)
+	}
+
+	taskDir := filepath.Join(t.TempDir(), "task")
+	if err := os.MkdirAll(taskDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := h.setupChrootJail(taskDir, "task-unresolvable", func(LogEntry) error { return nil }); err == nil {
+		t.Fatal("setupChrootJail should fail when pi cannot be resolved")
+	}
+	if _, err := os.Stat(taskDir + ".chroot"); !os.IsNotExist(err) {
+		t.Errorf("partial jail should be removed (err=%v)", err)
+	}
+}
+
 // TestPIHandler_ExecuteTask_ChrootSpawnFailure verifies that with chroot
 // enabled (the default), ExecuteTask fails at spawn in an unprivileged
 // environment (chroot(2) returns EPERM) and the jail is cleaned up.
