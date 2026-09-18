@@ -207,6 +207,34 @@ func (q *TaskQueue) addLocked(task *Task) error {
 	return nil
 }
 
+// Restore adds a task that was previously persisted (issue #190),
+// preserving its original CreatedAt and attributes. Every restored task
+// enters the queue as PENDING with its assignment cleared: guests do not
+// survive a server restart, so ASSIGNED and RUNNING tasks re-enter the
+// queue as they were and are (re-)assigned afresh.
+func (q *TaskQueue) Restore(task *Task) error {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+
+	if _, exists := q.tasks[task.ID]; exists {
+		return fmt.Errorf("task %s already exists", task.ID)
+	}
+
+	task.Status = TaskStatusPending
+	task.AssignedTo = ""
+	task.AssignedAt = time.Time{}
+	if task.CreatedAt.IsZero() {
+		task.CreatedAt = time.Now()
+	}
+	if task.Priority == "" || !ValidatePriority(task.Priority) {
+		task.Priority = PriorityOrangutan
+	}
+	q.tasks[task.ID] = task
+	q.ordered = append(q.ordered, task)
+	q.logf("task restored: %s (status: %s, tags: %v, priority: %s)", task.ID, task.Status, task.Tags, task.Priority)
+	return nil
+}
+
 // Get returns a task by ID.
 func (q *TaskQueue) Get(taskID string) (*Task, bool) {
 	q.mu.RLock()
