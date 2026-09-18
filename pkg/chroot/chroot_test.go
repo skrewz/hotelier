@@ -52,6 +52,25 @@ func TestJail_Setup_CreatesRoot(t *testing.T) {
 	}
 }
 
+// TestJail_Setup_RootIsPrivate verifies that the jail root is created
+// 0700: the jail holds credential copies, so it must not be
+// world-traversable even though mirrored directories inside it may be
+// 0755 (review feedback on PR #174).
+func TestJail_Setup_RootIsPrivate(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "jail")
+	j := NewJail(root, log.New(io.Discard, "", 0))
+	if err := j.Setup(); err != nil {
+		t.Fatalf("Setup failed: %v", err)
+	}
+	info, err := os.Stat(root)
+	if err != nil {
+		t.Fatalf("jail root should exist: %v", err)
+	}
+	if got := info.Mode().Perm(); got != 0o700 {
+		t.Errorf("jail root mode = %o, want 0700", got)
+	}
+}
+
 func TestJail_Cleanup_RemovesRoot(t *testing.T) {
 	j := newTestJail(t)
 	writeHostFile(t, j.root, "etc/hostname", "host", 0o644)
@@ -438,6 +457,30 @@ func TestJail_PopulateHome_MissingDirsSkipped(t *testing.T) {
 	os.Setenv("HOME", home)
 	if err := j.PopulateHome(); err != nil {
 		t.Errorf("PopulateHome with empty home should not fail: %v", err)
+	}
+}
+
+// TestJail_PopulateHome_HomePrefixIsPrivate verifies that the mirrored home
+// directory inside the jail is 0700: it holds the credential dot-dirs and
+// must not be widened by the generic 0755 parent-dir creation (review
+// feedback on PR #174).
+func TestJail_PopulateHome_HomePrefixIsPrivate(t *testing.T) {
+	j := newTestJail(t)
+	home := t.TempDir()
+	writeHostFile(t, home, ".tokens/file.txt", "token", 0o600)
+	origHome := os.Getenv("HOME")
+	t.Cleanup(func() { os.Setenv("HOME", origHome) })
+	os.Setenv("HOME", home)
+
+	if err := j.PopulateHome(); err != nil {
+		t.Fatalf("PopulateHome failed: %v", err)
+	}
+	info, err := os.Stat(filepath.Join(j.root, home))
+	if err != nil {
+		t.Fatalf("mirrored home prefix should exist: %v", err)
+	}
+	if got := info.Mode().Perm(); got != 0o700 {
+		t.Errorf("mirrored home prefix mode = %o, want 0700", got)
 	}
 }
 

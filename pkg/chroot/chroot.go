@@ -95,9 +95,11 @@ func (j *Jail) Path() string {
 	return j.root
 }
 
-// Setup creates the jail root directory.
+// Setup creates the jail root directory. The root is 0700: the jail holds
+// credential copies, so it must not be world-traversable even though
+// mirrored directories inside it may be 0755 (review feedback on PR #174).
 func (j *Jail) Setup() error {
-	if err := os.MkdirAll(j.root, 0o755); err != nil {
+	if err := os.MkdirAll(j.root, 0o700); err != nil {
 		return fmt.Errorf("create jail root %s: %w", j.root, err)
 	}
 	return nil
@@ -377,6 +379,16 @@ func (j *Jail) PopulateHome() error {
 			return fmt.Errorf("copy %s: %w", src, err)
 		}
 		j.log.Printf("chroot: copied %s into jail", src)
+	}
+	// The mirrored home prefix is created 0755 by the generic parent-dir
+	// MkdirAll in the copy calls above; tighten it to 0700 — it holds the
+	// credential dot-dirs and must not be world-listable (review feedback
+	// on PR #174). Best effort: a chmod failure must not break the jail.
+	jailHome := filepath.Join(j.root, home)
+	if _, err := os.Stat(jailHome); err == nil {
+		if err := os.Chmod(jailHome, 0o700); err != nil {
+			j.log.Printf("chroot: failed to tighten mirrored home prefix %s: %v", jailHome, err)
+		}
 	}
 	return nil
 }
