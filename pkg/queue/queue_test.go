@@ -1243,3 +1243,104 @@ func TestAddOrDedup_ConcurrentSameKey(t *testing.T) {
 		t.Errorf("expected exactly 1 task in queue, got %d", q.Count())
 	}
 }
+
+// --- Restore (queue persistence, issue #190) ---
+
+func TestTaskQueue_Restore_PreservesCreatedAt(t *testing.T) {
+	q := NewTaskQueue(func(format string, args ...interface{}) {})
+
+	created := time.Now().Add(-2 * time.Hour)
+	task := &Task{
+		ID:        "task-1",
+		Prompt:    "restored",
+		Tags:      []string{"t1"},
+		Priority:  PriorityFirefighter,
+		Status:    TaskStatusPending,
+		CreatedAt: created,
+	}
+
+	if err := q.Restore(task); err != nil {
+		t.Fatalf("Restore failed: %v", err)
+	}
+
+	restored, ok := q.Get("task-1")
+	if !ok {
+		t.Fatal("expected task to exist")
+	}
+	if !restored.CreatedAt.Equal(created) {
+		t.Errorf("expected CreatedAt %v to be preserved, got %v", created, restored.CreatedAt)
+	}
+	if restored.Status != TaskStatusPending {
+		t.Errorf("expected PENDING, got %s", restored.Status)
+	}
+	if restored.Priority != PriorityFirefighter {
+		t.Errorf("expected priority to be preserved, got %s", restored.Priority)
+	}
+}
+
+func TestTaskQueue_Restore_ForcesPending(t *testing.T) {
+	q := NewTaskQueue(func(format string, args ...interface{}) {})
+
+	for _, status := range []TaskStatus{TaskStatusAssigned, TaskStatusRunning} {
+		id := fmt.Sprintf("task-%s", status)
+		task := &Task{
+			ID:         id,
+			Prompt:     "restored",
+			Status:     status,
+			CreatedAt:  time.Now().Add(-time.Hour),
+			AssignedTo: "guest-1",
+		}
+		if err := q.Restore(task); err != nil {
+			t.Fatalf("Restore(%s) failed: %v", status, err)
+		}
+		restored, ok := q.Get(id)
+		if !ok {
+			t.Fatalf("expected task %s to exist", id)
+		}
+		if restored.Status != TaskStatusPending {
+			t.Errorf("expected restored task to be PENDING, got %s", restored.Status)
+		}
+		if restored.AssignedTo != "" {
+			t.Errorf("expected assignment to be cleared, got %q", restored.AssignedTo)
+		}
+	}
+}
+
+func TestTaskQueue_Restore_DefaultsPriority(t *testing.T) {
+	q := NewTaskQueue(func(format string, args ...interface{}) {})
+
+	task := &Task{ID: "task-1", Prompt: "restored", CreatedAt: time.Now()}
+	if err := q.Restore(task); err != nil {
+		t.Fatalf("Restore failed: %v", err)
+	}
+	restored, _ := q.Get("task-1")
+	if restored.Priority != PriorityOrangutan {
+		t.Errorf("expected default priority orangutan, got %s", restored.Priority)
+	}
+}
+
+func TestTaskQueue_Restore_UsesNowWhenCreatedAtZero(t *testing.T) {
+	q := NewTaskQueue(func(format string, args ...interface{}) {})
+
+	before := time.Now()
+	task := &Task{ID: "task-1", Prompt: "restored"}
+	if err := q.Restore(task); err != nil {
+		t.Fatalf("Restore failed: %v", err)
+	}
+	restored, _ := q.Get("task-1")
+	if restored.CreatedAt.IsZero() || restored.CreatedAt.Before(before.Add(-time.Second)) {
+		t.Errorf("expected CreatedAt to default to now, got %v", restored.CreatedAt)
+	}
+}
+
+func TestTaskQueue_Restore_DuplicateErrors(t *testing.T) {
+	q := NewTaskQueue(func(format string, args ...interface{}) {})
+
+	if err := q.Add(&Task{ID: "task-1", Prompt: "original"}); err != nil {
+		t.Fatalf("Add failed: %v", err)
+	}
+	err := q.Restore(&Task{ID: "task-1", Prompt: "duplicate", CreatedAt: time.Now()})
+	if err == nil {
+		t.Error("expected error restoring duplicate task, got nil")
+	}
+}

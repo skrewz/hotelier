@@ -12,6 +12,7 @@ heartbeat_interval: 30
 silence_timeout: 180
 max_guests: 0
 # log_dir: "/var/log/hotelier"  # Persist task logs to disk (empty = in-memory only)
+# queue_dir: "/var/lib/hotelier/queue"  # Persist unprocessed tasks across restarts (empty = in-memory only)
 
 # Personas define named sets of environment variables and file copies
 # that are applied to a task's working directory. Tasks can specify a

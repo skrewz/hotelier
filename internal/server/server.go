@@ -364,9 +364,41 @@ func New(cfg config.ServerConfig) *Server {
 		}
 	}
 
+	// Initialize queue persistence if configured (issue #190): persist
+	// unprocessed tasks to disk and restore them from a previous run.
+	if cfg.QueueDir != "" {
+		store, err := queue.NewStore(cfg.QueueDir, logger.Printf)
+		if err != nil {
+			logger.Printf("failed to create queue store at %s: %v (queue will be in-memory only)", cfg.QueueDir, err)
+		} else {
+			s.orchestrator.SetStore(store)
+			if restored, err := s.restoreTasks(store); err != nil {
+				logger.Printf("failed to restore tasks from %s: %v", cfg.QueueDir, err)
+			} else if restored > 0 {
+				logger.Printf("restored %d task(s) from %s", restored, cfg.QueueDir)
+			}
+		}
+	}
+
 	s.registerRPCMethods()
 
 	return s
+}
+
+// restoreTasks loads persisted tasks from the queue store and re-adds them
+// to the queue as PENDING (issue #190). Tasks that fail to restore are
+// logged and skipped. Returns the number of tasks loaded from the store.
+func (s *Server) restoreTasks(store *queue.Store) (int, error) {
+	tasks, err := store.Load()
+	if err != nil {
+		return 0, err
+	}
+	for _, task := range tasks {
+		if err := s.orchestrator.RestoreTask(task); err != nil {
+			s.log.Printf("failed to restore task %s: %v", task.ID, err)
+		}
+	}
+	return len(tasks), nil
 }
 
 // Start starts the server.

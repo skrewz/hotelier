@@ -49,6 +49,12 @@ type ServerConfig struct {
 	// LogDir is the base directory where task logs are persisted to disk.
 	// When empty, logs are kept in memory only.
 	LogDir string `yaml:"log_dir"`
+	// QueueDir is the directory where unprocessed tasks (pending, assigned,
+	// running) are persisted as JSON files, one per task, in per-status
+	// subdirectories. When the server starts, persisted tasks are restored
+	// to the queue as PENDING (issue #190). When empty, the queue is
+	// in-memory only.
+	QueueDir string `yaml:"queue_dir"`
 	// Personas is a list of persona definitions. Each persona specifies
 	// environment variables and file copies that are applied to a task's
 	// working directory. See pkg/persona for details.

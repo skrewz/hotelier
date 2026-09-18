@@ -22,7 +22,8 @@ import (
 type Orchestrator struct {
 	queue    *queue.TaskQueue
 	registry *registry.GuestRegistry
-	mu       sync.Mutex // single lock for all compound mutations
+	store    *queue.Store // optional: persists non-terminal tasks to disk (issue #190)
+	mu       sync.Mutex   // single lock for all compound mutations
 	logf     func(format string, args ...interface{})
 }
 
@@ -45,6 +46,31 @@ func NewWithExisting(q *queue.TaskQueue, r *registry.GuestRegistry, logf func(fo
 		registry: r,
 		logf:     logf,
 	}
+}
+
+// SetStore wires in a queue store so that every lifecycle mutation is
+// persisted to disk (issue #190). A nil store disables persistence.
+// Call this before tasks are added.
+func (o *Orchestrator) SetStore(store *queue.Store) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	o.store = store
+}
+
+// RestoreTask re-adds a previously persisted task at startup (issue #190).
+// The task's attributes (prompt, tags, priority, created_at) are preserved,
+// but it always enters the queue as PENDING with its assignment cleared:
+// guests do not survive a restart, so ASSIGNED and RUNNING tasks re-enter
+// the queue as they were and are (re-)assigned afresh.
+func (o *Orchestrator) RestoreTask(task *queue.Task) error {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+
+	if err := o.queue.Restore(task); err != nil {
+		return err
+	}
+	o.persistTask(task)
+	return nil
 }
 
 // --- Guest Lifecycle ---
@@ -104,7 +130,11 @@ func (o *Orchestrator) AddTask(task *queue.Task) error {
 	o.mu.Lock()
 	defer o.mu.Unlock()
 
-	return o.queue.Add(task)
+	if err := o.queue.Add(task); err != nil {
+		return err
+	}
+	o.persistTask(task)
+	return nil
 }
 
 // AddTaskOrDedup adds a new task to the queue in PENDING state, with
@@ -114,7 +144,14 @@ func (o *Orchestrator) AddTaskOrDedup(task *queue.Task) (*queue.Task, bool, erro
 	o.mu.Lock()
 	defer o.mu.Unlock()
 
-	return o.queue.AddOrDedup(task)
+	existing, deduplicated, err := o.queue.AddOrDedup(task)
+	if err != nil {
+		return nil, false, err
+	}
+	if !deduplicated {
+		o.persistTask(existing)
+	}
+	return existing, deduplicated, nil
 }
 
 // GetTask returns a task by ID.
@@ -168,6 +205,7 @@ func (o *Orchestrator) AssignTask(taskID, guestID string) error {
 	guest.State = registry.GuestStateRunning
 	guest.LastTaskHeartbeat = time.Time{} // reset — guest must confirm via heartbeat
 
+	o.persistTask(task)
 	o.logf("task %s assigned to guest %s (atomic: PENDING→ASSIGNED, IDLE→RUNNING)", taskID, guestID)
 	return nil
 }
@@ -203,6 +241,7 @@ func (o *Orchestrator) AcknowledgeTask(taskID, guestID string) error {
 	}
 
 	task.Status = queue.TaskStatusRunning
+	o.persistTask(task)
 	o.logf("task %s acknowledged by guest %s (ASSIGNED→RUNNING)", taskID, guestID)
 	return nil
 }
@@ -235,6 +274,7 @@ func (o *Orchestrator) CompleteTask(taskID, guestID, result string) error {
 	task.Result = result
 
 	o.clearGuestTaskInternal(guestID)
+	o.forgetTask(taskID)
 
 	o.logf("task %s completed by guest %s (atomic: →COMPLETED, RUNNING→IDLE)", taskID, guestID)
 	return nil
@@ -268,6 +308,7 @@ func (o *Orchestrator) FailTask(taskID, guestID, errMsg string) error {
 	task.Error = errMsg
 
 	o.clearGuestTaskInternal(guestID)
+	o.forgetTask(taskID)
 
 	o.logf("task %s failed by guest %s (atomic: →FAILED, RUNNING→IDLE): %s", taskID, guestID, errMsg)
 	return nil
@@ -303,6 +344,7 @@ func (o *Orchestrator) CancelTask(taskID, guestID string) error {
 	if guestID != "" {
 		o.clearGuestTaskInternal(guestID)
 	}
+	o.forgetTask(taskID)
 
 	o.logf("task %s cancelled (atomic: →CANCELLED%s)", taskID,
 		func() string {
@@ -416,6 +458,7 @@ func (o *Orchestrator) TryAssignNext() bool {
 	guest.State = registry.GuestStateRunning
 	guest.LastTaskHeartbeat = time.Time{}
 
+	o.persistTask(task)
 	o.logf("task %s auto-assigned to guest %s", task.ID, guest.ID)
 	return true
 }
@@ -716,6 +759,7 @@ func (o *Orchestrator) CheckSilentGuests(timeout time.Duration) []SilentGuest {
 		task.Error = fmt.Sprintf("guest %s silent for %v", guest.ID, now.Sub(guest.LastHeartbeat))
 
 		o.clearGuestTaskInternal(guest.ID)
+		o.forgetTask(task.ID)
 		failed = append(failed, SilentGuest{GuestID: guest.ID, TaskID: task.ID})
 
 		o.logf("silent guest %s: task %s failed (silent for %v)", guest.ID, task.ID, now.Sub(guest.LastHeartbeat))
@@ -761,6 +805,7 @@ func (o *Orchestrator) RemoveStaleGuests(timeout time.Duration) []StaleGuest {
 				task.Error = fmt.Sprintf("guest %s stale (no heartbeat for %v)", guest.ID, now.Sub(guest.LastHeartbeat))
 				taskID = task.ID
 				taskWasRunning = true
+				o.forgetTask(task.ID)
 				o.logf("stale guest %s: task %s failed (no heartbeat for %v)",
 					guest.ID, task.ID, now.Sub(guest.LastHeartbeat))
 			}
@@ -798,6 +843,31 @@ func (o *Orchestrator) requeueTaskInternal(taskID string) {
 	task.Status = queue.TaskStatusPending
 	task.AssignedTo = ""
 	task.AssignedAt = time.Time{}
+	o.persistTask(task)
+}
+
+// persistTask writes a non-terminal task to the queue store. The caller
+// must hold o.mu. A nil store (persistence disabled) is a no-op; store
+// errors are logged, not returned — a persistence failure must not break
+// task processing.
+func (o *Orchestrator) persistTask(task *queue.Task) {
+	if o.store == nil {
+		return
+	}
+	if err := o.store.Save(task); err != nil {
+		o.logf("queue store: failed to persist task %s: %v", task.ID, err)
+	}
+}
+
+// forgetTask removes a (now terminal) task from the queue store. The caller
+// must hold o.mu. A nil store is a no-op; store errors are logged.
+func (o *Orchestrator) forgetTask(taskID string) {
+	if o.store == nil {
+		return
+	}
+	if err := o.store.Delete(taskID); err != nil {
+		o.logf("queue store: failed to forget task %s: %v", taskID, err)
+	}
 }
 
 func (o *Orchestrator) clearGuestTaskInternal(guestID string) {

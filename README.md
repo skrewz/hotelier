@@ -205,6 +205,7 @@ podman run -d --name hotelier \
 |-------|--------|
 | `/etc/hotelier` | Config files (read-only recommended) — mount a host directory containing `server.yaml` |
 | `/var/log/hotelier` | Task log persistence — set `log_dir` in config to enable; mount a host directory |
+| `/var/lib/hotelier/queue` | Queue persistence — set `queue_dir` in config to enable; mount a host directory |
 
 Example with read-only config:
 
@@ -253,6 +254,46 @@ podman run -d --name hotelier \
   -p 8080:8080 \
   -v /path/to/config:/etc/hotelier:Z,ro \
   -v /path/to/logs:/var/log/hotelier:Z \
+  hotelier:latest
+```
+
+#### Queue Persistence
+
+Set `queue_dir` in `server.yaml` to remember unprocessed tasks across server
+restarts. Without it, the queue is in-memory only and a restart drops every
+pending, assigned and running task.
+
+```yaml
+queue_dir: "/var/lib/hotelier/queue"
+```
+
+Unprocessed tasks are stored as JSON files, one per task, in per-status
+subdirectories:
+
+```
+/var/lib/hotelier/queue/
+  pending/
+    task-abc123.json
+  assigned/
+    task-def456.json
+  running/
+    task-ghi789.json
+```
+
+When the server starts, persisted tasks are restored to the queue. Pending
+tasks re-enter as they were; assigned and running tasks re-enter as PENDING
+(their original prompt, tags, priority and creation time are preserved) and
+are (re-)assigned afresh when guests reconnect — a running task is
+effectively re-started from the beginning. Terminal tasks (completed, failed,
+cancelled) are not persisted.
+
+Run with queue persistence:
+
+```bash
+podman run -d --name hotelier \
+  -p 8080:8080 \
+  -v /path/to/config:/etc/hotelier:Z,ro \
+  -v /path/to/queue:/var/lib/hotelier/queue:Z \
   hotelier:latest
 ```
 
