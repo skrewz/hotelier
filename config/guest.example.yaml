@@ -16,3 +16,8 @@ log_level: "info"
 # Both fields must be set together — setting only one will cause a startup error.
 #client_cert: "/path/to/client-cert.pem"
 #client_key:  "/path/to/client-key.pem"
+
+# Task isolation: every task runs inside its own chroot jail (issue #51).
+# This is always enabled and cannot be disabled. The guest process must have
+# CAP_SYS_CHROOT (run as root, or with --cap-add SYS_CHROOT) — the guest
+# fails at startup otherwise.

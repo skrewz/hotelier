@@ -9,10 +9,12 @@ import (
 	"log"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 )
 
@@ -59,6 +61,9 @@ type PiClient struct {
 	guestDir      string
 	debug         bool
 	env           map[string]string // extra environment variables for the subprocess
+	// chrootRoot, when set, is the root of a chroot jail the pi subprocess
+	// is spawned into (issue #51). The cwd must exist inside the jail.
+	chrootRoot string
 	// spawnOutput is invoked for each line of combined stderr/stdout output
 	// during the initial spawn phase (first 10 lines total).
 	spawnOutput *func(line string)
@@ -116,6 +121,11 @@ type PiClientConfig struct {
 	// is reached, regular logging takes over. Useful for troubleshooting spawn
 	// failures where the subprocess produces output before dying.
 	SpawnOutput func(line string)
+	// ChrootRoot, when set, is the root of a chroot jail the pi subprocess
+	// is spawned into (issue #51). The CWD must exist inside the jail, and
+	// everything pi needs (binaries, libraries, config) must be present in
+	// the jail at the same absolute paths it has on the host.
+	ChrootRoot string
 }
 
 // NewClient creates a new pi RPC client.
@@ -133,6 +143,7 @@ func NewClient(cfg PiClientConfig) *PiClient {
 		guestDir:      cfg.GuestDir,
 		debug:         cfg.Debug,
 		env:           cfg.Env,
+		chrootRoot:    cfg.ChrootRoot,
 		eventCh:       make(chan Event, 256),
 		doneCh:        make(chan struct{}),
 		processExited: make(chan struct{}),
@@ -165,7 +176,27 @@ func (c *PiClient) Start(ctx context.Context) error {
 	if c.execPath != "" {
 		piBin = c.execPath
 	}
+	// When chroot isolation is active (issue #51), the child is chrooted
+	// before exec, so pi must be referenced by an absolute path that exists
+	// inside the jail. The pinned execPath is already absolute (it is an
+	// exec.LookPath("pi") result, and PopulatePi mirrors it into the jail
+	// at the same host path); only an unpinned "pi" needs resolving here.
+	// Go performs chroot(2) in the child before chdir(2) (see
+	// syscall/exec_linux.go), so c.cmd.Dir is interpreted inside the jail —
+	// it must be a path that exists there.
+	if c.chrootRoot != "" {
+		if !filepath.IsAbs(piBin) {
+			resolved, err := exec.LookPath("pi")
+			if err != nil {
+				return fmt.Errorf("resolve pi for chroot: %w", err)
+			}
+			piBin = resolved
+		}
+	}
 	c.cmd = exec.CommandContext(ctx, piBin, args...)
+	if c.chrootRoot != "" {
+		c.cmd.SysProcAttr = &syscall.SysProcAttr{Chroot: c.chrootRoot}
+	}
 	c.cmd.Dir = c.cwd
 
 	// Apply extra environment variables (persona env vars)
@@ -192,7 +223,11 @@ func (c *PiClient) Start(ctx context.Context) error {
 		return fmt.Errorf("stderr pipe: %w", err)
 	}
 
-	c.log.Printf("pi command: %s (cwd: %s)", strings.Join(c.cmd.Args, " "), c.cwd)
+	if c.chrootRoot != "" {
+		c.log.Printf("pi command: %s (chroot: %s, cwd: %s)", strings.Join(c.cmd.Args, " "), c.chrootRoot, c.cwd)
+	} else {
+		c.log.Printf("pi command: %s (cwd: %s)", strings.Join(c.cmd.Args, " "), c.cwd)
+	}
 
 	if err := c.cmd.Start(); err != nil {
 		return fmt.Errorf("start pi: %w", err)

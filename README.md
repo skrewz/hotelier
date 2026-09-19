@@ -323,6 +323,25 @@ cp config/guest.example.yaml config/guest.yaml
 ./bin/guest
 ```
 
+### Task Isolation (chroot)
+
+Every task runs inside its own **chroot jail** (issue #51). Before spawning
+the pi subprocess, the guest copies into a private directory tree: the pi
+executable (and its npm package), essential host binaries with their shared
+libraries — plus the runtime *data* files `ldd` never reports (the python3
+stdlib, git's exec path, and the npm/npx package directory, where
+detectable), `~/.pi`, `~/.certs`, `~/.forgejo-gitconfigs`, `~/.tokens`, the
+required `/etc` files, basic `/dev` nodes, and the task's working directory.
+Files are placed at the same absolute paths they have on the host, so
+existing path references (shebangs, git credential paths, persona
+`<workpath>` variables) keep working unmodified inside the jail. The jail is
+removed when the task completes.
+
+Chroot isolation is always enabled and cannot be disabled. The guest process
+therefore requires **CAP_SYS_CHROOT** — run it as root, or with
+`--cap-add SYS_CHROOT` under Podman. The guest fails at startup if it cannot
+chroot.
+
 ## License
 
 MIT

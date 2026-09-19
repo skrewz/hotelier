@@ -13,6 +13,7 @@ import (
 	"sync"
 	"time"
 
+	"hotelier/pkg/chroot"
 	"hotelier/pkg/persona"
 	"hotelier/pkg/pi"
 )
@@ -32,6 +33,12 @@ type PIHandler struct {
 	// (issue #180). Defaults to os.RemoveAll; overridable in tests to
 	// simulate removal failures.
 	removeDir func(string) error
+	// chrootEnabled controls whether each task runs inside a chroot jail
+	// (issue #51). It is always true when the handler is constructed via
+	// NewPIHandler/NewPIHandlerDebug — chroot isolation is unavoidable in
+	// production. Tests that exercise non-chroot code paths in environments
+	// without CAP_SYS_CHROOT may set it to false directly.
+	chrootEnabled bool
 }
 
 // NewPIHandler creates a new PIHandler.
@@ -75,12 +82,13 @@ func NewPIHandlerDebug(cwd string, provider, model, thinkingLevel string, debug 
 		ExecPath:      piExecPath,
 	}
 	return &PIHandler{
-		baseCWD:    cwd,
-		client:     pi.NewClient(cfg),
-		log:        logger,
-		debug:      debug,
-		piExecPath: piExecPath,
-		removeDir:  os.RemoveAll,
+		baseCWD:       cwd,
+		client:        pi.NewClient(cfg),
+		log:           logger,
+		debug:         debug,
+		piExecPath:    piExecPath,
+		removeDir:     os.RemoveAll,
+		chrootEnabled: true,
 	}
 }
 
@@ -90,6 +98,12 @@ func NewPIHandlerDebug(cwd string, provider, model, thinkingLevel string, debug 
 // directory does not exist (e.g. /tmp cleared by a reboot).
 // It then sweeps any stale task directories left behind by a previous,
 // dead execution (issue #180) before starting the pi subprocess.
+//
+// Note: like the transient restart client (see restartClient), this
+// initial client runs WITHOUT a chroot jail (issue #51). It is replaced
+// by resetClientWithEnv — which builds the task's jail — before any task
+// prompt is sent, so no task ever runs outside the jail; the no-jail
+// window spans guest startup until the first task.
 func (h *PIHandler) Start(ctx context.Context) error {
 	if err := os.MkdirAll(h.baseCWD, 0o755); err != nil {
 		return fmt.Errorf("create workdir %s: %w", h.baseCWD, err)
@@ -226,7 +240,13 @@ func (h *PIHandler) ExecuteTask(ctx context.Context, task TaskAssignment, sendLo
 	// prepareTaskDir so the error path also gets cleaned up (e.g. if
 	// cloneRepo fails and leaves an empty task directory behind).
 	var workDir string
+	var jail *chroot.Jail
 	defer func() {
+		if jail != nil {
+			if err := jail.Cleanup(); err != nil {
+				h.log.Printf("[CLEANUP] failed to remove chroot jail: %v", err)
+			}
+		}
 		if workDir != "" {
 			if err := h.cleanupTaskDir(workDir); err != nil {
 				h.log.Printf("[CLEANUP] failed to remove task directory: %v", err)
@@ -237,6 +257,18 @@ func (h *PIHandler) ExecuteTask(ctx context.Context, task TaskAssignment, sendLo
 	workDir, err := h.prepareTaskDir(ctx, task.TaskID, task.RepoRef, sendLog, task.Persona)
 	if err != nil {
 		return nil, fmt.Errorf("prepare task dir: %w", err)
+	}
+
+	// Set up the chroot jail for task isolation (issue #51). The jail is a
+	// sibling of the task directory and mirrors host absolute paths, so the
+	// pi subprocess — and everything it spawns — sees the same paths as on
+	// the host, backed by a private copy of the filesystem.
+	if h.chrootEnabled {
+		var err error
+		jail, err = h.setupChrootJail(workDir, task.TaskID, sendLog)
+		if err != nil {
+			return nil, fmt.Errorf("set up chroot jail: %w", err)
+		}
 	}
 
 	// Resolve persona env vars for the pi subprocess.
@@ -272,7 +304,11 @@ func (h *PIHandler) ExecuteTask(ctx context.Context, task TaskAssignment, sendLo
 		taskEnv[k] = v
 	}
 
-	if err := h.resetClientWithEnv(ctx, workDir, task.TaskID, sendLog, taskEnv); err != nil {
+	var jailRoot string
+	if jail != nil {
+		jailRoot = jail.Path()
+	}
+	if err := h.resetClientWithEnv(ctx, workDir, task.TaskID, jailRoot, sendLog, taskEnv); err != nil {
 		h.log.Printf("[PI] spawn failed: %v", err)
 		_ = sendLog(LogEntry{TaskID: task.TaskID, Line: fmt.Sprintf("Spawn failed: %v", err), Level: "error"})
 		return nil, fmt.Errorf("reset pi client with working dir %s: %w", workDir, err)
@@ -758,8 +794,15 @@ func (h *PIHandler) cloneRepo(ctx context.Context, taskDir, repoRef string, send
 // restartClient restarts the pi subprocess using the handler's base CWD.
 // It is called when ExecuteTask detects that the client is not running,
 // e.g. because the subprocess was killed externally or crashed.
-// The restarted client is a temporary one — resetClient will replace it
-// with a task-specific client later in ExecuteTask.
+// The restarted client is a temporary one — resetClientWithEnv will
+// replace it with a task-specific client later in ExecuteTask, before
+// any prompt is sent.
+//
+// Note: this transient client runs WITHOUT a chroot jail (issue #51) —
+// the jail for the task is only built after the restart, in
+// setupChrootJail. The exposure is small: no prompt is ever sent to this
+// client and it has no task context, but it is a pi process with full
+// host access for the duration of the restart.
 // Retries up to 3 times with exponential backoff on failure.
 func (h *PIHandler) restartClient(ctx context.Context) error {
 	h.mu.Lock()
@@ -820,15 +863,19 @@ func (h *PIHandler) restartClient(ctx context.Context) error {
 // resetClient restarts the pi subprocess with a new working directory.
 // This is needed per-task so the guest operates inside the cloned repo tree.
 func (h *PIHandler) resetClient(ctx context.Context, workDir string, taskID string, sendLog func(LogEntry) error) error {
-	return h.resetClientWithEnv(ctx, workDir, taskID, sendLog, nil)
+	return h.resetClientWithEnv(ctx, workDir, taskID, "", sendLog, nil)
 }
 
 // resetClientWithEnv restarts the pi subprocess with a new working directory
 // and optional environment variables. The env vars are applied to the pi
 // subprocess so that persona-specific configuration (e.g. token paths)
 // is available to the agent.
+//
+// chrootRoot, when non-empty, is the root of a chroot jail the subprocess is
+// spawned into (issue #51); workDir must exist inside the jail.
+//
 // Retries up to 3 times with exponential backoff on failure.
-func (h *PIHandler) resetClientWithEnv(ctx context.Context, workDir string, taskID string, sendLog func(LogEntry) error, env map[string]string) error {
+func (h *PIHandler) resetClientWithEnv(ctx context.Context, workDir string, taskID, chrootRoot string, sendLog func(LogEntry) error, env map[string]string) error {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 
@@ -857,6 +904,7 @@ func (h *PIHandler) resetClientWithEnv(ctx context.Context, workDir string, task
 			Log:           h.log,
 			Env:           env,
 			ExecPath:      h.piExecPath,
+			ChrootRoot:    chrootRoot,
 			SpawnOutput: func(line string) {
 				// Echo spawn-phase output to guest logs for troubleshooting.
 				// See issue #19: without this, spawn failures produce silence.
@@ -894,6 +942,78 @@ func (h *PIHandler) resetClientWithEnv(ctx context.Context, workDir string, task
 		return nil
 	}
 	return fmt.Errorf("pi client spawn failed after %d attempts: %w", maxRetries, lastErr)
+}
+
+// setupChrootJail creates and populates a chroot jail for the task whose
+// working directory is taskDir. The jail is created as a sibling of the task
+// directory (<taskDir>.chroot) so the task directory can be copied into the
+// jail at its own absolute path without recursion.
+//
+// Every file the pi subprocess needs is copied into the jail at the same
+// absolute path it has on the host, so existing absolute-path references
+// (shebangs, shared libraries, git credential and TLS paths, persona
+// <workpath> env vars, TMPDIR) keep working unmodified inside the jail.
+//
+// The caller owns the returned jail and must call Cleanup on it (ExecuteTask
+// does this via defer).
+func (h *PIHandler) setupChrootJail(taskDir, taskID string, sendLog func(LogEntry) error) (*chroot.Jail, error) {
+	jailRoot := taskDir + ".chroot"
+	jail := chroot.NewJail(jailRoot, h.log)
+	if err := jail.Setup(); err != nil {
+		return nil, fmt.Errorf("create jail root: %w", err)
+	}
+	h.log.Printf("[CHROOT] setting up jail for task %s at %s", taskID, jailRoot)
+	_ = sendLog(LogEntry{TaskID: taskID, Line: fmt.Sprintf("Setting up chroot jail at %s", jailRoot), Level: "system"})
+
+	// fail removes the partially populated jail before returning the error.
+	fail := func(err error) (*chroot.Jail, error) {
+		if cleanupErr := jail.Cleanup(); cleanupErr != nil {
+			h.log.Printf("[CHROOT] failed to clean up partial jail: %v", cleanupErr)
+		}
+		return nil, err
+	}
+
+	// Essential host binaries + shared libraries (best effort — missing
+	// binaries are logged and skipped).
+	if err := jail.PopulateEssentialBins(); err != nil {
+		return fail(fmt.Errorf("populate essential binaries: %w", err))
+	}
+	// The pi executable (and its npm package, when applicable). Fatal — a
+	// guest without pi cannot run tasks. The pinned execPath (issue #33) is
+	// used verbatim so the jail always contains the exact binary the client
+	// spawns; only a handler that could not resolve pi at construction
+	// falls back to PATH.
+	piPath := h.piExecPath
+	if piPath == "" {
+		resolved, err := exec.LookPath("pi")
+		if err != nil {
+			return fail(fmt.Errorf("resolve pi: %w", err))
+		}
+		piPath = resolved
+	}
+	if err := jail.PopulatePi(piPath); err != nil {
+		return fail(fmt.Errorf("populate pi: %w", err))
+	}
+	// Guest home dot-directories (~/.pi, ~/.certs, ~/.forgejo-gitconfigs,
+	// ~/.tokens).
+	if err := jail.PopulateHome(); err != nil {
+		return fail(fmt.Errorf("populate home: %w", err))
+	}
+	// Essential /etc files and the CA certificate bundle.
+	if err := jail.PopulateEtc(); err != nil {
+		return fail(fmt.Errorf("populate /etc: %w", err))
+	}
+	// Basic device nodes (best effort — requires CAP_MKNOD).
+	if err := jail.PopulateDev(); err != nil {
+		return fail(fmt.Errorf("populate /dev: %w", err))
+	}
+	// The task working directory, mirrored at its own absolute path.
+	if err := jail.CopyTaskDir(taskDir); err != nil {
+		return fail(fmt.Errorf("copy task dir: %w", err))
+	}
+
+	h.log.Printf("[CHROOT] jail ready for task %s", taskID)
+	return jail, nil
 }
 
 // backoffAndSleep calculates exponential backoff (1s, 2s, 4s, ...) and sleeps

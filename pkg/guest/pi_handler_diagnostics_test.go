@@ -236,6 +236,7 @@ func TestPIHandler_ExecuteTask_DiagnosticsOnNormalCompletion(t *testing.T) {
 	}
 
 	h := NewPIHandler("/tmp", "", "", "")
+	h.chrootEnabled = false // non-chroot diagnostics flow; chroot covered by dedicated tests
 	if err := h.Start(context.Background()); err != nil {
 		t.Fatalf("start failed: %v", err)
 	}
