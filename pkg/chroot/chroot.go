@@ -280,6 +280,17 @@ func (j *Jail) PopulateEssentialBins() error {
 			j.log.Printf("chroot: copied npm package %s into jail", pkgRoot)
 		}
 	}
+	// node's externalized builtins (Debian/Ubuntu ship undici, acorn and
+	// acorn-walk as files under /usr/share/nodejs, loaded from absolute paths
+	// baked into libnode at startup) are not shared libraries, so ldd never
+	// reports them — without them node aborts in the jail with "Cannot load
+	// externalized builtin" (Debian bug #1020980). Discover and copy them
+	// (best effort).
+	if hostPath, err := exec.LookPath("node"); err == nil {
+		if err := j.copyNodeExternalizedBuiltins(hostPath); err != nil {
+			j.log.Printf("chroot: failed to copy node externalized builtins: %v", err)
+		}
+	}
 	return nil
 }
 
@@ -315,6 +326,62 @@ func (j *Jail) copyPythonStdlib(python3Path string) error {
 			return fmt.Errorf("copy stdlib %s: %w", stdlib, err)
 		}
 		j.log.Printf("chroot: copied python3 stdlib %s into jail", stdlib)
+	}
+	return nil
+}
+
+// copyNodeExternalizedBuiltins copies the JavaScript files the node runtime
+// loads as "externalized builtins". Distro builds (Debian/Ubuntu, and Fedora)
+// replace node's in-tree copies of undici, acorn and acorn-walk with system
+// packages under /usr/share/nodejs, and libnode loads them from absolute
+// paths baked into the binary at startup. They are not shared libraries, so
+// ldd never reports them — without them node aborts inside the jail with
+// "Cannot load externalized builtin" (Debian bug #1020980). The paths are
+// discovered by scanning the node binary and its linked libraries for
+// embedded absolute JS paths, then each path present on the host is copied
+// (best effort).
+func (j *Jail) copyNodeExternalizedBuiltins(nodePath string) error {
+	resolved, err := filepath.EvalSymlinks(nodePath)
+	if err != nil {
+		return fmt.Errorf("resolve node %s: %w", nodePath, err)
+	}
+	// Scan the node binary and every shared library it links: the
+	// externalized builtin paths live in libnode, which the node binary
+	// links.
+	targets := []string{resolved}
+	if out, err := exec.Command("ldd", resolved).Output(); err == nil {
+		for _, line := range strings.Split(string(out), "\n") {
+			if lib := extractLibraryPath(line); lib != "" {
+				targets = append(targets, lib)
+			}
+		}
+	}
+	seen := map[string]bool{}
+	copied := 0
+	for _, target := range targets {
+		data, err := os.ReadFile(target)
+		if err != nil {
+			continue
+		}
+		for _, jsPath := range extractJSPaths(data) {
+			if seen[jsPath] {
+				continue
+			}
+			seen[jsPath] = true
+			if _, err := os.Stat(jsPath); err != nil {
+				// Embedded path not present on this host (e.g. baked in for a
+				// different distro layout) — nothing to copy.
+				continue
+			}
+			if err := j.CopyFile(jsPath, jsPath); err != nil {
+				j.log.Printf("chroot: failed to copy node builtin %s: %v", jsPath, err)
+				continue
+			}
+			copied++
+		}
+	}
+	if copied > 0 {
+		j.log.Printf("chroot: copied %d node externalized builtin(s) into jail", copied)
 	}
 	return nil
 }
@@ -573,6 +640,67 @@ func extractLibraryPath(line string) string {
 		return ""
 	}
 	return line
+}
+
+// extractJSPaths returns the absolute JavaScript file paths embedded in data
+// (a binary or shared-library image). Distro node builds bake the
+// externalized builtin file paths in as string constants (e.g.
+// "/usr/share/nodejs/undici/undici-fetch.js"); scanning for maximal runs of
+// path characters that start with "/" and end in a JS extension recovers
+// them without parsing the binary format. A run is delimited by any
+// non-path byte (nulls, spaces, ...), which is exactly how the compiler
+// emits adjacent string constants.
+func extractJSPaths(data []byte) []string {
+	var paths []string
+	runStart := -1
+	flush := func(end int) {
+		if runStart < 0 {
+			return
+		}
+		s := string(data[runStart:end])
+		if strings.HasPrefix(s, "/") && isJSFile(s) {
+			paths = append(paths, s)
+		}
+		runStart = -1
+	}
+	for i, b := range data {
+		if isPathChar(b) {
+			if runStart < 0 {
+				runStart = i
+			}
+		} else {
+			flush(i)
+		}
+	}
+	flush(len(data))
+	return paths
+}
+
+// isPathChar reports whether b may appear in an embedded absolute path. The
+// set is deliberately tight (no spaces, quotes or control bytes) so a maximal
+// run is exactly one null-terminated path constant, not a fragment of an
+// unrelated string.
+func isPathChar(b byte) bool {
+	switch {
+	case b >= 'a' && b <= 'z':
+		return true
+	case b >= 'A' && b <= 'Z':
+		return true
+	case b >= '0' && b <= '9':
+		return true
+	}
+	switch b {
+	case '.', '_', '-', '/':
+		return true
+	}
+	return false
+}
+
+// isJSFile reports whether name is an absolute path to a JavaScript file.
+func isJSFile(name string) bool {
+	return strings.HasSuffix(name, ".js") ||
+		strings.HasSuffix(name, ".cjs") ||
+		strings.HasSuffix(name, ".mjs")
 }
 
 // copyFileContents copies the content of src to dst with the given mode.

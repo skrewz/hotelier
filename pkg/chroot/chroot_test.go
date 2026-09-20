@@ -664,6 +664,77 @@ func TestJail_PopulateEssentialBins_CopiesGitExecPath(t *testing.T) {
 	}
 }
 
+// TestJail_PopulateEssentialBins_CopiesNodeBuiltins verifies that node's
+// externalized builtins — JS files loaded from absolute paths baked into the
+// node runtime at startup, which ldd never reports — are copied into the
+// jail. Without them node aborts with "Cannot load externalized builtin"
+// (Debian bug #1020980). A fake node binary embeds the builtin paths as
+// string constants, exactly as a distro libnode does.
+func TestJail_PopulateEssentialBins_CopiesNodeBuiltins(t *testing.T) {
+	j := newTestJail(t)
+
+	// The externalized builtin files at absolute host paths.
+	undiciJS := writeHostFile(t, t.TempDir(), "share/nodejs/undici/undici-fetch.js", "module.exports=1\n", 0o644)
+	acornJS := writeHostFile(t, t.TempDir(), "share/nodejs/acorn/dist/acorn.js", "module.exports=2\n", 0o644)
+
+	// A fake node "binary" that embeds the builtin paths as null-delimited
+	// string constants, plus a path that does not exist on the host (must be
+	// skipped, not fatal).
+	binDir := t.TempDir()
+	fakeNode := writeHostFile(t, binDir, "node",
+		"\x00\x01\x02\x00"+undiciJS+"\x00"+acornJS+"\x00/nonexistent/other.js\x00trailer\x00", 0o755)
+	withFakePath(t, binDir)
+
+	if err := j.PopulateEssentialBins(); err != nil {
+		t.Fatalf("PopulateEssentialBins failed: %v", err)
+	}
+	// The fake node itself is copied...
+	if _, err := os.Stat(filepath.Join(j.root, fakeNode)); err != nil {
+		t.Errorf("node should be copied into the jail: %v", err)
+	}
+	// ...and each externalized builtin that exists on the host.
+	for _, js := range []string{undiciJS, acornJS} {
+		if _, err := os.Stat(filepath.Join(j.root, js)); err != nil {
+			t.Errorf("node externalized builtin %s should be in the jail: %v", js, err)
+		}
+	}
+	// The nonexistent embedded path must not be materialised.
+	if _, err := os.Stat(filepath.Join(j.root, "nonexistent", "other.js")); !os.IsNotExist(err) {
+		t.Errorf("nonexistent embedded path must NOT be copied (err=%v)", err)
+	}
+}
+
+// TestJail_PopulateEssentialBins_CopiesRealNodeBuiltins verifies the fix
+// against the real host node: if the well-known Debian/Ubuntu externalized
+// builtin files exist on this host, they must end up in the jail.
+func TestJail_PopulateEssentialBins_CopiesRealNodeBuiltins(t *testing.T) {
+	j := newTestJail(t)
+	if _, err := exec.LookPath("node"); err != nil {
+		t.Skip("node not in PATH")
+	}
+	if err := j.PopulateEssentialBins(); err != nil {
+		t.Fatalf("PopulateEssentialBins failed: %v", err)
+	}
+	candidates := []string{
+		"/usr/share/nodejs/undici/undici-fetch.js",
+		"/usr/share/nodejs/acorn/dist/acorn.js",
+		"/usr/share/nodejs/acorn-walk/dist/walk.js",
+	}
+	checked := 0
+	for _, c := range candidates {
+		if _, err := os.Stat(c); err != nil {
+			continue // not on this host
+		}
+		checked++
+		if _, err := os.Stat(filepath.Join(j.root, c)); err != nil {
+			t.Errorf("node externalized builtin %s should be in the jail: %v", c, err)
+		}
+	}
+	if checked == 0 {
+		t.Skip("no known node externalized builtins on this host")
+	}
+}
+
 // TestJail_CopyDirResolved_AncestorSymlinkTerminates verifies that
 // following a symlink that points back at an ancestor of the tree being
 // copied does not recurse unboundedly — a symlink to / inside ~/.pi or
@@ -1028,6 +1099,73 @@ func TestJail_PopulatePi_BinPointsElsewhere(t *testing.T) {
 	// ...but the unrelated package is not.
 	if _, err := os.Stat(filepath.Join(j.root, pkgDir, "package.json")); !os.IsNotExist(err) {
 		t.Errorf("unrelated package must NOT be copied (err=%v)", err)
+	}
+}
+
+// TestExtractJSPaths verifies that absolute JS file paths embedded as
+// string constants in a binary image are recovered. Distro node builds bake
+// the externalized builtin paths in (e.g.
+// "/usr/share/nodejs/undici/undici-fetch.js"); the scan must find them
+// without parsing the binary format.
+func TestExtractJSPaths(t *testing.T) {
+	cases := []struct {
+		name string
+		data string
+		want []string
+	}{
+		{
+			"single null-delimited path",
+			"\x00prefix\x00/usr/share/nodejs/undici/undici-fetch.js\x00suffix\x00",
+			[]string{"/usr/share/nodejs/undici/undici-fetch.js"},
+		},
+		{
+			"multiple paths",
+			"\x00/usr/share/nodejs/acorn/dist/acorn.js\x00junk\x00/usr/share/nodejs/acorn-walk/dist/walk.js\x00",
+			[]string{"/usr/share/nodejs/acorn/dist/acorn.js", "/usr/share/nodejs/acorn-walk/dist/walk.js"},
+		},
+		{
+			"non-js path ignored",
+			"\x00/usr/lib/x86_64-linux-gnu/libnode.so.137\x00",
+			nil,
+		},
+		{
+			"relative path ignored",
+			"\x00share/nodejs/undici/undici-fetch.js\x00",
+			nil,
+		},
+		{
+			"path embedded in a longer string",
+			"loading /usr/share/nodejs/undici/undici-fetch.js now\x00",
+			[]string{"/usr/share/nodejs/undici/undici-fetch.js"},
+		},
+		{
+			"cjs and mjs extensions",
+			"\x00/usr/share/nodejs/a/a.cjs\x00/usr/share/nodejs/b/b.mjs\x00",
+			[]string{"/usr/share/nodejs/a/a.cjs", "/usr/share/nodejs/b/b.mjs"},
+		},
+		{
+			"no js paths",
+			"\x00just some text\x00/no/extension\x00",
+			nil,
+		},
+		{
+			"empty",
+			"",
+			nil,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := extractJSPaths([]byte(tc.data))
+			if len(got) != len(tc.want) {
+				t.Fatalf("extractJSPaths = %v, want %v", got, tc.want)
+			}
+			for i := range got {
+				if got[i] != tc.want[i] {
+					t.Errorf("extractJSPaths[%d] = %q, want %q", i, got[i], tc.want[i])
+				}
+			}
+		})
 	}
 }
 
