@@ -393,6 +393,40 @@ func TestJail_PopulatePi_PlainScript(t *testing.T) {
 	}
 }
 
+// TestJail_PopulatePi_FlatBundle verifies that a pi that is not a discoverable
+// npm package — a flat bundle at <prefix>/node_modules/bin/pi with a sibling
+// chunks/ directory (the layout the guest install produces) — has its
+// enclosing node_modules copied into the jail. Without the sibling chunks, pi
+// fails inside the jail with ERR_MODULE_NOT_FOUND for the chunk it imports at
+// runtime; without a top-level dependency, it fails the same way for the dep.
+func TestJail_PopulatePi_FlatBundle(t *testing.T) {
+	j := newTestJail(t)
+	nmRoot := filepath.Join(t.TempDir(), "node_modules")
+	binDir := filepath.Join(nmRoot, "bin")
+	chunksDir := filepath.Join(binDir, "chunks")
+	depDir := filepath.Join(nmRoot, "somedep")
+	// A flat pi bundle: a real pi file (not a symlink into a package) with a
+	// sibling chunks/ directory it imports, plus a top-level dependency. No
+	// package.json, so findPackageRoot finds no owning package.
+	writeHostFile(t, binDir, "pi", "#!/usr/bin/env node\nimport './chunks/chunk.js';\n", 0o755)
+	writeHostFile(t, chunksDir, "chunk.js", "export const x = 1;\n", 0o644)
+	writeHostFile(t, depDir, "index.js", "module.exports = 1;\n", 0o644)
+
+	if err := j.PopulatePi(filepath.Join(binDir, "pi")); err != nil {
+		t.Fatalf("PopulatePi failed: %v", err)
+	}
+
+	for _, p := range []string{
+		filepath.Join(binDir, "pi"),
+		filepath.Join(chunksDir, "chunk.js"),
+		filepath.Join(depDir, "index.js"),
+	} {
+		if _, err := os.Stat(filepath.Join(j.root, p)); err != nil {
+			t.Errorf("%s should be in the jail: %v", p, err)
+		}
+	}
+}
+
 // TestJail_PopulatePi_UsesGivenPath verifies that PopulatePi copies exactly
 // the path the caller passes — it must not re-resolve "pi" via PATH, or a
 // jail could end up with a different binary than the one the client spawns

@@ -420,6 +420,17 @@ func (j *Jail) PopulatePi(piPath string) error {
 		if err := j.CopyDirResolved(pkgRoot, pkgRoot); err != nil {
 			return fmt.Errorf("copy pi package %s: %w", pkgRoot, err)
 		}
+	} else if nmRoot := enclosingNodeModules(resolved); nmRoot != "" {
+		// pi is not a discoverable npm package: a flat bundle at
+		// <prefix>/node_modules/bin/pi with a sibling chunks/ directory (the
+		// layout the guest install produces). Its runtime closure is the
+		// enclosing node_modules tree — copy it so the sibling files pi imports
+		// (chunks/) and any top-level dependencies are present. Without them pi
+		// fails inside the jail with ERR_MODULE_NOT_FOUND.
+		j.log.Printf("chroot: copying pi node_modules %s into jail", nmRoot)
+		if err := j.CopyDirResolved(nmRoot, nmRoot); err != nil {
+			return fmt.Errorf("copy pi node_modules %s: %w", nmRoot, err)
+		}
 	}
 	// Copy the bin path itself as a regular file (symlink resolved) so PATH
 	// lookup inside the jail finds it.
@@ -552,6 +563,25 @@ func (j *Jail) copyLibraries(binary string) error {
 		}
 	}
 	return nil
+}
+
+// enclosingNodeModules walks up from start and returns the nearest ancestor
+// directory named "node_modules", or "" if there is none. A flat pi bundle
+// (e.g. <prefix>/node_modules/bin/pi) has no owning package.json, so its
+// runtime closure is the enclosing node_modules tree; copying it captures the
+// sibling files pi imports (chunks/) and any top-level dependencies.
+func enclosingNodeModules(start string) string {
+	dir := filepath.Dir(start)
+	for {
+		if filepath.Base(dir) == "node_modules" {
+			return dir
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			return ""
+		}
+		dir = parent
+	}
 }
 
 // findPackageRoot walks up from start (at most 6 levels) and returns the
