@@ -412,63 +412,34 @@ func (j *Jail) PopulatePi(piPath string) error {
 	if err != nil {
 		return fmt.Errorf("resolve pi %s: %w", piPath, err)
 	}
-	// pi is normally an npm install: a bin symlink (node_modules/bin/pi) into
-	// the package's dist/, with the package, its chunks, and its dependencies
-	// all under the enclosing node_modules. Copy that node_modules wholesale,
-	// PRESERVING symlinks, so the bin symlink stays intact and node resolves
-	// it to the package's dist path — where pi's relative imports (chunks/)
-	// live. Resolving the symlink to a regular file would relocate pi away
-	// from its chunks and break module resolution with ERR_MODULE_NOT_FOUND.
-	if nmRoot := enclosingNodeModules(piPath); nmRoot != "" {
-		j.log.Printf("chroot: copying pi node_modules %s into jail", nmRoot)
-		if err := j.CopyDir(nmRoot, nmRoot); err != nil {
-			return fmt.Errorf("copy pi node_modules %s: %w", nmRoot, err)
-		}
-	} else if pkgRoot := findPackageRoot(resolved); pkgRoot != "" {
-		// pi is a symlink into a package that is not under a node_modules.
-		// Copy the package (preserving symlinks) and mirror the bin symlink so
-		// node resolves it to the package's dist path, where pi's relative
-		// imports live.
+	// When pi is an npm package (a symlink into the package's dist/), the
+	// package's own files are required at runtime (relative imports,
+	// createRequire). Copy the whole package at its host path.
+	if pkgRoot := findPackageRoot(resolved); pkgRoot != "" {
 		j.log.Printf("chroot: copying pi package %s into jail", pkgRoot)
-		if err := j.CopyDir(pkgRoot, pkgRoot); err != nil {
+		if err := j.CopyDirResolved(pkgRoot, pkgRoot); err != nil {
 			return fmt.Errorf("copy pi package %s: %w", pkgRoot, err)
 		}
-		if err := j.mirrorPiBin(piPath); err != nil {
-			return err
+	} else if nmRoot := enclosingNodeModules(resolved); nmRoot != "" {
+		// pi is not a discoverable npm package: a flat bundle at
+		// <prefix>/node_modules/bin/pi with a sibling chunks/ directory (the
+		// layout the guest install produces). Its runtime closure is the
+		// enclosing node_modules tree — copy it so the sibling files pi imports
+		// (chunks/) and any top-level dependencies are present. Without them pi
+		// fails inside the jail with ERR_MODULE_NOT_FOUND.
+		j.log.Printf("chroot: copying pi node_modules %s into jail", nmRoot)
+		if err := j.CopyDirResolved(nmRoot, nmRoot); err != nil {
+			return fmt.Errorf("copy pi node_modules %s: %w", nmRoot, err)
 		}
-	} else {
-		// pi is not under a node_modules and not a discoverable package (a
-		// standalone script): copy just the file at its host path.
-		if err := j.CopyFile(piPath, piPath); err != nil {
-			return err
-		}
+	}
+	// Copy the bin path itself as a regular file (symlink resolved) so PATH
+	// lookup inside the jail finds it.
+	if err := j.CopyFile(piPath, piPath); err != nil {
+		return err
 	}
 	// Best effort: a compiled pi binary would need its shared libraries.
 	if err := j.copyLibraries(resolved); err != nil {
 		j.log.Printf("chroot: failed to copy pi libraries: %v", err)
-	}
-	return nil
-}
-
-// mirrorPiBin places the pi bin path in the jail as a symlink (preserving the
-// host symlink's target) so node resolves it to the package's dist path, where
-// pi's relative imports live. If pi is not a symlink it is copied as a regular
-// file instead.
-func (j *Jail) mirrorPiBin(piPath string) error {
-	target, err := os.Readlink(piPath)
-	if err != nil {
-		return j.CopyFile(piPath, piPath)
-	}
-	dst, err := j.dstInJail(piPath)
-	if err != nil {
-		return err
-	}
-	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
-		return fmt.Errorf("create parent dirs for %s: %w", dst, err)
-	}
-	_ = os.Remove(dst)
-	if err := os.Symlink(target, dst); err != nil {
-		return fmt.Errorf("symlink %s -> %s: %w", dst, target, err)
 	}
 	return nil
 }
