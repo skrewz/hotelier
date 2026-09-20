@@ -1998,6 +1998,58 @@ func TestLogAccumulator_ThinkingDeltasEmitImmediately(t *testing.T) {
 	}
 }
 
+// TestLogAccumulator_ThinkingNotLoggedToStdout verifies that thinking
+// deltas are emitted to the UI but not written to the process log.
+// Per-token thinking output in stdout (podman logs) is too much (issue #194).
+func TestLogAccumulator_ThinkingNotLoggedToStdout(t *testing.T) {
+	var logBuf bytes.Buffer
+	logger := log.New(&logBuf, "", 0)
+	acc := NewLogAccumulator(logger)
+
+	var emitted []TaskLogEntry
+	emit := func(e TaskLogEntry) {
+		emitted = append(emitted, e)
+	}
+
+	// Per-token thinking deltas, as they arrive from the guest.
+	acc.Feed("task-1", "Actually", "thinking", emit)
+	acc.Feed("task-1", ",", "thinking", emit)
+	acc.Feed("task-1", " wait", "thinking", emit)
+	if len(emitted) != 3 {
+		t.Fatalf("expected 3 emitted thinking entries, got %d", len(emitted))
+	}
+
+	// The process log must not contain any thinking payload.
+	if got := logBuf.String(); strings.Contains(got, "Actually") || strings.Contains(got, "thinking") {
+		t.Errorf("expected no thinking output in process log, got:\n%s", got)
+	}
+}
+
+// TestLogAccumulator_NonThinkingStillLoggedToStdout verifies that the
+// issue #194 fix only trims thinking lines: batched text and tool lines
+// are still written to the process log for operational visibility.
+func TestLogAccumulator_NonThinkingStillLoggedToStdout(t *testing.T) {
+	var logBuf bytes.Buffer
+	logger := log.New(&logBuf, "", 0)
+	acc := NewLogAccumulator(logger)
+
+	emit := func(TaskLogEntry) {}
+
+	acc.Feed("task-1", "Hello ", "text", emit)
+	acc.Feed("task-1", "world", "text", emit)
+	acc.FlushAll(emit)
+
+	acc.Feed("task-1", "[TOOL_START] bash: ls (id: tool-1)", "tool", emit)
+
+	got := logBuf.String()
+	if !strings.Contains(got, "Hello world") {
+		t.Errorf("expected batched text line in process log, got:\n%s", got)
+	}
+	if !strings.Contains(got, "[TOOL_START] bash: ls (id: tool-1)") {
+		t.Errorf("expected tool line in process log, got:\n%s", got)
+	}
+}
+
 // TestLogAccumulator_ThinkingFlushesTextBuffer verifies that when thinking
 // deltas arrive, any pending text buffer is flushed first.
 func TestLogAccumulator_ThinkingFlushesTextBuffer(t *testing.T) {

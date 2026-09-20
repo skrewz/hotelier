@@ -235,7 +235,12 @@ func (a *LogAccumulator) emitNow(taskID, line, level string, emit func(TaskLogEn
 		Level:     level,
 		Timestamp: time.Now(),
 	}
-	a.log.Printf("[task:%s] [%s] %s", taskID, level, line)
+	// Thinking deltas are emitted per token and are streamed to the UI via
+	// the emit callback; writing them to stdout would flood the process
+	// (podman) logs with model payload (issue #194).
+	if level != "thinking" {
+		a.log.Printf("[task:%s] [%s] %s", taskID, level, line)
+	}
 	emit(entry)
 }
 
