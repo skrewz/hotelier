@@ -323,24 +323,26 @@ cp config/guest.example.yaml config/guest.yaml
 ./bin/guest
 ```
 
-### Task Isolation (chroot)
+### Task Isolation (namespace jail)
 
-Every task runs inside its own **chroot jail** (issue #51). Before spawning
-the pi subprocess, the guest copies into a private directory tree: the pi
-executable (and its npm package), essential host binaries with their shared
-libraries — plus the runtime *data* files `ldd` never reports (the python3
-stdlib, git's exec path, and the npm/npx package directory, where
-detectable), `~/.pi`, `~/.certs`, `~/.forgejo-gitconfigs`, `~/.tokens`, the
-required `/etc` files, basic `/dev` nodes, and the task's working directory.
-Files are placed at the same absolute paths they have on the host, so
-existing path references (shebangs, git credential paths, persona
-`<workpath>` variables) keep working unmodified inside the jail. The jail is
-removed when the task completes.
+Every task runs inside its own **namespace jail** (issue #51): user, mount
+and pid namespaces created by `unshare(1)`, the same mechanism
+bubblewrap/Flatpak, rootless podman and the AI-agent CLIs use. The guest
+re-execs itself under `unshare --map-root-user --mount --pid --fork`;
+the in-namespace child bind-mounts the host's real `/usr` read-only,
+mounts a scoped `/proc` and a fresh `/dev` (device nodes bound from the
+host, a private devpts and `/dev/shm`), copies the required `/etc` files
+and the home dot-directories (`~/.pi`, `~/.certs`,
+`~/.forgejo-gitconfigs`, `~/.tokens`) per-task, and pivots the root to the
+jail before exec'ing pi. The task's working directory is the single
+read-write path, mounted at the fixed in-jail path `/task`; everything
+else is read-only or a private copy, so writes inside the jail never
+reach the host. The jail is removed when the task completes.
 
-Chroot isolation is always enabled and cannot be disabled. The guest process
-therefore requires **CAP_SYS_CHROOT** — run it as root, or with
-`--cap-add SYS_CHROOT` under Podman. The guest fails at startup if it cannot
-chroot.
+Jail isolation is always enabled and cannot be disabled. No capabilities
+are required — the only prerequisite is kernel support for unprivileged
+user namespaces (`kernel.unprivileged_userns_clone=1` on Debian). The
+guest fails at startup if it cannot create them.
 
 ## License
 

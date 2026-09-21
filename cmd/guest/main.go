@@ -8,9 +8,9 @@ import (
 	"os/signal"
 	"syscall"
 
-	"hotelier/pkg/chroot"
 	"hotelier/pkg/config"
 	"hotelier/pkg/guest"
+	"hotelier/pkg/jail"
 )
 
 // reloadableGuestConfig wraps LoadGuestConfig for the config watcher.
@@ -21,29 +21,31 @@ func reloadableGuestConfig(path string) (interface{}, error) {
 func main() {
 	configPath := flag.String("config", "config/guest.yaml", "path to guest configuration file")
 	debug := flag.Bool("debug", false, "enable RPC debug logging to stdout")
+	// jailChild, when set, runs this process as the in-namespace jail
+	// child (re-exec'd by the pi client under unshare): the remaining
+	// command-line arguments (after "--") are the command to exec inside
+	// the jail. It is handled before the config load — the child has no
+	// business reading the guest config.
+	jailChild := flag.String("jail-child", "", "internal: run as the jail child (re-exec under unshare)")
 	flag.Parse()
+
+	if *jailChild != "" {
+		os.Exit(jail.RunChildMain(*jailChild))
+	}
 
 	// Allow DEBUG env var to override the flag.
 	if os.Getenv("DEBUG") == "1" {
 		*debug = true
 	}
 
-	// Chroot isolation is unavoidable (issue #51): every task runs inside
-	// its own chroot jail, so the guest process must be able to call
-	// chroot(2). Fail fast at startup rather than on the first task.
-	if ok, err := chroot.CanChroot(); err != nil {
-		log.Printf("warning: could not determine chroot capability: %v", err)
-	} else if !ok {
-		log.Fatalf("chroot isolation is required (issue #51) but this process lacks CAP_SYS_CHROOT; run the guest as root or with --cap-add SYS_CHROOT")
-	}
-
-	// Device nodes in the jail (notably /dev/null, which git requires)
-	// need CAP_MKNOD. Without it the jail is still built and pi runs, but
-	// /dev-dependent tools misbehave inside it — warn rather than fail.
-	if ok, err := chroot.CanMknod(); err != nil {
-		log.Printf("warning: could not determine mknod capability: %v", err)
-	} else if !ok {
-		log.Printf("warning: this process lacks CAP_MKNOD; /dev nodes (e.g. /dev/null, needed by git) will be absent from task jails")
+	// Namespace isolation is unavoidable (issue #51): every task runs
+	// inside its own user/mount/pid namespace jail, so the guest process
+	// must be able to create unprivileged user namespaces. Fail fast at
+	// startup rather than on the first task. No capabilities are needed —
+	// the kernel's unprivileged user namespace support is the only
+	// requirement.
+	if ok, reason := jail.CanJail(); !ok {
+		log.Fatalf("namespace isolation is required (issue #51) but unprivileged user namespaces are unavailable: %s", reason)
 	}
 
 	// Load configuration

@@ -61,9 +61,9 @@ type PiClient struct {
 	guestDir      string
 	debug         bool
 	env           map[string]string // extra environment variables for the subprocess
-	// chrootRoot, when set, is the root of a chroot jail the pi subprocess
-	// is spawned into (issue #51). The cwd must exist inside the jail.
-	chrootRoot string
+	// jailSpecPath, when set, is the spec file of the namespace jail the
+	// pi subprocess is spawned into (issue #51).
+	jailSpecPath string
 	// spawnOutput is invoked for each line of combined stderr/stdout output
 	// during the initial spawn phase (first 10 lines total).
 	spawnOutput *func(line string)
@@ -121,11 +121,14 @@ type PiClientConfig struct {
 	// is reached, regular logging takes over. Useful for troubleshooting spawn
 	// failures where the subprocess produces output before dying.
 	SpawnOutput func(line string)
-	// ChrootRoot, when set, is the root of a chroot jail the pi subprocess
-	// is spawned into (issue #51). The CWD must exist inside the jail, and
-	// everything pi needs (binaries, libraries, config) must be present in
-	// the jail at the same absolute paths it has on the host.
-	ChrootRoot string
+	// JailSpecPath, when set, is the path of the jail spec file the pi
+	// subprocess is spawned into (issue #51). The spec (written by
+	// pkg/jail) describes the namespace jail: the guest re-execs itself
+	// as the jail child under unshare(1), which performs the mounts,
+	// pivots the root and execs pi. The ExecPath must be an absolute path
+	// that exists inside the jail (the jail mirrors host absolute paths
+	// for everything except the task dir, which is at /task).
+	JailSpecPath string
 }
 
 // NewClient creates a new pi RPC client.
@@ -143,7 +146,7 @@ func NewClient(cfg PiClientConfig) *PiClient {
 		guestDir:      cfg.GuestDir,
 		debug:         cfg.Debug,
 		env:           cfg.Env,
-		chrootRoot:    cfg.ChrootRoot,
+		jailSpecPath:  cfg.JailSpecPath,
 		eventCh:       make(chan Event, 256),
 		doneCh:        make(chan struct{}),
 		processExited: make(chan struct{}),
@@ -176,28 +179,37 @@ func (c *PiClient) Start(ctx context.Context) error {
 	if c.execPath != "" {
 		piBin = c.execPath
 	}
-	// When chroot isolation is active (issue #51), the child is chrooted
-	// before exec, so pi must be referenced by an absolute path that exists
-	// inside the jail. The pinned execPath is already absolute (it is an
-	// exec.LookPath("pi") result, and PopulatePi mirrors it into the jail
-	// at the same host path); only an unpinned "pi" needs resolving here.
-	// Go performs chroot(2) in the child before chdir(2) (see
-	// syscall/exec_linux.go), so c.cmd.Dir is interpreted inside the jail —
-	// it must be a path that exists there.
-	if c.chrootRoot != "" {
+	// When jail isolation is active (issue #51), pi must be referenced by
+	// an absolute path that exists inside the jail. The pinned execPath is
+	// already absolute (it is an exec.LookPath("pi") result, and the jail
+	// mirrors it at the same host path); only an unpinned "pi" needs
+	// resolving here.
+	if c.jailSpecPath != "" {
+		// Fail synchronously when the spec is missing, rather than letting
+		// the jail child die after the namespaces are created.
+		if _, err := os.Stat(c.jailSpecPath); err != nil {
+			return fmt.Errorf("jail spec %s: %w", c.jailSpecPath, err)
+		}
 		if !filepath.IsAbs(piBin) {
 			resolved, err := exec.LookPath("pi")
 			if err != nil {
-				return fmt.Errorf("resolve pi for chroot: %w", err)
+				return fmt.Errorf("resolve pi for jail: %w", err)
 			}
 			piBin = resolved
 		}
+		// The guest re-execs itself as the jail child (see BuildJailCommand
+		// and pkg/jail). The child chdirs to the spec's cwd after the
+		// pivot, so c.cmd.Dir is not set in jail mode.
+		guestBin, err := os.Executable()
+		if err != nil {
+			return fmt.Errorf("resolve guest binary for jail: %w", err)
+		}
+		full := BuildJailCommand(guestBin, c.jailSpecPath, piBin, args)
+		c.cmd = exec.CommandContext(ctx, full[0], full[1:]...)
+	} else {
+		c.cmd = exec.CommandContext(ctx, piBin, args...)
+		c.cmd.Dir = c.cwd
 	}
-	c.cmd = exec.CommandContext(ctx, piBin, args...)
-	if c.chrootRoot != "" {
-		c.cmd.SysProcAttr = &syscall.SysProcAttr{Chroot: c.chrootRoot}
-	}
-	c.cmd.Dir = c.cwd
 
 	// Apply extra environment variables (persona env vars)
 	if len(c.env) > 0 {
@@ -223,8 +235,8 @@ func (c *PiClient) Start(ctx context.Context) error {
 		return fmt.Errorf("stderr pipe: %w", err)
 	}
 
-	if c.chrootRoot != "" {
-		c.log.Printf("pi command: %s (chroot: %s, cwd: %s)", strings.Join(c.cmd.Args, " "), c.chrootRoot, c.cwd)
+	if c.jailSpecPath != "" {
+		c.log.Printf("pi command: %s (jail spec: %s)", strings.Join(c.cmd.Args, " "), c.jailSpecPath)
 	} else {
 		c.log.Printf("pi command: %s (cwd: %s)", strings.Join(c.cmd.Args, " "), c.cwd)
 	}
@@ -288,6 +300,27 @@ func (c *PiClient) Stop(ctx context.Context) error {
 		}
 		return nil
 	case <-time.After(5 * time.Second):
+		if c.jailSpecPath != "" {
+			// Jail mode: the process is the unshare(1) waiter. SIGTERM is
+			// forwarded to pi (--forward-signals) for a graceful shutdown;
+			// if that fails, SIGKILL triggers --kill-child=SIGKILL, which
+			// kills the whole namespace tree — verified to fire even when
+			// the waiter itself is SIGKILLed, so nothing is orphaned.
+			c.log.Printf("pi subprocess did not exit within 5s, sending SIGTERM to jail")
+			if err := c.cmd.Process.Signal(syscall.SIGTERM); err != nil {
+				c.log.Printf("jail SIGTERM failed: %v", err)
+			}
+			select {
+			case <-c.processExited:
+				c.mu.Lock()
+				c.started = false
+				close(c.doneCh)
+				c.mu.Unlock()
+				c.log.Printf("pi subprocess stopped after SIGTERM")
+				return nil
+			case <-time.After(2 * time.Second):
+			}
+		}
 		// Process didn't exit gracefully — force kill
 		c.log.Printf("pi subprocess did not exit within 5s, force killing")
 		killErr := c.cmd.Process.Kill()

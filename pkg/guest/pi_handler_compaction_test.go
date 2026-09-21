@@ -67,7 +67,7 @@ for _ in range(10):
 	defer os.RemoveAll(baseDir)
 
 	h := NewPIHandler(baseDir, "", "", "")
-	h.chrootEnabled = false // non-chroot compaction flow; chroot covered by dedicated tests
+	h.jailEnabled = false // non-jail compaction flow; jail covered by dedicated tests
 
 	// The log callback is invoked from multiple goroutines (the event loop
 	// and the spawn-output path), so guard the shared slice.

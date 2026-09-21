@@ -59,19 +59,19 @@ func TestPIHandler_Start_SweepsStaleTaskDirs(t *testing.T) {
 	}
 }
 
-// TestPIHandler_Start_SweepsStaleChrootJails verifies that Start() also
-// removes stale chroot jails (<taskDir>.chroot) left behind by a hard-killed
+// TestPIHandler_Start_SweepsStaleJails verifies that Start() also removes
+// stale namespace jails (<taskDir>.jail) left behind by a hard-killed
 // guest. Jails contain copies of the guest's credentials (~/.tokens,
 // ~/.certs, ~/.forgejo-gitconfigs), so they must not survive a restart
 // (review feedback on PR #174). The issue #180 sweep removes every entry
 // under tasks/, which covers the jails — this test pins that down.
-func TestPIHandler_Start_SweepsStaleChrootJails(t *testing.T) {
+func TestPIHandler_Start_SweepsStaleJails(t *testing.T) {
 	if _, err := exec.LookPath("pi"); err != nil {
 		t.Skip("pi not installed")
 	}
 
 	workDir := t.TempDir()
-	staleJail := filepath.Join(workDir, "tasks", "task-123-abcdef.chroot")
+	staleJail := filepath.Join(workDir, "tasks", "task-123-abcdef.jail")
 	if err := os.MkdirAll(staleJail, 0o755); err != nil {
 		t.Fatalf("create stale jail: %v", err)
 	}
@@ -87,7 +87,7 @@ func TestPIHandler_Start_SweepsStaleChrootJails(t *testing.T) {
 	defer h.Stop(context.Background())
 
 	if _, err := os.Stat(staleJail); !os.IsNotExist(err) {
-		t.Errorf("stale chroot jail should be removed, stat err=%v", err)
+		t.Errorf("stale jail should be removed, stat err=%v", err)
 	}
 }
 

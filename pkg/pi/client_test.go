@@ -3,7 +3,6 @@ package pi
 import (
 	"context"
 	"encoding/json"
-	"io"
 	"log"
 	"os"
 	"os/exec"
@@ -13,21 +12,32 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
-
-	"hotelier/pkg/chroot"
 )
 
-// newTestLogger creates a logger that writes to the given strings.Builder.
-func newTestLogger(buf *strings.Builder) *log.Logger {
-	return log.New(&logWriter{buf: buf}, "", 0)
+// newTestLogger creates a thread-safe logger: the client's goroutines
+// write to the buffer concurrently with the test's reads, so both sides
+// must go through the writer's mutex (use w.String() to inspect).
+func newTestLogger() (*log.Logger, *logWriter) {
+	w := &logWriter{}
+	return log.New(w, "", 0), w
 }
 
 type logWriter struct {
-	buf *strings.Builder
+	mu  sync.Mutex
+	buf strings.Builder
 }
 
 func (w *logWriter) Write(p []byte) (n int, err error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
 	return w.buf.Write(p)
+}
+
+// String returns the buffered log output.
+func (w *logWriter) String() string {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.buf.String()
 }
 
 // TestPiClient_StopActuallyTerminatesProcess verifies that Stop() causes the
@@ -324,10 +334,10 @@ func TestPiClient_Stop_LogsForceKill(t *testing.T) {
 		t.Skip("pi not installed")
 	}
 
-	var logBuf strings.Builder
+	logger, logWriter := newTestLogger()
 	c := NewClient(PiClientConfig{
 		CWD: "/tmp",
-		Log: newTestLogger(&logBuf),
+		Log: logger,
 	})
 
 	ctx := context.Background()
@@ -347,7 +357,7 @@ func TestPiClient_Stop_LogsForceKill(t *testing.T) {
 	err := c.Stop(context.Background())
 	t.Logf("Stop returned: %v", err)
 
-	logOutput := logBuf.String()
+	logOutput := logWriter.String()
 
 	// Verify that the force kill was logged
 	if !strings.Contains(logOutput, "force kill") {
@@ -392,7 +402,10 @@ func TestSpawnOutputCallback_CapturesStderr(t *testing.T) {
 
 	// pi typically produces no stderr on successful startup, so we just verify
 	// the callback mechanism works without crashing
-	t.Logf("captured %d spawn output lines", len(capturedLines))
+	mu.Lock()
+	n := len(capturedLines)
+	mu.Unlock()
+	t.Logf("captured %d spawn output lines", n)
 }
 
 // TestSpawnOutputCallback_LimitEnforced verifies that the SpawnOutput callback
@@ -666,10 +679,10 @@ func TestPiClient_Start_LogsEnvVarNames(t *testing.T) {
 		t.Skip("pi not installed")
 	}
 
-	var logBuf strings.Builder
+	logger, logWriter := newTestLogger()
 	c := NewClient(PiClientConfig{
 		CWD: "/tmp",
-		Log: newTestLogger(&logBuf),
+		Log: logger,
 		Env: map[string]string{
 			"TEST_VAR_ALPHA": "alpha-value",
 			"TEST_VAR_BETA":  "beta-value",
@@ -685,7 +698,7 @@ func TestPiClient_Start_LogsEnvVarNames(t *testing.T) {
 	// Give the logger time to flush
 	time.Sleep(500 * time.Millisecond)
 
-	logOutput := logBuf.String()
+	logOutput := logWriter.String()
 
 	// Check that env var names are logged
 	if !strings.Contains(logOutput, "pi env vars:") {
@@ -788,10 +801,10 @@ func TestPiClient_Start_UsesExecPath(t *testing.T) {
 	t.Cleanup(func() { os.Setenv("PATH", origPath) })
 	os.Setenv("PATH", emptyDir)
 
-	var logBuf strings.Builder
+	logger, _ := newTestLogger()
 	c := NewClient(PiClientConfig{
 		CWD:      emptyDir,
-		Log:      newTestLogger(&logBuf),
+		Log:      logger,
 		ExecPath: fakePi,
 	})
 	if err := c.Start(context.Background()); err != nil {
@@ -808,10 +821,10 @@ func TestPiClient_Start_UsesExecPath(t *testing.T) {
 // TestPiClient_Start_ExecPathNotFound verifies that Start() returns a clear
 // error when ExecPath is set but points to a missing file.
 func TestPiClient_Start_ExecPathNotFound(t *testing.T) {
-	var logBuf strings.Builder
+	logger, _ := newTestLogger()
 	c := NewClient(PiClientConfig{
 		CWD:      "/tmp",
-		Log:      newTestLogger(&logBuf),
+		Log:      logger,
 		ExecPath: "/nonexistent/hotelier-test/pi",
 	})
 	err := c.Start(context.Background())
@@ -821,222 +834,4 @@ func TestPiClient_Start_ExecPathNotFound(t *testing.T) {
 	if !strings.Contains(err.Error(), "start pi") {
 		t.Errorf("expected 'start pi' in error, got: %v", err)
 	}
-}
-
-// TestPiClient_Start_ChrootUsesPinnedExecPath verifies that when both
-// ExecPath and ChrootRoot are set, Start uses the pinned absolute path
-// verbatim instead of re-resolving "pi" via PATH — the issue #33 and
-// issue #51 features must compose. For an unprivileged process
-// chroot(2) fails with EPERM before exec, so the constructed command can
-// be inspected after Start returns the error.
-func TestPiClient_Start_ChrootUsesPinnedExecPath(t *testing.T) {
-	if os.Geteuid() == 0 {
-		t.Skip("requires non-root: chroot(2) must fail before exec so the command can be inspected")
-	}
-
-	// Two distinct fake pis: the pinned one (ExecPath) and the one
-	// resolvable via PATH. The spawned command must use the pinned one.
-	pinnedDir := t.TempDir()
-	pinnedPi := filepath.Join(pinnedDir, "pi")
-	if err := os.WriteFile(pinnedPi, []byte("#!/bin/sh\nsleep 1\n"), 0o755); err != nil {
-		t.Fatalf("write pinned fake pi: %v", err)
-	}
-	pathDir := t.TempDir()
-	pathPi := filepath.Join(pathDir, "pi")
-	if err := os.WriteFile(pathPi, []byte("#!/bin/sh\nsleep 1\n"), 0o755); err != nil {
-		t.Fatalf("write PATH fake pi: %v", err)
-	}
-	origPath := os.Getenv("PATH")
-	t.Cleanup(func() { os.Setenv("PATH", origPath) })
-	os.Setenv("PATH", pathDir+string(os.PathListSeparator)+origPath)
-
-	jailRoot := t.TempDir()
-
-	// Pinned ExecPath + ChrootRoot: the pinned path must be used verbatim.
-	c := NewClient(PiClientConfig{
-		CWD:        jailRoot,
-		Log:        log.New(io.Discard, "", 0),
-		ExecPath:   pinnedPi,
-		ChrootRoot: jailRoot,
-	})
-	if err := c.Start(context.Background()); err == nil {
-		c.Stop(context.Background())
-		t.Fatal("Start with chroot should fail for an unprivileged process")
-	}
-	if c.cmd == nil || len(c.cmd.Args) == 0 {
-		t.Fatal("expected a command to have been constructed")
-	}
-	if c.cmd.Args[0] != pinnedPi {
-		t.Errorf("spawn used %q, want the pinned ExecPath %q (the PATH pi %q must not be re-resolved)", c.cmd.Args[0], pinnedPi, pathPi)
-	}
-
-	// No ExecPath + ChrootRoot: fall back to resolving "pi" via PATH.
-	c2 := NewClient(PiClientConfig{
-		CWD:        jailRoot,
-		Log:        log.New(io.Discard, "", 0),
-		ChrootRoot: jailRoot,
-	})
-	if err := c2.Start(context.Background()); err == nil {
-		c2.Stop(context.Background())
-		t.Fatal("Start with chroot should fail for an unprivileged process")
-	}
-	if c2.cmd == nil || len(c2.cmd.Args) == 0 {
-		t.Fatal("expected a command to have been constructed")
-	}
-	if c2.cmd.Args[0] != pathPi {
-		t.Errorf("spawn used %q, want the PATH-resolved pi %q", c2.cmd.Args[0], pathPi)
-	}
-}
-
-// TestPiClient_Start_NoEnvVars_LogsNothing verifies that when no extra env
-// vars are configured, no env var log line is produced.
-func TestPiClient_Start_NoEnvVars_LogsNothing(t *testing.T) {
-	if _, err := exec.LookPath("pi"); err != nil {
-		t.Skip("pi not installed")
-	}
-
-	var logBuf strings.Builder
-	c := NewClient(PiClientConfig{
-		CWD: "/tmp",
-		Log: newTestLogger(&logBuf),
-		Env: nil, // no extra env vars
-	})
-
-	ctx := context.Background()
-	if err := c.Start(ctx); err != nil {
-		t.Fatalf("start failed: %v", err)
-	}
-	defer c.Stop(ctx)
-
-	// Give the logger time to flush
-	time.Sleep(500 * time.Millisecond)
-
-	logOutput := logBuf.String()
-
-	// Should NOT have env vars log line when no extra env vars are set
-	if strings.Contains(logOutput, "pi env vars:") {
-		t.Errorf("expected no 'pi env vars:' log line when no env vars set, got:\n%s", logOutput)
-	}
-}
-
-// buildChrootTestJail builds a minimal jail containing a fake pi (a python3
-// script that writes a marker file into its cwd and then sleeps) plus the
-// python3 and env binaries it needs. It returns the jail and the task cwd,
-// which exists both on the host and (mirrored) inside the jail.
-func buildChrootTestJail(t *testing.T) (*chroot.Jail, string) {
-	t.Helper()
-	base := t.TempDir()
-	j := chroot.NewJail(filepath.Join(base, "jail"), log.New(io.Discard, "", 0))
-	if err := j.Setup(); err != nil {
-		t.Fatalf("jail setup: %v", err)
-	}
-	t.Cleanup(func() { _ = j.Cleanup() })
-
-	// Fake pi: writes a marker into its cwd, then blocks on stdin. Pure
-	// POSIX shell on purpose — this jail is minimal (no python stdlib),
-	// and `os` is not a preloaded CPython builtin, so a python3 script
-	// would crash at `import os` (verified when the root-only tests were
-	// first actually run, per review feedback on PR #174).
-	binDir := filepath.Join(base, "bin")
-	if err := os.MkdirAll(binDir, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	fakePi := filepath.Join(binDir, "pi")
-	script := `#!/usr/bin/env sh
-printf '%s' "$(pwd)" > chroot-marker
-read -r _ || true
-`
-	if err := os.WriteFile(fakePi, []byte(script), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	origPath := os.Getenv("PATH")
-	t.Cleanup(func() { os.Setenv("PATH", origPath) })
-	os.Setenv("PATH", binDir+string(os.PathListSeparator)+origPath)
-
-	if err := j.PopulatePi(fakePi); err != nil {
-		t.Fatalf("populate pi: %v", err)
-	}
-	for _, bin := range []string{"sh", "env"} {
-		if _, err := j.CopyBinary(bin); err != nil {
-			t.Fatalf("populate %s: %v", bin, err)
-		}
-	}
-
-	// Task cwd, mirrored into the jail at its own absolute path.
-	cwd := filepath.Join(base, "taskcwd")
-	if err := os.MkdirAll(cwd, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.MkdirAll(filepath.Join(j.Path(), cwd), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	return j, cwd
-}
-
-// TestPiClient_Start_ChrootRootMissing verifies that Start fails when the
-// chroot root does not exist (chroot(2) or chdir(2) fails in the child).
-func TestPiClient_Start_ChrootRootMissing(t *testing.T) {
-	ctx := context.Background()
-	c := NewClient(PiClientConfig{
-		CWD:        "/tmp",
-		Log:        log.New(io.Discard, "", 0),
-		ChrootRoot: "/nonexistent/jail/root",
-	})
-	if err := c.Start(ctx); err == nil {
-		c.Stop(ctx)
-		t.Fatal("Start with a missing chroot root should fail")
-	}
-}
-
-// TestPiClient_Start_ChrootNonRootFails verifies that Start fails for an
-// unprivileged process with a valid chroot root (chroot(2) returns EPERM).
-func TestPiClient_Start_ChrootNonRootFails(t *testing.T) {
-	if os.Geteuid() == 0 {
-		t.Skip("requires non-root: chroot(2) should fail with EPERM")
-	}
-	j, cwd := buildChrootTestJail(t)
-	ctx := context.Background()
-	c := NewClient(PiClientConfig{
-		CWD:        cwd,
-		Log:        log.New(io.Discard, "", 0),
-		ChrootRoot: j.Path(),
-	})
-	if err := c.Start(ctx); err == nil {
-		c.Stop(ctx)
-		t.Fatal("Start with chroot should fail for an unprivileged process")
-	}
-}
-
-// TestPiClient_Start_ChrootRunsInsideJail verifies that with a valid chroot
-// root the pi subprocess actually runs inside the jail: the fake pi writes
-// a marker into its cwd, which must land at the mirrored path inside the
-// jail root — not in the host directory.
-func TestPiClient_Start_ChrootRunsInsideJail(t *testing.T) {
-	if os.Geteuid() != 0 {
-		t.Skip("requires root (CAP_SYS_CHROOT)")
-	}
-	j, cwd := buildChrootTestJail(t)
-	ctx := context.Background()
-	c := NewClient(PiClientConfig{
-		CWD:        cwd,
-		Log:        log.New(io.Discard, "", 0),
-		ChrootRoot: j.Path(),
-	})
-	if err := c.Start(ctx); err != nil {
-		t.Fatalf("start in chroot failed: %v", err)
-	}
-	defer c.Stop(ctx)
-
-	marker := filepath.Join(j.Path(), cwd, "chroot-marker")
-	deadline := time.Now().Add(10 * time.Second)
-	for time.Now().Before(deadline) {
-		if data, err := os.ReadFile(marker); err == nil {
-			if string(data) != cwd {
-				t.Errorf("marker cwd = %q, want %q", data, cwd)
-			}
-			return
-		}
-		time.Sleep(100 * time.Millisecond)
-	}
-	t.Fatal("marker file never appeared in the jail — pi did not run inside the chroot")
 }

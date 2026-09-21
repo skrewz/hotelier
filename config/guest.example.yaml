@@ -17,7 +17,7 @@ log_level: "info"
 #client_cert: "/path/to/client-cert.pem"
 #client_key:  "/path/to/client-key.pem"
 
-# Task isolation: every task runs inside its own chroot jail (issue #51).
-# This is always enabled and cannot be disabled. The guest process must have
-# CAP_SYS_CHROOT (run as root, or with --cap-add SYS_CHROOT) — the guest
-# fails at startup otherwise.
+# Task isolation: every task runs inside its own namespace jail (issue #51):
+# user, mount and pid namespaces via unshare(1). This is always enabled and
+# cannot be disabled. No capabilities are required — the kernel must support
+# unprivileged user namespaces — the guest fails at startup otherwise.
