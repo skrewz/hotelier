@@ -75,7 +75,7 @@ emit({"type": "agent_settled"})
 	defer os.RemoveAll(baseDir)
 
 	h := NewPIHandler(baseDir, "", "", "")
-	h.chrootEnabled = false // non-chroot tool-event flow; chroot covered by dedicated tests
+	h.jailEnabled = false // non-jail tool-event flow; jail covered by dedicated tests
 
 	task := TaskAssignment{
 		TaskID: "test-toolargs-json",

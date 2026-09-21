@@ -13,7 +13,7 @@ import (
 	"sync"
 	"time"
 
-	"hotelier/pkg/chroot"
+	"hotelier/pkg/jail"
 	"hotelier/pkg/persona"
 	"hotelier/pkg/pi"
 )
@@ -33,12 +33,12 @@ type PIHandler struct {
 	// (issue #180). Defaults to os.RemoveAll; overridable in tests to
 	// simulate removal failures.
 	removeDir func(string) error
-	// chrootEnabled controls whether each task runs inside a chroot jail
+	// jailEnabled controls whether each task runs inside a namespace jail
 	// (issue #51). It is always true when the handler is constructed via
-	// NewPIHandler/NewPIHandlerDebug — chroot isolation is unavoidable in
-	// production. Tests that exercise non-chroot code paths in environments
-	// without CAP_SYS_CHROOT may set it to false directly.
-	chrootEnabled bool
+	// NewPIHandler/NewPIHandlerDebug — jail isolation is unavoidable in
+	// production. Tests that exercise non-jail code paths in environments
+	// without unprivileged user namespaces may set it to false directly.
+	jailEnabled bool
 }
 
 // NewPIHandler creates a new PIHandler.
@@ -82,13 +82,13 @@ func NewPIHandlerDebug(cwd string, provider, model, thinkingLevel string, debug 
 		ExecPath:      piExecPath,
 	}
 	return &PIHandler{
-		baseCWD:       cwd,
-		client:        pi.NewClient(cfg),
-		log:           logger,
-		debug:         debug,
-		piExecPath:    piExecPath,
-		removeDir:     os.RemoveAll,
-		chrootEnabled: true,
+		baseCWD:     cwd,
+		client:      pi.NewClient(cfg),
+		log:         logger,
+		debug:       debug,
+		piExecPath:  piExecPath,
+		removeDir:   os.RemoveAll,
+		jailEnabled: true,
 	}
 }
 
@@ -100,7 +100,7 @@ func NewPIHandlerDebug(cwd string, provider, model, thinkingLevel string, debug 
 // dead execution (issue #180) before starting the pi subprocess.
 //
 // Note: like the transient restart client (see restartClient), this
-// initial client runs WITHOUT a chroot jail (issue #51). It is replaced
+// initial client runs WITHOUT a namespace jail (issue #51). It is replaced
 // by resetClientWithEnv — which builds the task's jail — before any task
 // prompt is sent, so no task ever runs outside the jail; the no-jail
 // window spans guest startup until the first task.
@@ -240,11 +240,11 @@ func (h *PIHandler) ExecuteTask(ctx context.Context, task TaskAssignment, sendLo
 	// prepareTaskDir so the error path also gets cleaned up (e.g. if
 	// cloneRepo fails and leaves an empty task directory behind).
 	var workDir string
-	var jail *chroot.Jail
+	var jail *jail.Jail
 	defer func() {
 		if jail != nil {
 			if err := jail.Cleanup(); err != nil {
-				h.log.Printf("[CLEANUP] failed to remove chroot jail: %v", err)
+				h.log.Printf("[CLEANUP] failed to remove jail: %v", err)
 			}
 		}
 		if workDir != "" {
@@ -259,16 +259,27 @@ func (h *PIHandler) ExecuteTask(ctx context.Context, task TaskAssignment, sendLo
 		return nil, fmt.Errorf("prepare task dir: %w", err)
 	}
 
-	// Set up the chroot jail for task isolation (issue #51). The jail is a
-	// sibling of the task directory and mirrors host absolute paths, so the
-	// pi subprocess — and everything it spawns — sees the same paths as on
-	// the host, backed by a private copy of the filesystem.
-	if h.chrootEnabled {
+	// Set up the namespace jail for task isolation (issue #51). The jail
+	// is a sibling of the task directory; the pi subprocess — and
+	// everything it spawns — sees host absolute paths for the toolchain,
+	// /etc and the home dot-dirs, and the task directory at the fixed
+	// path /task.
+	if h.jailEnabled {
 		var err error
-		jail, err = h.setupChrootJail(workDir, task.TaskID, sendLog)
+		jail, err = h.setupJail(workDir, task.TaskID, sendLog)
 		if err != nil {
-			return nil, fmt.Errorf("set up chroot jail: %w", err)
+			return nil, fmt.Errorf("set up jail: %w", err)
 		}
+	}
+
+	// The task directory's path as seen by the pi subprocess: /task
+	// inside the namespace jail (the task dir is mounted there), the host
+	// path otherwise. Persona <workpath> expansions and TMPDIR must use
+	// the in-jail path or they would point at a location that does not
+	// exist inside the jail.
+	taskPath := workDir
+	if jail != nil {
+		taskPath = "/task"
 	}
 
 	// Resolve persona env vars for the pi subprocess.
@@ -276,7 +287,7 @@ func (h *PIHandler) ExecuteTask(ctx context.Context, task TaskAssignment, sendLo
 	// the repo and non-repo paths.
 	var personaEnv map[string]string
 	if task.Persona != nil {
-		personaEnv = task.Persona.ResolvedEnv(workDir)
+		personaEnv = task.Persona.ResolvedEnv(taskPath)
 		h.log.Printf("[PERSONA] resolved persona %q: %d env vars, %d file copies", task.Persona.Name, len(personaEnv), len(task.Persona.Files))
 		if err := sendLog(LogEntry{TaskID: task.TaskID, Line: fmt.Sprintf("Persona %q applied: %d env vars, %d file copies", task.Persona.Name, len(personaEnv), len(task.Persona.Files)), Level: "system"}); err != nil {
 			h.log.Printf("[PERSONA] failed to send apply log: %v", err)
@@ -297,18 +308,18 @@ func (h *PIHandler) ExecuteTask(ctx context.Context, task TaskAssignment, sendLo
 	// TMPDIR points to a per-task temp directory to prevent resource contention
 	// between concurrent tasks. See issue #59.
 	taskEnv := map[string]string{
-		"TMPDIR": filepath.Join(workDir, "tmp"),
+		"TMPDIR": filepath.Join(taskPath, "tmp"),
 	}
 	// Merge persona env vars (persona vars take precedence over defaults)
 	for k, v := range personaEnv {
 		taskEnv[k] = v
 	}
 
-	var jailRoot string
+	var jailSpecPath string
 	if jail != nil {
-		jailRoot = jail.Path()
+		jailSpecPath = jail.SpecPath()
 	}
-	if err := h.resetClientWithEnv(ctx, workDir, task.TaskID, jailRoot, sendLog, taskEnv); err != nil {
+	if err := h.resetClientWithEnv(ctx, workDir, task.TaskID, jailSpecPath, sendLog, taskEnv); err != nil {
 		h.log.Printf("[PI] spawn failed: %v", err)
 		_ = sendLog(LogEntry{TaskID: task.TaskID, Line: fmt.Sprintf("Spawn failed: %v", err), Level: "error"})
 		return nil, fmt.Errorf("reset pi client with working dir %s: %w", workDir, err)
@@ -798,9 +809,9 @@ func (h *PIHandler) cloneRepo(ctx context.Context, taskDir, repoRef string, send
 // replace it with a task-specific client later in ExecuteTask, before
 // any prompt is sent.
 //
-// Note: this transient client runs WITHOUT a chroot jail (issue #51) —
-// the jail for the task is only built after the restart, in
-// setupChrootJail. The exposure is small: no prompt is ever sent to this
+// Note: this transient client runs WITHOUT a namespace jail (issue #51)
+// — the jail for the task is only built after the restart, in
+// setupJail. The exposure is small: no prompt is ever sent to this
 // client and it has no task context, but it is a pi process with full
 // host access for the duration of the restart.
 // Retries up to 3 times with exponential backoff on failure.
@@ -871,11 +882,12 @@ func (h *PIHandler) resetClient(ctx context.Context, workDir string, taskID stri
 // subprocess so that persona-specific configuration (e.g. token paths)
 // is available to the agent.
 //
-// chrootRoot, when non-empty, is the root of a chroot jail the subprocess is
-// spawned into (issue #51); workDir must exist inside the jail.
+// jailSpecPath, when non-empty, is the spec file of a namespace jail the
+// subprocess is spawned into (issue #51); the task directory is mounted
+// at /task inside the jail.
 //
 // Retries up to 3 times with exponential backoff on failure.
-func (h *PIHandler) resetClientWithEnv(ctx context.Context, workDir string, taskID, chrootRoot string, sendLog func(LogEntry) error, env map[string]string) error {
+func (h *PIHandler) resetClientWithEnv(ctx context.Context, workDir string, taskID, jailSpecPath string, sendLog func(LogEntry) error, env map[string]string) error {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 
@@ -904,7 +916,7 @@ func (h *PIHandler) resetClientWithEnv(ctx context.Context, workDir string, task
 			Log:           h.log,
 			Env:           env,
 			ExecPath:      h.piExecPath,
-			ChrootRoot:    chrootRoot,
+			JailSpecPath:  jailSpecPath,
 			SpawnOutput: func(line string) {
 				// Echo spawn-phase output to guest logs for troubleshooting.
 				// See issue #19: without this, spawn failures produce silence.
@@ -944,76 +956,44 @@ func (h *PIHandler) resetClientWithEnv(ctx context.Context, workDir string, task
 	return fmt.Errorf("pi client spawn failed after %d attempts: %w", maxRetries, lastErr)
 }
 
-// setupChrootJail creates and populates a chroot jail for the task whose
-// working directory is taskDir. The jail is created as a sibling of the task
-// directory (<taskDir>.chroot) so the task directory can be copied into the
-// jail at its own absolute path without recursion.
+// setupJail builds the namespace jail for the task whose working
+// directory is taskDir. The jail root is a sibling of the task directory
+// (<taskDir>.jail); the task directory itself is bind-mounted read-write
+// at the fixed in-jail path /task, and everything else the pi subprocess
+// needs (the toolchain, /etc files, the home dot-dirs, the pi install)
+// is visible at its host absolute path — read-only, or as a per-task copy
+// — so existing absolute-path references keep working unmodified inside
+// the jail.
 //
-// Every file the pi subprocess needs is copied into the jail at the same
-// absolute path it has on the host, so existing absolute-path references
-// (shebangs, shared libraries, git credential and TLS paths, persona
-// <workpath> env vars, TMPDIR) keep working unmodified inside the jail.
-//
-// The caller owns the returned jail and must call Cleanup on it (ExecuteTask
-// does this via defer).
-func (h *PIHandler) setupChrootJail(taskDir, taskID string, sendLog func(LogEntry) error) (*chroot.Jail, error) {
-	jailRoot := taskDir + ".chroot"
-	jail := chroot.NewJail(jailRoot, h.log)
-	if err := jail.Setup(); err != nil {
-		return nil, fmt.Errorf("create jail root: %w", err)
-	}
-	h.log.Printf("[CHROOT] setting up jail for task %s at %s", taskID, jailRoot)
-	_ = sendLog(LogEntry{TaskID: taskID, Line: fmt.Sprintf("Setting up chroot jail at %s", jailRoot), Level: "system"})
-
-	// fail removes the partially populated jail before returning the error.
-	fail := func(err error) (*chroot.Jail, error) {
-		if cleanupErr := jail.Cleanup(); cleanupErr != nil {
-			h.log.Printf("[CHROOT] failed to clean up partial jail: %v", cleanupErr)
-		}
-		return nil, err
-	}
-
-	// Essential host binaries + shared libraries (best effort — missing
-	// binaries are logged and skipped).
-	if err := jail.PopulateEssentialBins(); err != nil {
-		return fail(fmt.Errorf("populate essential binaries: %w", err))
-	}
-	// The pi executable (and its npm package, when applicable). Fatal — a
-	// guest without pi cannot run tasks. The pinned execPath (issue #33) is
-	// used verbatim so the jail always contains the exact binary the client
-	// spawns; only a handler that could not resolve pi at construction
-	// falls back to PATH.
+// The caller owns the returned jail and must call Cleanup on it
+// (ExecuteTask does this via defer).
+func (h *PIHandler) setupJail(taskDir, taskID string, sendLog func(LogEntry) error) (*jail.Jail, error) {
+	// The pi executable. Fatal — a guest without pi cannot run tasks. The
+	// pinned execPath (issue #33) is used verbatim so the jail always
+	// contains the exact binary the client spawns; only a handler that
+	// could not resolve pi at construction falls back to PATH.
 	piPath := h.piExecPath
 	if piPath == "" {
 		resolved, err := exec.LookPath("pi")
 		if err != nil {
-			return fail(fmt.Errorf("resolve pi: %w", err))
+			return nil, fmt.Errorf("resolve pi: %w", err)
 		}
 		piPath = resolved
 	}
-	if err := jail.PopulatePi(piPath); err != nil {
-		return fail(fmt.Errorf("populate pi: %w", err))
-	}
-	// Guest home dot-directories (~/.pi, ~/.certs, ~/.forgejo-gitconfigs,
-	// ~/.tokens).
-	if err := jail.PopulateHome(); err != nil {
-		return fail(fmt.Errorf("populate home: %w", err))
-	}
-	// Essential /etc files and the CA certificate bundle.
-	if err := jail.PopulateEtc(); err != nil {
-		return fail(fmt.Errorf("populate /etc: %w", err))
-	}
-	// Basic device nodes (best effort — requires CAP_MKNOD).
-	if err := jail.PopulateDev(); err != nil {
-		return fail(fmt.Errorf("populate /dev: %w", err))
-	}
-	// The task working directory, mirrored at its own absolute path.
-	if err := jail.CopyTaskDir(taskDir); err != nil {
-		return fail(fmt.Errorf("copy task dir: %w", err))
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		return nil, fmt.Errorf("resolve home dir: %w", err)
 	}
 
-	h.log.Printf("[CHROOT] jail ready for task %s", taskID)
-	return jail, nil
+	j := jail.NewJail(h.log)
+	h.log.Printf("[JAIL] setting up jail for task %s", taskID)
+	_ = sendLog(LogEntry{TaskID: taskID, Line: "Setting up namespace jail", Level: "system"})
+	if err := j.Setup(taskDir, homeDir, piPath); err != nil {
+		_ = j.Cleanup()
+		return nil, fmt.Errorf("set up jail: %w", err)
+	}
+	h.log.Printf("[JAIL] jail ready for task %s at %s", taskID, j.Path())
+	return j, nil
 }
 
 // backoffAndSleep calculates exponential backoff (1s, 2s, 4s, ...) and sleeps

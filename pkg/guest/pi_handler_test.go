@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"hotelier/pkg/jail"
 	"hotelier/pkg/persona"
 	"hotelier/pkg/pi"
 )
@@ -131,9 +132,10 @@ func TestPIHandler_ExecuteTask(t *testing.T) {
 	}
 
 	h := NewPIHandler("/tmp", "", "", "")
-	// Chroot isolation is covered by the dedicated chroot tests; this test
-	// exercises the non-chroot task flow and must run without CAP_SYS_CHROOT.
-	h.chrootEnabled = false
+	// Namespace isolation is covered by the dedicated jail tests; this
+	// test exercises the non-jail task flow and must run in environments
+	// without unprivileged user namespaces.
+	h.jailEnabled = false
 	if err := h.Start(context.Background()); err != nil {
 		t.Fatalf("start failed: %v", err)
 	}
@@ -174,7 +176,7 @@ func TestPIHandler_FullDeltaSentAsOneEntry(t *testing.T) {
 	}
 
 	h := NewPIHandler("/tmp", "", "", "")
-	h.chrootEnabled = false // non-chroot flow; chroot covered by dedicated tests
+	h.jailEnabled = false // non-jail flow; jail covered by dedicated tests
 	if err := h.Start(context.Background()); err != nil {
 		t.Fatalf("start failed: %v", err)
 	}
@@ -509,7 +511,7 @@ func TestPIHandler_FinalOutputPreservesNewlines(t *testing.T) {
 	}
 
 	h := NewPIHandler("/tmp", "", "", "")
-	h.chrootEnabled = false // non-chroot flow; chroot covered by dedicated tests
+	h.jailEnabled = false // non-jail flow; jail covered by dedicated tests
 	if err := h.Start(context.Background()); err != nil {
 		t.Fatalf("start failed: %v", err)
 	}
@@ -710,7 +712,7 @@ func TestPIHandler_ExecuteTask_SendsSpawnLogs(t *testing.T) {
 	logger := log.New(&logBuf, "[test] ", 0)
 
 	h := NewPIHandler(baseDir, "", "", "")
-	h.chrootEnabled = false // non-chroot spawn log flow; chroot covered by dedicated tests
+	h.jailEnabled = false // non-jail spawn log flow; jail covered by dedicated tests
 	h.log = logger
 
 	ctx := context.Background()
@@ -782,7 +784,7 @@ func TestPIHandler_ExecuteTask_SendsErrorLogOnSpawnFailure(t *testing.T) {
 	defer os.RemoveAll(baseDir)
 
 	h := NewPIHandler(baseDir, "", "", "")
-	h.chrootEnabled = false // non-chroot spawn flow; chroot covered by dedicated tests
+	h.jailEnabled = false // non-jail spawn flow; jail covered by dedicated tests
 
 	ctx := context.Background()
 	if err := h.Start(ctx); err != nil {
@@ -1015,7 +1017,7 @@ func TestPIHandler_ExecuteTask_ClientKilledExternallyRestartSucceeds(t *testing.
 
 	// Start a real client, then kill it to simulate the "pi client not running" scenario.
 	h := NewPIHandler(baseDir, "", "", "")
-	h.chrootEnabled = false // non-chroot restart flow; chroot covered by dedicated tests
+	h.jailEnabled = false // non-jail restart flow; jail covered by dedicated tests
 	if err := h.Start(context.Background()); err != nil {
 		t.Fatalf("start failed: %v", err)
 	}
@@ -1674,7 +1676,7 @@ emit({"type": "agent_settled"})
 	defer os.RemoveAll(baseDir)
 
 	h := NewPIHandler(baseDir, "", "", "")
-	h.chrootEnabled = false // non-chroot settle flow; chroot covered by dedicated tests
+	h.jailEnabled = false // non-jail settle flow; jail covered by dedicated tests
 
 	task := TaskAssignment{
 		TaskID: "test-waits-for-settled",
@@ -1855,81 +1857,93 @@ for _ in sys.stdin:
 	}
 }
 
-// TestPIHandler_SetupChrootJail verifies that setupChrootJail creates the
-// jail as a sibling of the task directory and populates it with pi (at its
-// host path), the guest's home dot-directories and the task directory
-// (mirrored at the task dir's host path). It works without root — only the
-// actual chroot(2) call requires privilege.
-func TestPIHandler_SetupChrootJail(t *testing.T) {
-	if _, err := exec.LookPath("python3"); err != nil {
-		t.Skip("python3 not installed, cannot run fake pi")
-	}
-
+// TestPIHandler_SetupJail verifies that setupJail creates the jail as a
+// sibling of the task directory, writes the spec, and builds a plan that
+// mounts the task directory at /task and the pi install read-only at its
+// host path. The skeleton carries the /etc copies and the home dot-dir
+// copies. It works without privileges — only the in-namespace child
+// needs user namespaces.
+func TestPIHandler_SetupJail(t *testing.T) {
 	// A fake pi keeps the jail small (the real pi package is ~134 MB).
-	fakeBinDir, err := os.MkdirTemp("", "hotelier-fakepi-bin-*")
+	// The base dir must not be under /tmp: the jail mounts a fresh
+	// tmpfs at /tmp, which would hide the pi-root bind.
+	home, err := os.UserHomeDir()
 	if err != nil {
-		t.Fatalf("create fake bin dir: %v", err)
+		t.Fatal(err)
 	}
-	defer os.RemoveAll(fakeBinDir)
-	if err := os.WriteFile(filepath.Join(fakeBinDir, "pi"), []byte("#!/usr/bin/env python3\nimport sys\nsys.stdin.read()\n"), 0o755); err != nil {
+	baseDir, err := os.MkdirTemp(home, "hotelier-setupjail-*")
+	if err != nil {
+		t.Fatalf("create base dir: %v", err)
+	}
+	defer os.RemoveAll(baseDir)
+	fakeBinDir := filepath.Join(baseDir, "fakebin")
+	if err := os.MkdirAll(fakeBinDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(fakeBinDir, "pi"), []byte("#!/bin/sh\nread -r _ || true\n"), 0o755); err != nil {
 		t.Fatalf("write fake pi: %v", err)
 	}
 	origPath := os.Getenv("PATH")
 	t.Cleanup(func() { os.Setenv("PATH", origPath) })
 	os.Setenv("PATH", fakeBinDir+string(os.PathListSeparator)+origPath)
 
-	baseDir, err := os.MkdirTemp("", "hotelier-base-*")
-	if err != nil {
-		t.Fatalf("create base dir: %v", err)
-	}
-	defer os.RemoveAll(baseDir)
-
 	h := NewPIHandler(baseDir, "", "", "")
+	if h.piExecPath != filepath.Join(fakeBinDir, "pi") {
+		t.Fatalf("piExecPath = %q, want the fake pi", h.piExecPath)
+	}
 
-	taskDir := filepath.Join(baseDir, "tasks", "task-chroot", "abc123")
+	taskDir := filepath.Join(baseDir, "tasks", "task-jail", "abc123")
 	if err := os.MkdirAll(filepath.Join(taskDir, "repo"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(taskDir, "repo", "main.go"), []byte("package main\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
 
-	jail, err := h.setupChrootJail(taskDir, "task-chroot", func(LogEntry) error { return nil })
+	j, err := h.setupJail(taskDir, "task-jail", func(LogEntry) error { return nil })
 	if err != nil {
-		t.Fatalf("setupChrootJail failed: %v", err)
+		t.Fatalf("setupJail failed: %v", err)
 	}
-	defer jail.Cleanup()
+	defer j.Cleanup()
 
-	// The jail is a sibling of the task directory.
-	if want := taskDir + ".chroot"; jail.Path() != want {
-		t.Errorf("jail path = %q, want %q", jail.Path(), want)
+	// The jail is a sibling of the task directory and carries the spec.
+	if want := taskDir + ".jail"; j.Path() != want {
+		t.Errorf("jail path = %q, want %q", j.Path(), want)
 	}
-	// The task directory is mirrored at its own absolute path.
-	if _, err := os.Stat(filepath.Join(jail.Path(), taskDir, "repo", "main.go")); err != nil {
-		t.Errorf("task dir not mirrored in jail: %v", err)
+	if _, err := os.Stat(j.SpecPath()); err != nil {
+		t.Errorf("spec missing: %v", err)
 	}
-	// pi is present at its host path.
-	piPath, _ := exec.LookPath("pi")
-	if _, err := os.Stat(filepath.Join(jail.Path(), piPath)); err != nil {
-		t.Errorf("pi not in jail at %s: %v", piPath, err)
+
+	// The plan mounts the task dir at /task and the pi install root
+	// read-only at its host path.
+	plan := j.Plan()
+	if plan.Cwd != "/task" {
+		t.Errorf("plan cwd = %q, want /task", plan.Cwd)
 	}
-	// The guest's home dot-directories are mirrored (when present on host).
-	if home, err := os.UserHomeDir(); err == nil {
-		for _, dir := range []string{".pi", ".certs", ".forgejo-gitconfigs", ".tokens"} {
-			if _, err := os.Stat(filepath.Join(home, dir)); err != nil {
-				continue
-			}
-			if _, err := os.Stat(filepath.Join(jail.Path(), home, dir)); err != nil {
-				t.Errorf("%s not in jail: %v", dir, err)
-			}
+	mounts := make(map[string]jail.Mount, len(plan.Mounts))
+	for _, m := range plan.Mounts {
+		mounts[m.Path] = m
+	}
+	if m := mounts["/task"]; m.Kind != jail.MountBindRW || m.Src != taskDir {
+		t.Errorf("/task mount = %+v, want bind-rw of %s", m, taskDir)
+	}
+	if m := mounts[filepath.Dir(h.piExecPath)]; m.Kind != jail.MountBindRO || m.Src != filepath.Dir(h.piExecPath) {
+		t.Errorf("pi root mount = %+v, want bind-ro of %s", m, filepath.Dir(h.piExecPath))
+	}
+
+	// /etc files are copied into the skeleton (not bind-mounted).
+	if _, err := os.Stat(filepath.Join(j.Path(), "etc", "hosts")); err != nil {
+		t.Errorf("/etc/hosts not copied into the skeleton: %v", err)
+	}
+	// The guest's home dot-directories are copied (when present on host).
+	if _, err := os.Stat(filepath.Join(home, ".pi")); err == nil {
+		if _, err := os.Stat(filepath.Join(j.Path(), home, ".pi")); err != nil {
+			t.Errorf("~/.pi not copied into the skeleton: %v", err)
 		}
 	}
 }
 
-// TestPIHandler_SetupChrootJail_PiUnresolvable verifies that
-// setupChrootJail fails — and removes the partial jail — when pi is neither
-// pinned at construction nor resolvable via PATH.
-func TestPIHandler_SetupChrootJail_PiUnresolvable(t *testing.T) {
+// TestPIHandler_SetupJail_PiUnresolvable verifies that setupJail fails —
+// and removes the partial jail — when pi is neither pinned at
+// construction nor resolvable via PATH.
+func TestPIHandler_SetupJail_PiUnresolvable(t *testing.T) {
 	// Point PATH at an empty dir before construction so the handler cannot
 	// pin a pi path and the fallback lookup also fails.
 	empty := t.TempDir()
@@ -1946,20 +1960,22 @@ func TestPIHandler_SetupChrootJail_PiUnresolvable(t *testing.T) {
 	if err := os.MkdirAll(taskDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := h.setupChrootJail(taskDir, "task-unresolvable", func(LogEntry) error { return nil }); err == nil {
-		t.Fatal("setupChrootJail should fail when pi cannot be resolved")
+	if _, err := h.setupJail(taskDir, "task-unresolvable", func(LogEntry) error { return nil }); err == nil {
+		t.Fatal("setupJail should fail when pi cannot be resolved")
 	}
-	if _, err := os.Stat(taskDir + ".chroot"); !os.IsNotExist(err) {
+	if _, err := os.Stat(taskDir + ".jail"); !os.IsNotExist(err) {
 		t.Errorf("partial jail should be removed (err=%v)", err)
 	}
 }
 
-// TestPIHandler_ExecuteTask_ChrootSpawnFailure verifies that with chroot
-// enabled (the default), ExecuteTask fails at spawn in an unprivileged
-// environment (chroot(2) returns EPERM) and the jail is cleaned up.
-func TestPIHandler_ExecuteTask_ChrootSpawnFailure(t *testing.T) {
-	if os.Geteuid() == 0 {
-		t.Skip("requires non-root: chroot(2) must fail with EPERM")
+// TestPIHandler_ExecuteTask_JailSpawnFailure verifies that when
+// unprivileged user namespaces are unavailable, ExecuteTask fails at
+// spawn (unshare(1) cannot create the namespaces) and the jail is
+// cleaned up. It skips when namespaces are available (the common case),
+// because then there is no way to force the failure.
+func TestPIHandler_ExecuteTask_JailSpawnFailure(t *testing.T) {
+	if ok, _ := jail.CanJail(); ok {
+		t.Skip("unprivileged namespaces available: cannot force a spawn failure")
 	}
 	if _, err := exec.LookPath("python3"); err != nil {
 		t.Skip("python3 not installed, cannot run fake pi")
@@ -1985,53 +2001,61 @@ func TestPIHandler_ExecuteTask_ChrootSpawnFailure(t *testing.T) {
 	defer os.RemoveAll(baseDir)
 
 	h := NewPIHandler(baseDir, "", "", "")
-	// chrootEnabled defaults to true — do NOT disable it here.
+	// jailEnabled defaults to true — do NOT disable it here.
 
 	if err := h.Start(context.Background()); err != nil {
 		t.Fatalf("start failed: %v", err)
 	}
 	defer h.Stop(context.Background())
 
-	task := TaskAssignment{TaskID: "test-chroot-spawn-fail", Prompt: "do the thing"}
+	task := TaskAssignment{TaskID: "test-jail-spawn-fail", Prompt: "do the thing"}
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 
 	_, err = h.ExecuteTask(ctx, task, func(LogEntry) error { return nil })
 	if err == nil {
-		t.Fatal("ExecuteTask should fail when chroot(2) is not permitted")
+		t.Fatal("ExecuteTask should fail when user namespaces are unavailable")
 	}
 
 	// The jail must be cleaned up even on failure. The jail is a direct
-	// child of tasks/ (tasks/<taskID>-<rand>.chroot), so the glob must not
-	// add an extra path level — tasks/*/*.chroot never matches and the
+	// child of tasks/ (tasks/<taskID>-<rand>.jail), so the glob must not
+	// add an extra path level — tasks/*/*.jail never matches and the
 	// assertion would be vacuous (review feedback on PR #174).
-	leftovers, _ := filepath.Glob(filepath.Join(baseDir, "tasks", "*.chroot"))
+	leftovers, _ := filepath.Glob(filepath.Join(baseDir, "tasks", "*.jail"))
 	if len(leftovers) > 0 {
-		t.Errorf("chroot jail(s) left behind: %v", leftovers)
+		t.Errorf("jail(s) left behind: %v", leftovers)
 	}
 }
 
-// TestPIHandler_ExecuteTask_ChrootCleanup verifies the full chroot flow when
-// running as root: ExecuteTask succeeds (the fake pi settles inside the
-// jail) and both the jail and the task directory are removed afterwards.
-func TestPIHandler_ExecuteTask_ChrootCleanup(t *testing.T) {
-	if os.Geteuid() != 0 {
-		t.Skip("requires root (CAP_SYS_CHROOT)")
+// TestPIHandler_ExecuteTask_JailCleanup verifies the full jail flow:
+// ExecuteTask succeeds (the fake pi settles inside the namespace jail)
+// and both the jail and the task directory are removed afterwards.
+func TestPIHandler_ExecuteTask_JailCleanup(t *testing.T) {
+	if ok, reason := jail.CanJail(); !ok {
+		t.Skipf("unprivileged namespaces unavailable: %s", reason)
 	}
 
-	// Fake pi that settles (same event shape as the real pi). Pure POSIX
-	// shell on purpose: this test runs the fake pi inside the chroot jail,
-	// where only the essential bins are available — a python3 script would
-	// need the stdlib, which is a separate (best-effort) population step.
-	// The first 10 stdout lines are consumed by the SpawnOutput capture
-	// window.
-	fakeBinDir, err := os.MkdirTemp("", "hotelier-fakepi-bin-*")
+	// The base dir must not be under /tmp: the jail mounts a fresh
+	// tmpfs at /tmp, which would hide the pi-root bind.
+	home, err := os.UserHomeDir()
 	if err != nil {
-		t.Fatalf("create fake bin dir: %v", err)
+		t.Fatal(err)
 	}
-	defer os.RemoveAll(fakeBinDir)
-	script := `#!/usr/bin/env sh
-# Consume the first stdin line (the prompt), like the python fake did.
+	baseDir, err := os.MkdirTemp(home, "hotelier-jailflow-*")
+	if err != nil {
+		t.Fatalf("create base dir: %v", err)
+	}
+	defer os.RemoveAll(baseDir)
+	fakeBinDir := filepath.Join(baseDir, "fakebin")
+	if err := os.MkdirAll(fakeBinDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// Fake pi that settles (same event shape as the real pi). Pure POSIX
+	// shell on purpose: it runs inside the namespace jail, where the
+	// host's real /usr is bind-mounted read-only. The first 10 stdout
+	// lines are consumed by the SpawnOutput capture window.
+	script := `#!/bin/sh
+# Consume the first stdin line (the prompt).
 read -r _ || true
 i=0
 while [ "$i" -lt 10 ]; do
@@ -2048,23 +2072,17 @@ printf '{"type":"agent_settled"}\n'
 	t.Cleanup(func() { os.Setenv("PATH", origPath) })
 	os.Setenv("PATH", fakeBinDir+string(os.PathListSeparator)+origPath)
 
-	baseDir, err := os.MkdirTemp("", "hotelier-base-*")
-	if err != nil {
-		t.Fatalf("create base dir: %v", err)
-	}
-	defer os.RemoveAll(baseDir)
-
 	h := NewPIHandler(baseDir, "", "", "")
-	// chrootEnabled defaults to true — do NOT disable it here.
+	// jailEnabled defaults to true — do NOT disable it here.
 	// No h.Start: ExecuteTask's restart path starts the base client.
 
-	task := TaskAssignment{TaskID: "test-chroot-cleanup", Prompt: "do the thing"}
+	task := TaskAssignment{TaskID: "test-jail-cleanup", Prompt: "do the thing"}
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
 	result, err := h.ExecuteTask(ctx, task, func(LogEntry) error { return nil })
 	if err != nil {
-		t.Fatalf("ExecuteTask in chroot failed: %v", err)
+		t.Fatalf("ExecuteTask in jail failed: %v", err)
 	}
 	if result == nil || !result.Success {
 		t.Fatalf("expected successful result, got %+v", result)
@@ -2072,10 +2090,10 @@ printf '{"type":"agent_settled"}\n'
 
 	// Both the jail and the task directory must be gone. Both are direct
 	// children of tasks/ (tasks/<taskID>-<rand> and tasks/<taskID>-<rand>
-	// .chroot), so a two-level glob would never match and the assertion
+	// .jail), so a two-level glob would never match and the assertion
 	// would be vacuous (review feedback on PR #174).
 	leftovers, _ := filepath.Glob(filepath.Join(baseDir, "tasks", "*"))
 	if len(leftovers) > 0 {
-		t.Errorf("task dir(s) or chroot jail(s) left behind: %v", leftovers)
+		t.Errorf("task dir(s) or jail(s) left behind: %v", leftovers)
 	}
 }
