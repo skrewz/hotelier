@@ -14,17 +14,30 @@ import (
 	"time"
 )
 
-// newTestLogger creates a logger that writes to the given strings.Builder.
-func newTestLogger(buf *strings.Builder) *log.Logger {
-	return log.New(&logWriter{buf: buf}, "", 0)
+// newTestLogger creates a thread-safe logger: the client's goroutines
+// write to the buffer concurrently with the test's reads, so both sides
+// must go through the writer's mutex (use w.String() to inspect).
+func newTestLogger() (*log.Logger, *logWriter) {
+	w := &logWriter{}
+	return log.New(w, "", 0), w
 }
 
 type logWriter struct {
-	buf *strings.Builder
+	mu  sync.Mutex
+	buf strings.Builder
 }
 
 func (w *logWriter) Write(p []byte) (n int, err error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
 	return w.buf.Write(p)
+}
+
+// String returns the buffered log output.
+func (w *logWriter) String() string {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.buf.String()
 }
 
 // TestPiClient_StopActuallyTerminatesProcess verifies that Stop() causes the
@@ -321,10 +334,10 @@ func TestPiClient_Stop_LogsForceKill(t *testing.T) {
 		t.Skip("pi not installed")
 	}
 
-	var logBuf strings.Builder
+	logger, logWriter := newTestLogger()
 	c := NewClient(PiClientConfig{
 		CWD: "/tmp",
-		Log: newTestLogger(&logBuf),
+		Log: logger,
 	})
 
 	ctx := context.Background()
@@ -344,7 +357,7 @@ func TestPiClient_Stop_LogsForceKill(t *testing.T) {
 	err := c.Stop(context.Background())
 	t.Logf("Stop returned: %v", err)
 
-	logOutput := logBuf.String()
+	logOutput := logWriter.String()
 
 	// Verify that the force kill was logged
 	if !strings.Contains(logOutput, "force kill") {
@@ -389,7 +402,10 @@ func TestSpawnOutputCallback_CapturesStderr(t *testing.T) {
 
 	// pi typically produces no stderr on successful startup, so we just verify
 	// the callback mechanism works without crashing
-	t.Logf("captured %d spawn output lines", len(capturedLines))
+	mu.Lock()
+	n := len(capturedLines)
+	mu.Unlock()
+	t.Logf("captured %d spawn output lines", n)
 }
 
 // TestSpawnOutputCallback_LimitEnforced verifies that the SpawnOutput callback
@@ -663,10 +679,10 @@ func TestPiClient_Start_LogsEnvVarNames(t *testing.T) {
 		t.Skip("pi not installed")
 	}
 
-	var logBuf strings.Builder
+	logger, logWriter := newTestLogger()
 	c := NewClient(PiClientConfig{
 		CWD: "/tmp",
-		Log: newTestLogger(&logBuf),
+		Log: logger,
 		Env: map[string]string{
 			"TEST_VAR_ALPHA": "alpha-value",
 			"TEST_VAR_BETA":  "beta-value",
@@ -682,7 +698,7 @@ func TestPiClient_Start_LogsEnvVarNames(t *testing.T) {
 	// Give the logger time to flush
 	time.Sleep(500 * time.Millisecond)
 
-	logOutput := logBuf.String()
+	logOutput := logWriter.String()
 
 	// Check that env var names are logged
 	if !strings.Contains(logOutput, "pi env vars:") {
@@ -785,10 +801,10 @@ func TestPiClient_Start_UsesExecPath(t *testing.T) {
 	t.Cleanup(func() { os.Setenv("PATH", origPath) })
 	os.Setenv("PATH", emptyDir)
 
-	var logBuf strings.Builder
+	logger, _ := newTestLogger()
 	c := NewClient(PiClientConfig{
 		CWD:      emptyDir,
-		Log:      newTestLogger(&logBuf),
+		Log:      logger,
 		ExecPath: fakePi,
 	})
 	if err := c.Start(context.Background()); err != nil {
@@ -805,10 +821,10 @@ func TestPiClient_Start_UsesExecPath(t *testing.T) {
 // TestPiClient_Start_ExecPathNotFound verifies that Start() returns a clear
 // error when ExecPath is set but points to a missing file.
 func TestPiClient_Start_ExecPathNotFound(t *testing.T) {
-	var logBuf strings.Builder
+	logger, _ := newTestLogger()
 	c := NewClient(PiClientConfig{
 		CWD:      "/tmp",
-		Log:      newTestLogger(&logBuf),
+		Log:      logger,
 		ExecPath: "/nonexistent/hotelier-test/pi",
 	})
 	err := c.Start(context.Background())

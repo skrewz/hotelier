@@ -38,8 +38,8 @@ func waitForEventChClosed(t *testing.T, ch chan Event, timeout time.Duration) {
 // TestPiClient_readEvents_DeliversLargeLine verifies that a stdout line far
 // larger than the old 1 MiB scanner limit is delivered intact as an event.
 func TestPiClient_readEvents_DeliversLargeLine(t *testing.T) {
-	var logBuf strings.Builder
-	c := NewClient(PiClientConfig{CWD: "/tmp", Log: newTestLogger(&logBuf)})
+	logger, logWriter := newTestLogger()
+	c := NewClient(PiClientConfig{CWD: "/tmp", Log: logger})
 
 	pr, pw := io.Pipe()
 	c.stdout = pr
@@ -56,7 +56,7 @@ func TestPiClient_readEvents_DeliversLargeLine(t *testing.T) {
 	select {
 	case event, ok := <-c.eventCh:
 		if !ok {
-			t.Fatalf("event channel closed without delivering the large event; log: %s", logBuf.String())
+			t.Fatalf("event channel closed without delivering the large event; log: %s", logWriter.String())
 		}
 		if event.Type != "tool_execution_end" {
 			t.Errorf("event type = %q, want %q", event.Type, "tool_execution_end")
@@ -65,14 +65,14 @@ func TestPiClient_readEvents_DeliversLargeLine(t *testing.T) {
 			t.Errorf("result length = %d, want >= %d (line was truncated)", len(event.Result), largeLineSize)
 		}
 	case <-time.After(10 * time.Second):
-		t.Fatalf("large event was not delivered; log: %s", logBuf.String())
+		t.Fatalf("large event was not delivered; log: %s", logWriter.String())
 	}
 
 	waitForEventChClosed(t, c.eventCh, 5*time.Second)
 
 	for _, marker := range []string{"scan error", "read error"} {
-		if strings.Contains(logBuf.String(), marker) {
-			t.Errorf("log contains %q: %s", marker, logBuf.String())
+		if strings.Contains(logWriter.String(), marker) {
+			t.Errorf("log contains %q: %s", marker, logWriter.String())
 		}
 	}
 }
@@ -80,8 +80,8 @@ func TestPiClient_readEvents_DeliversLargeLine(t *testing.T) {
 // TestPiClient_readStderr_CapturesLargeLine verifies that a stderr line far
 // larger than the old 64 KiB default scanner limit is captured in full.
 func TestPiClient_readStderr_CapturesLargeLine(t *testing.T) {
-	var logBuf strings.Builder
-	c := NewClient(PiClientConfig{CWD: "/tmp", Log: newTestLogger(&logBuf)})
+	logger, logWriter := newTestLogger()
+	c := NewClient(PiClientConfig{CWD: "/tmp", Log: logger})
 
 	pr, pw := io.Pipe()
 	c.stderr = pr
@@ -102,7 +102,7 @@ func TestPiClient_readStderr_CapturesLargeLine(t *testing.T) {
 		}
 		if time.Now().After(deadline) {
 			t.Fatalf("large stderr line was not captured (got %d lines, first length %d); log: %s",
-				len(lines), firstLineLen(lines), logBuf.String())
+				len(lines), firstLineLen(lines), logWriter.String())
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
@@ -119,8 +119,8 @@ func firstLineLen(lines []string) int {
 // without a trailing newline (e.g. if pi is killed mid-write) is still
 // delivered. This guards the io.EOF handling of the line reader.
 func TestPiClient_readEvents_FinalLineWithoutNewline(t *testing.T) {
-	var logBuf strings.Builder
-	c := NewClient(PiClientConfig{CWD: "/tmp", Log: newTestLogger(&logBuf)})
+	logger, logWriter := newTestLogger()
+	c := NewClient(PiClientConfig{CWD: "/tmp", Log: logger})
 
 	pr, pw := io.Pipe()
 	c.stdout = pr
@@ -135,13 +135,13 @@ func TestPiClient_readEvents_FinalLineWithoutNewline(t *testing.T) {
 	select {
 	case event, ok := <-c.eventCh:
 		if !ok {
-			t.Fatalf("event channel closed without delivering the final event; log: %s", logBuf.String())
+			t.Fatalf("event channel closed without delivering the final event; log: %s", logWriter.String())
 		}
 		if event.Type != "agent_end" {
 			t.Errorf("event type = %q, want %q", event.Type, "agent_end")
 		}
 	case <-time.After(5 * time.Second):
-		t.Fatalf("final event was not delivered; log: %s", logBuf.String())
+		t.Fatalf("final event was not delivered; log: %s", logWriter.String())
 	}
 
 	waitForEventChClosed(t, c.eventCh, 5*time.Second)
@@ -150,8 +150,8 @@ func TestPiClient_readEvents_FinalLineWithoutNewline(t *testing.T) {
 // TestPiClient_readEvents_DeliversMultipleEvents pins the basic behaviour:
 // multiple lines are delivered in order and empty lines are skipped.
 func TestPiClient_readEvents_DeliversMultipleEvents(t *testing.T) {
-	var logBuf strings.Builder
-	c := NewClient(PiClientConfig{CWD: "/tmp", Log: newTestLogger(&logBuf)})
+	logger, logWriter := newTestLogger()
+	c := NewClient(PiClientConfig{CWD: "/tmp", Log: logger})
 
 	pr, pw := io.Pipe()
 	c.stdout = pr
@@ -170,13 +170,13 @@ func TestPiClient_readEvents_DeliversMultipleEvents(t *testing.T) {
 		select {
 		case event, ok := <-c.eventCh:
 			if !ok {
-				t.Fatalf("event channel closed after %d events, want %d; log: %s", i, len(want), logBuf.String())
+				t.Fatalf("event channel closed after %d events, want %d; log: %s", i, len(want), logWriter.String())
 			}
 			if event.Type != wantType {
 				t.Errorf("event[%d].type = %q, want %q", i, event.Type, wantType)
 			}
 		case <-time.After(5 * time.Second):
-			t.Fatalf("event[%d] was not delivered; log: %s", i, logBuf.String())
+			t.Fatalf("event[%d] was not delivered; log: %s", i, logWriter.String())
 		}
 	}
 

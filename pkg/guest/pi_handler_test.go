@@ -859,8 +859,11 @@ func TestPIHandler_ResetClient_SpawnOutputCallback(t *testing.T) {
 	defer os.RemoveAll(baseDir)
 
 	var capturedLogs []LogEntry
+	var mu sync.Mutex
 	sendLog := func(entry LogEntry) error {
+		mu.Lock()
 		capturedLogs = append(capturedLogs, entry)
+		mu.Unlock()
 		return nil
 	}
 
@@ -889,7 +892,11 @@ func TestPIHandler_ResetClient_SpawnOutputCallback(t *testing.T) {
 	// the callback mechanism works without crashing. The key test is that
 	// the callback was set up correctly (no panic) and that any output
 	// would be prefixed with "[spawn]".
-	for _, entry := range capturedLogs {
+	mu.Lock()
+	logs := make([]LogEntry, len(capturedLogs))
+	copy(logs, capturedLogs)
+	mu.Unlock()
+	for _, entry := range logs {
 		if strings.HasPrefix(entry.Line, "[spawn]") {
 			t.Logf("spawn output captured: %s", entry.Line)
 		}
