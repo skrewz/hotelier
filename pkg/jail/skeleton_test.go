@@ -149,6 +149,10 @@ func TestWriteSpec_RoundTrip(t *testing.T) {
 	if spec.JailRoot != plan.JailRoot || spec.Cwd != plan.Cwd {
 		t.Errorf("spec round-trip mismatch: %+v", spec)
 	}
+	// The nested-userns drop id round-trips (issue #198).
+	if spec.DropToUID != plan.DropToUID {
+		t.Errorf("spec DropToUID = %d, want %d", spec.DropToUID, plan.DropToUID)
+	}
 	if len(spec.Mounts) != len(plan.Mounts) {
 		t.Fatalf("spec mounts = %d, want %d", len(spec.Mounts), len(plan.Mounts))
 	}

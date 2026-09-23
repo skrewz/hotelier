@@ -35,6 +35,10 @@ func TestBuildPlan_USRmerged(t *testing.T) {
 	if p.Cwd != "/task" {
 		t.Errorf("Cwd = %q, want the fixed jail path /task", p.Cwd)
 	}
+	// The nested-userns drop id is explicit in the plan (issue #198).
+	if p.DropToUID != DropID {
+		t.Errorf("DropToUID = %d, want %d", p.DropToUID, DropID)
+	}
 
 	mounts := make(map[string]Mount, len(p.Mounts))
 	for _, m := range p.Mounts {
@@ -130,6 +134,9 @@ func TestBuildPlan_NonUSRmerged(t *testing.T) {
 	}
 	if len(p.Symlinks) != 0 {
 		t.Errorf("Symlinks = %v, want none on a non-usr-merged host", p.Symlinks)
+	}
+	if p.DropToUID != DropID {
+		t.Errorf("DropToUID = %d, want %d", p.DropToUID, DropID)
 	}
 	for _, d := range []string{"/usr", "/bin", "/lib", "/sbin", "/lib64"} {
 		found := false
