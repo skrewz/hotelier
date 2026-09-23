@@ -132,8 +132,9 @@ func dropAndExec(innerID int, argv []string) error {
 	}
 	mapping := idMapping(innerID)
 	// execve(2) does not search PATH, so the drop helper must be
-	// referenced by absolute path. unshare lives under /usr, which the
-	// jail bind-mounts read-only, so it is resolvable after the pivot.
+	// referenced by absolute path. unshare is located via the inherited
+	// PATH; its directory (/usr, or /bin on non-usr-merged hosts) is
+	// bind-mounted into the jail, so the lookup succeeds after the pivot.
 	unsharePath, err := exec.LookPath("unshare")
 	if err != nil {
 		return fmt.Errorf("jailchild: locate unshare: %w", err)
