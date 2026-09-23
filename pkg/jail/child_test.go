@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -353,6 +354,63 @@ func TestIDMapping(t *testing.T) {
 	}
 	if got := idMapping(4242); got != "4242:0:1" {
 		t.Errorf("idMapping(4242) = %q, want %q", got, "4242:0:1")
+	}
+}
+
+// TestDropAndExec_Argv pins the unshare(1) command line the nested drop
+// constructs (issue #198). The execve seam is stubbed with a capturing
+// function, so the test runs in any environment — including hosts without
+// unprivileged user namespaces, where the CanJail()-gated probe tests skip.
+func TestDropAndExec_Argv(t *testing.T) {
+	unsharePath, err := exec.LookPath("unshare")
+	if err != nil {
+		t.Skipf("unshare(1) not on PATH: %v", err)
+	}
+
+	origExecve := execve
+	defer func() { execve = origExecve }()
+
+	run := func(innerID int, wantMapping string) {
+		t.Helper()
+		var captured []string
+		execve = func(argv []string) error {
+			captured = argv
+			return nil
+		}
+		if err := dropAndExec(innerID, []string{"/bin/true"}); err != nil {
+			t.Fatalf("dropAndExec(%d): %v", innerID, err)
+		}
+		want := []string{
+			unsharePath, "--user",
+			"--map-users=" + wantMapping, "--map-groups=" + wantMapping,
+			"--", "/bin/true",
+		}
+		if !reflect.DeepEqual(captured, want) {
+			t.Errorf("dropAndExec(%d) argv = %v, want %v", innerID, captured, want)
+		}
+	}
+
+	run(0, "1000:0:1")    // innerID <= 0 falls back to DropID
+	run(4242, "4242:0:1") // an explicit inner id is used as-is
+}
+
+// TestDropAndExec_UnshareMissing verifies the drop fails closed when
+// unshare(1) cannot be located: the error is returned and the command is
+// not exec'd.
+func TestDropAndExec_UnshareMissing(t *testing.T) {
+	origExecve := execve
+	defer func() { execve = origExecve }()
+	executed := false
+	execve = func(argv []string) error {
+		executed = true
+		return nil
+	}
+	t.Setenv("PATH", filepath.Join(t.TempDir(), "no-such-dir"))
+	if err := dropAndExec(0, []string{"/bin/true"}); err == nil {
+		t.Fatal("dropAndExec should fail when unshare is not on PATH")
+	}
+	if executed {
+		t.Error("the command must not be exec'd when the drop fails")
 	}
 }
 
