@@ -334,7 +334,10 @@ mounts a scoped `/proc` and a fresh `/dev` (device nodes bound from the
 host, a private devpts and `/dev/shm`), copies the required `/etc` files
 and the home dot-directories (`~/.pi`, `~/.certs`,
 `~/.forgejo-gitconfigs`, `~/.tokens`) per-task, and pivots the root to the
-jail before exec'ing pi. The task's working directory is the single
+jail. Before exec'ing pi it drops into a nested (child) user namespace as a
+non-root uid (issue #198): in that namespace pi holds no capabilities, so
+the jail's read-only mounts can no longer be remounted or unmounted from
+inside. The task's working directory is the single
 read-write path, mounted at the fixed in-jail path `/task`; everything
 else is read-only or a private copy, so writes inside the jail never
 reach the host. The jail is removed when the task completes.

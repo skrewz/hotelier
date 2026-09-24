@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -47,6 +48,15 @@ echo hi > /dev/null 2>/dev/null && echo DEVNULL_REDIRECT_OK || echo DEVNULL_REDI
 head -c1 /dev/zero >/dev/null 2>&1 && echo ZERO_OK || echo ZERO_FAIL
 df -T /dev/pts 2>/dev/null | tail -n 1 | grep -q devpts && echo DEVPTS_OK || echo DEVPTS_FAIL
 [ -e /dev/ptmx ] && echo PTMX_OK || echo PTMX_FAIL
+# The privilege hole (issue #198): before the nested-userns drop the
+# probe runs as root in the outer user namespace A with full
+# capabilities in A — it can umount the jail's mounts and rebind them
+# read-write. /tmp is a free tmpfs, so umount it as the probe. After
+# the drop the probe holds no capabilities in A (or in B): CapEff must
+# be zero and the umount must fail.
+echo "CAPEFF=$(sed -n 's/^CapEff:[[:space:]]*//p' /proc/self/status)"
+umount /tmp 2>/dev/null && echo UMMOUNT_HOLE || echo UMMOUNT_CLOSED
+
 `
 	if err := os.WriteFile(probe, []byte(script), 0o755); err != nil {
 		t.Fatal(err)
@@ -92,15 +102,17 @@ df -T /dev/pts 2>/dev/null | tail -n 1 | grep -q devpts && echo DEVPTS_OK || ech
 		t.Fatalf("jail child failed: %v\noutput:\n%s", err, s)
 	}
 	for _, want := range []string{
-		"UID=0",    // mapped root inside the user namespace
+		"UID=1000", // dropped to a non-root id in the nested user namespace (issue #198)
 		"RO_OK",    // the /usr bind is read-only, even as ns-root
 		"TMPFS_OK", // /tmp is a fresh tmpfs
 		"SPEC_VISIBLE",
-		"PROC_EXE_OK",         // /proc works (this broke rustup in the chroot)
-		"DEVNULL_REDIRECT_OK", // O_CREAT on a device node (the 1777 quirk)
-		"ZERO_OK",             // /dev/zero is a working bind
-		"DEVPTS_OK",           // fresh devpts for PTYs
-		"PTMX_OK",             // /dev/ptmx symlink
+		"PROC_EXE_OK",             // /proc works (this broke rustup in the chroot)
+		"DEVNULL_REDIRECT_OK",     // O_CREAT on a device node (the 1777 quirk)
+		"ZERO_OK",                 // /dev/zero is a working bind
+		"DEVPTS_OK",               // fresh devpts for PTYs
+		"PTMX_OK",                 // /dev/ptmx symlink
+		"CAPEFF=0000000000000000", // no capabilities in A or B after the drop
+		"UMMOUNT_CLOSED",          // the umount/rebind hole is closed by the drop
 	} {
 		if !strings.Contains(s, want) {
 			t.Errorf("probe output missing %q:\n%s", want, s)
@@ -330,6 +342,75 @@ func TestJailChildRunner(t *testing.T) {
 	if err := RunChild(specPath, flag.Args()); err != nil {
 		fmt.Fprintf(os.Stderr, "jailchild: %v\n", err)
 		os.Exit(1)
+	}
+}
+
+// TestIDMapping verifies the unshare(1) --map-users/--map-groups argument
+// the nested drop uses: a single mapping of the outer root (A:0) to the
+// inner non-root id, "<innerID>:0:1" (issue #198).
+func TestIDMapping(t *testing.T) {
+	if got := idMapping(DropID); got != "1000:0:1" {
+		t.Errorf("idMapping(%d) = %q, want %q", DropID, got, "1000:0:1")
+	}
+	if got := idMapping(4242); got != "4242:0:1" {
+		t.Errorf("idMapping(4242) = %q, want %q", got, "4242:0:1")
+	}
+}
+
+// TestDropAndExec_Argv pins the unshare(1) command line the nested drop
+// constructs (issue #198). The execve seam is stubbed with a capturing
+// function, so the test runs in any environment — including hosts without
+// unprivileged user namespaces, where the CanJail()-gated probe tests skip.
+func TestDropAndExec_Argv(t *testing.T) {
+	unsharePath, err := exec.LookPath("unshare")
+	if err != nil {
+		t.Skipf("unshare(1) not on PATH: %v", err)
+	}
+
+	origExecve := execve
+	defer func() { execve = origExecve }()
+
+	run := func(innerID int, wantMapping string) {
+		t.Helper()
+		var captured []string
+		execve = func(argv []string) error {
+			captured = argv
+			return nil
+		}
+		if err := dropAndExec(innerID, []string{"/bin/true"}); err != nil {
+			t.Fatalf("dropAndExec(%d): %v", innerID, err)
+		}
+		want := []string{
+			unsharePath, "--user",
+			"--map-users=" + wantMapping, "--map-groups=" + wantMapping,
+			"--", "/bin/true",
+		}
+		if !reflect.DeepEqual(captured, want) {
+			t.Errorf("dropAndExec(%d) argv = %v, want %v", innerID, captured, want)
+		}
+	}
+
+	run(0, "1000:0:1")    // innerID <= 0 falls back to DropID
+	run(4242, "4242:0:1") // an explicit inner id is used as-is
+}
+
+// TestDropAndExec_UnshareMissing verifies the drop fails closed when
+// unshare(1) cannot be located: the error is returned and the command is
+// not exec'd.
+func TestDropAndExec_UnshareMissing(t *testing.T) {
+	origExecve := execve
+	defer func() { execve = origExecve }()
+	executed := false
+	execve = func(argv []string) error {
+		executed = true
+		return nil
+	}
+	t.Setenv("PATH", filepath.Join(t.TempDir(), "no-such-dir"))
+	if err := dropAndExec(0, []string{"/bin/true"}); err == nil {
+		t.Fatal("dropAndExec should fail when unshare is not on PATH")
+	}
+	if executed {
+		t.Error("the command must not be exec'd when the drop fails")
 	}
 }
 

@@ -87,7 +87,7 @@ func CreateSkeleton(p Plan) error {
 // WriteSpec writes the spec file into the jail root so the jail child
 // can read it at /spec.json after the pivot.
 func WriteSpec(p Plan) error {
-	spec := Spec{JailRoot: p.JailRoot, Cwd: p.Cwd, Mounts: p.Mounts, DevNodes: p.DevNodes}
+	spec := Spec{JailRoot: p.JailRoot, Cwd: p.Cwd, Mounts: p.Mounts, DevNodes: p.DevNodes, DropToUID: p.DropToUID}
 	data, err := json.Marshal(spec)
 	if err != nil {
 		return fmt.Errorf("marshal jail spec: %w", err)

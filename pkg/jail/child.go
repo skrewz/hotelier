@@ -4,6 +4,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 
@@ -13,7 +14,9 @@ import (
 // RunChild performs the in-namespace side of the jail: it reads the
 // spec, performs the bind mounts (read-only except the task dir),
 // mounts the tmpfs /tmp and the scoped /proc, pivots the root to the
-// jail, changes to the working directory and execs the command.
+// jail, changes to the working directory, drops into a nested user
+// namespace (so the command holds no capabilities in the outer
+// namespace — issue #198) and execs the command.
 //
 // It must run inside the namespaces created by unshare(1) (user, mount,
 // pid) — see the package docs. On success it never returns (exec
@@ -93,9 +96,65 @@ func RunChild(specPath string, argv []string) error {
 		return fmt.Errorf("jailchild: chdir %s: %w", spec.Cwd, err)
 	}
 
-	// Replace the process with the command. The environment is
-	// inherited from the guest (persona vars, TMPDIR, PATH, ...).
-	return execve(argv)
+	// Drop into a nested user namespace before exec (issue #198):
+	// everything the mounter execs would otherwise inherit root-in-A
+	// and with it CAP_SYS_ADMIN in A, which can umount the jail's ro
+	// mounts and rebind them read-write. After the drop the command
+	// holds no capabilities in A (or in B) and cannot.
+	return dropAndExec(spec.DropToUID, argv)
+}
+
+// dropAndExec drops into a nested (child) user namespace B and execs the
+// command as the non-root id innerID inside it (issue #198). The drop is
+// delegated to unshare(1) — a single-threaded helper that creates B and
+// maps the command into it as innerID — because a Go process cannot create
+// a user namespace itself: the kernel's check_unshare_flags makes
+// CLONE_NEWUSER imply CLONE_THREAD, which requires a single-threaded
+// process, and the Go runtime always runs a second (sysmon) thread, so
+// unix.Unshare(CLONE_NEWUSER) from here fails with EINVAL. unshare(1) is
+// already a hard dependency of the jail (the outer spawn uses it), so no
+// new binary is introduced.
+//
+// unshare(1) writes the mapping from its parent side (its helper child,
+// still in A, writes the main process's /proc/<pid>/uid_map). That
+// parent-side write succeeds here: the mapping file's inode is owned by
+// the target's uid in A (0, unchanged by the unshare), so the writer
+// (A:0) is the owner and the DAC check passes. It requires /proc to be
+// mounted in A (showing this pid namespace) — RunChild mounts it (the
+// MountProc spec entry) before this runs, so the requirement is met.
+//
+// The mapping is "<innerID>:0:1": A:0 (the guest user on the host) becomes
+// innerID in B, so the command's host identity is unchanged while it is
+// non-root in B and holds no capabilities in A.
+func dropAndExec(innerID int, argv []string) error {
+	if innerID <= 0 {
+		innerID = DropID
+	}
+	mapping := idMapping(innerID)
+	// execve(2) does not search PATH, so the drop helper must be
+	// referenced by absolute path. unshare is located via the inherited
+	// PATH; its directory (/usr, or /bin on non-usr-merged hosts) is
+	// bind-mounted into the jail, so the lookup succeeds after the pivot.
+	unsharePath, err := exec.LookPath("unshare")
+	if err != nil {
+		return fmt.Errorf("jailchild: locate unshare: %w", err)
+	}
+	cmd := append([]string{
+		unsharePath, "--user",
+		"--map-users=" + mapping, "--map-groups=" + mapping,
+		"--",
+	}, argv...)
+	// Replace the process with the command (via the drop). The
+	// environment is inherited from the guest (persona vars, TMPDIR,
+	// PATH, ...).
+	return execve(cmd)
+}
+
+// idMapping builds the unshare(1) --map-users/--map-groups argument that
+// maps the outer root (A:0) to the inner non-root id: "<innerID>:0:1"
+// (inside:outside:count).
+func idMapping(innerID int) string {
+	return fmt.Sprintf("%d:0:1", innerID)
 }
 
 // execve is the final exec. It is a variable so the in-namespace test

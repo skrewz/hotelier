@@ -23,6 +23,10 @@ func BuildPlan(f Facts) (Plan, error) {
 		// its host path): a /tmp tmpfs would hide a mount under /tmp,
 		// and /task is short and predictable for the agent.
 		Cwd: "/task",
+		// The child drops into a nested user namespace as this id before
+		// exec, so the command holds no capabilities in the outer
+		// namespace (issue #198).
+		DropToUID: DropID,
 	}
 
 	// A fresh /dev tmpfs. The mode must not be the tmpfs default 1777:

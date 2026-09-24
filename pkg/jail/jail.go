@@ -28,10 +28,11 @@
 // to root inside them (no capabilities required). Its forked child —
 // this package's RunChild, reached via the guest binary's -jail-child
 // flag — performs the bind mounts, mounts /proc, pivots the root to the
-// jail and execs pi. The --fork is mandatory: a process that created a
-// pid namespace (and is not pid 1 in it) cannot fork after mounting
-// inside it (verified on kernel 7.1 and 7.2), so the child must be
-// forked into the namespace by unshare.
+// jail, drops into a nested user namespace (so pi holds no capabilities
+// in the outer one — issue #198) and execs pi. The --fork is mandatory:
+// a process that created a pid namespace (and is not pid 1 in it) cannot
+// fork after mounting inside it (verified on kernel 7.1 and 7.2), so the
+// child must be forked into the namespace by unshare.
 package jail
 
 import (
@@ -42,6 +43,15 @@ import (
 	"os"
 	"path/filepath"
 )
+
+// DropID is the uid/gid the command is mapped to inside the nested user
+// namespace the jail child creates before exec'ing it (issue #198). The
+// mapping is a single entry: the outer root (A:0, the guest user on the
+// host) becomes <DropID> in the inner namespace B — non-root, so the
+// command holds no capabilities in B and, being in a child user
+// namespace, none in A either. The inner id is arbitrary non-zero; 1000
+// mirrors the typical guest uid.
+const DropID = 1000
 
 // MountKind is the kind of a jail mount.
 type MountKind string
@@ -104,6 +114,10 @@ type Plan struct {
 	CopyFiles []string `json:"copyFiles,omitempty"`
 	CopyTrees []string `json:"copyTrees,omitempty"`
 	Symlinks  []Link   `json:"symlinks,omitempty"`
+	// DropToUID is the id the jail child maps itself to in the nested
+	// user namespace before exec (see DropID). Zero means the child
+	// falls back to DropID.
+	DropToUID int `json:"dropToUID,omitempty"`
 }
 
 // SpecPath is the location of the spec file inside the jail root. The
@@ -123,6 +137,9 @@ type Spec struct {
 	// DevNodes are the device node names bind-mounted into /dev by the
 	// jail child (see Plan.DevNodes).
 	DevNodes []string `json:"devNodes,omitempty"`
+	// DropToUID is the id the jail child maps itself to in the nested
+	// user namespace before exec (see Plan.DropToUID).
+	DropToUID int `json:"dropToUID,omitempty"`
 }
 
 // ReadSpec reads and validates a spec file.
