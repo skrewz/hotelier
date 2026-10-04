@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/url"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 
@@ -90,6 +91,13 @@ type GuestConfig struct {
 	// authentication with the Check-In Host. Must be set together
 	// with ClientCert.
 	ClientKey string `yaml:"client_key"`
+	// HomeCopies is the set of home paths copied into every task's
+	// namespace jail (issue #201). Entries are relative to the guest's
+	// home directory: directories are copied recursively (symlinks
+	// resolved), files are copied with their content and mode. Entries
+	// that do not exist on this guest are skipped. When the field is
+	// absent or empty the jail falls back to its built-in default set.
+	HomeCopies []string `yaml:"home_copies"`
 }
 
 // DefaultServerConfig returns a ServerConfig with sensible defaults.
@@ -172,7 +180,31 @@ func LoadGuestConfig(path string) (GuestConfig, error) {
 	if err := yaml.Unmarshal(data, &cfg); err != nil {
 		return cfg, err
 	}
+	if err := validateHomeCopies(cfg.HomeCopies); err != nil {
+		return cfg, err
+	}
 	return cfg, nil
+}
+
+// validateHomeCopies checks the jail home copy set (issue #201). Entries
+// are resolved against the guest's home directory when a task's jail is
+// built, so they must be non-empty relative paths: absolute paths and
+// ".." components are rejected.
+func validateHomeCopies(entries []string) error {
+	for _, e := range entries {
+		if e == "" {
+			return fmt.Errorf("home_copies contains an empty entry; entries must be non-empty paths relative to the home directory")
+		}
+		if filepath.IsAbs(e) {
+			return fmt.Errorf("home_copies entry %q must be relative to the home directory", e)
+		}
+		for _, part := range strings.Split(e, "/") {
+			if part == ".." {
+				return fmt.Errorf("home_copies entry %q must not escape the home directory (no \"..\" components)", e)
+			}
+		}
+	}
+	return nil
 }
 
 // TLSConfig builds a *tls.Config for mTLS client authentication.
