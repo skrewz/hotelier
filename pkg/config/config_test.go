@@ -197,6 +197,103 @@ log_level: "debug"
 	}
 }
 
+// TestLoadGuestConfig_HomeCopies verifies that the jail home copy set
+// (issue #201) is parsed from guest config, and that an absent field
+// leaves it empty (the jail falls back to its built-in set).
+func TestLoadGuestConfig_HomeCopies(t *testing.T) {
+	tmpDir := t.TempDir()
+	configPath := filepath.Join(tmpDir, "guest.yaml")
+
+	content := `
+url: "ws://192.168.1.100:3000/ws"
+id: "test-guest-hc"
+home_copies:
+  - ".pi"
+  - ".certs"
+  - ".report-on-signal.yaml"
+`
+	if err := os.WriteFile(configPath, []byte(content), 0o644); err != nil {
+		t.Fatalf("failed to write config file: %v", err)
+	}
+
+	cfg, err := LoadGuestConfig(configPath)
+	if err != nil {
+		t.Fatalf("LoadGuestConfig failed: %v", err)
+	}
+
+	want := []string{".pi", ".certs", ".report-on-signal.yaml"}
+	if len(cfg.HomeCopies) != len(want) {
+		t.Fatalf("HomeCopies = %v, want %v", cfg.HomeCopies, want)
+	}
+	for i := range want {
+		if cfg.HomeCopies[i] != want[i] {
+			t.Errorf("HomeCopies[%d] = %q, want %q", i, cfg.HomeCopies[i], want[i])
+		}
+	}
+
+	// Absent field: empty (the jail uses its built-in default set).
+	emptyPath := filepath.Join(tmpDir, "guest-empty.yaml")
+	if err := os.WriteFile(emptyPath, []byte("url: \"ws://192.168.1.100:3000/ws\"\n"), 0o644); err != nil {
+		t.Fatalf("failed to write config file: %v", err)
+	}
+	cfg, err = LoadGuestConfig(emptyPath)
+	if err != nil {
+		t.Fatalf("LoadGuestConfig failed: %v", err)
+	}
+	if len(cfg.HomeCopies) != 0 {
+		t.Errorf("HomeCopies = %v, want empty when the field is absent", cfg.HomeCopies)
+	}
+}
+
+// TestLoadGuestConfig_HomeCopiesValidation verifies that home_copies
+// entries are validated at config load: entries are relative to the
+// guest's home directory, so absolute paths, ".." components and empty
+// entries are rejected (issue #201).
+func TestLoadGuestConfig_HomeCopiesValidation(t *testing.T) {
+	// Entry is the raw YAML scalar as written in the config file.
+	cases := []struct {
+		name  string
+		entry string
+		err   string
+	}{
+		{"absolute path", "/etc/passwd", "relative"},
+		{"dotdot", "..", "home directory"},
+		{"dotdot prefix", "../etc", "home directory"},
+		{"dotdot nested", ".pi/../certs", "home directory"},
+		{"empty entry", `""`, "empty"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			tmpDir := t.TempDir()
+			configPath := filepath.Join(tmpDir, "guest.yaml")
+			content := "url: \"ws://192.168.1.100:3000/ws\"\nhome_copies:\n  - " + tc.entry + "\n"
+			if err := os.WriteFile(configPath, []byte(content), 0o644); err != nil {
+				t.Fatalf("failed to write config file: %v", err)
+			}
+			if _, err := LoadGuestConfig(configPath); err == nil {
+				t.Fatalf("LoadGuestConfig with home_copies entry %q should fail", tc.entry)
+			} else if !strings.Contains(err.Error(), tc.err) {
+				t.Errorf("error %q, want it to mention %q", err, tc.err)
+			}
+		})
+	}
+
+	// A valid relative entry (including nested sub-paths) is accepted.
+	tmpDir := t.TempDir()
+	configPath := filepath.Join(tmpDir, "guest.yaml")
+	content := "url: \"ws://192.168.1.100:3000/ws\"\nhome_copies:\n  - .pi\n  - sub/dir\n"
+	if err := os.WriteFile(configPath, []byte(content), 0o644); err != nil {
+		t.Fatalf("failed to write config file: %v", err)
+	}
+	cfg, err := LoadGuestConfig(configPath)
+	if err != nil {
+		t.Fatalf("LoadGuestConfig with relative entries should succeed: %v", err)
+	}
+	if len(cfg.HomeCopies) != 2 || cfg.HomeCopies[1] != "sub/dir" {
+		t.Errorf("HomeCopies = %v, want [.pi sub/dir]", cfg.HomeCopies)
+	}
+}
+
 func TestConfigStore(t *testing.T) {
 	store := NewConfigStore()
 

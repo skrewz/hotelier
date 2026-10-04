@@ -10,6 +10,17 @@ heartbeat_interval: 15
 working_dir: "/tmp/hotelier"
 log_level: "info"
 
+# Home paths copied into every task's namespace jail (issue #201). Entries
+# are relative to the guest's home directory: directories are copied
+# recursively, files (e.g. a skill's dot-file config) are copied with their
+# content and mode; entries that do not exist on this guest are skipped.
+# When omitted or empty, the jail falls back to its built-in default set
+# (~/.pi, ~/.certs, ~/.forgejo-gitconfigs, ~/.tokens).
+#home_copies:
+#  - ".pi"
+#  - ".certs"
+#  - ".report-on-signal.yaml"
+
 # mTLS client authentication for the WebSocket connection to the Check-In Host.
 # When both client_cert and client_key are set, the guest will present the
 # specified certificate during the TLS handshake (upgrades ws:// to wss://).

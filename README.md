@@ -86,6 +86,7 @@ log_level: "info"
 | `url` | Full WebSocket URL of the Check-In Host (`ws://` or `wss://`). Scheme defaults to `ws://` or `wss://` based on mTLS config if omitted. | — |
 | `working_dir` | Base directory for task execution | `"/tmp/hotelier"` |
 | `log_level` | Logging level (`debug`, `info`, `warn`, `error`) | `"info"` |
+| `home_copies` | Home paths copied into every task's namespace jail (issue #201). Entries are relative to the guest's home directory: directories are copied recursively, files (e.g. a skill's dot-file config) are copied with their content and mode; entries that do not exist on this guest are skipped. Absolute paths and `..` components are rejected. | built-in set: `.pi`, `.certs`, `.forgejo-gitconfigs`, `.tokens` |
 
 Example with mTLS:
 
@@ -332,10 +333,14 @@ re-execs itself under `unshare --map-root-user --mount --pid --fork`;
 the in-namespace child bind-mounts the host's real `/usr` read-only,
 mounts a scoped `/proc` and a fresh `/dev` (device nodes bound from the
 host, a private devpts and `/dev/shm`), copies the required `/etc` files
-and the home dot-directories (`~/.pi`, `~/.certs`,
-`~/.forgejo-gitconfigs`, `~/.tokens`) per-task, and pivots the root to the
-jail. Before exec'ing pi it drops into a nested (child) user namespace as a
-non-root uid (issue #198): in that namespace pi holds no capabilities, so
+and the guest's home paths per-task, and pivots the root to the jail.
+The home copy set is configured in the guest config (`home_copies`,
+issue #201): entries are paths relative to the guest's home directory, and
+may be directories (copied recursively) or files (copied with their
+content and mode). When the field is omitted or empty, the built-in
+default set applies (`~/.pi`, `~/.certs`, `~/.forgejo-gitconfigs`,
+`~/.tokens`). Before exec'ing pi it drops into a nested (child) user
+namespace as a non-root uid (issue #198): in that namespace pi holds no capabilities, so
 the jail's read-only mounts can no longer be remounted or unmounted from
 inside. The task's working directory is the single
 read-write path, mounted at the fixed in-jail path `/task`; everything

@@ -125,6 +125,9 @@ func createPIHandler(cfg config.GuestConfig, debug bool) (guest.Handler, func())
 	}
 
 	h := guest.NewPIHandlerDebug(workDir, "", "", "", debug)
+	// The jail's home copy set comes from the guest config (issue #201);
+	// an empty set keeps the jail's built-in default set.
+	h.SetHomeCopies(cfg.HomeCopies)
 	if err := h.Start(context.Background()); err != nil {
 		log.Fatalf("failed to start pi handler: %v", err)
 	}

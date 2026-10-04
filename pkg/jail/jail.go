@@ -8,15 +8,16 @@
 // host toolchain changes. The namespace jail instead reuses the host's
 // real /usr (bind-mounted read-only), mounts a scoped /proc and the
 // device nodes the agent needs, and gives the subprocess a private
-// /tmp and a private copy of the /etc files and home dot-directories it
+// /tmp and a private copy of the /etc files and the home paths (dirs
+// and dot-files, per the guest's home_copies config — issue #201) it
 // relies on. This is the same mechanism bubblewrap/Flatpak, rootless
 // podman and the AI-agent CLIs use.
 //
 // Write isolation: every mount into the jail is explicitly read-only
 // except the task directory itself, which is the single intentional
 // read-write path. Writes to /usr, the pi install, /etc and the home
-// dot-dirs cannot reach the host: /usr and the pi install are ro binds,
-// /etc files and the dot-dirs are per-task copies, and /tmp is a fresh
+// paths cannot reach the host: /usr and the pi install are ro binds,
+// /etc files and the home paths are per-task copies, and /tmp is a fresh
 // tmpfs.
 //
 // Process model: the guest spawns
@@ -176,9 +177,11 @@ func NewJail(logger *log.Logger) *Jail {
 
 // Setup discovers the host facts, builds the plan, creates the skeleton
 // and writes the spec. The jail root is a sibling of the task directory
-// (<taskDir>.jail), so the task-directory sweep covers it.
-func (j *Jail) Setup(taskDir, homeDir, piPath string) error {
-	facts, err := Discover(taskDir, homeDir, piPath)
+// (<taskDir>.jail), so the task-directory sweep covers it. homeCopies is
+// the configured set of home paths to copy (relative to homeDir); nil or
+// empty selects the built-in default set (issue #201).
+func (j *Jail) Setup(taskDir, homeDir, piPath string, homeCopies []string) error {
+	facts, err := Discover(taskDir, homeDir, piPath, homeCopies)
 	if err != nil {
 		return err
 	}

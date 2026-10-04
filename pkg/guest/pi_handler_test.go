@@ -1947,6 +1947,79 @@ func TestPIHandler_SetupJail(t *testing.T) {
 	}
 }
 
+// TestPIHandler_SetupJail_HomeCopiesConfigured verifies that setupJail
+// copies the configured home paths (issue #201): a directory as a tree
+// and a dot-file with its content, while a configured entry that does
+// not exist on this guest is skipped (best effort). HOME is pointed at a
+// synthetic guest home so the test is deterministic.
+func TestPIHandler_SetupJail_HomeCopiesConfigured(t *testing.T) {
+	// A fake pi keeps the jail small (the real pi package is ~134 MB).
+	// The base dir must not be under /tmp: the jail mounts a fresh
+	// tmpfs at /tmp, which would hide the pi-root bind.
+	realHome, err := os.UserHomeDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	baseDir, err := os.MkdirTemp(realHome, "hotelier-setupjail-hc-*")
+	if err != nil {
+		t.Fatalf("create base dir: %v", err)
+	}
+	defer os.RemoveAll(baseDir)
+	fakeBinDir := filepath.Join(baseDir, "fakebin")
+	if err := os.MkdirAll(fakeBinDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(fakeBinDir, "pi"), []byte("#!/bin/sh\nread -r _ || true\n"), 0o755); err != nil {
+		t.Fatalf("write fake pi: %v", err)
+	}
+	origPath := os.Getenv("PATH")
+	t.Cleanup(func() { os.Setenv("PATH", origPath) })
+	os.Setenv("PATH", fakeBinDir+string(os.PathListSeparator)+origPath)
+
+	// A synthetic guest home with the configured entries.
+	fakeHome := filepath.Join(baseDir, "fakehome")
+	if err := os.MkdirAll(filepath.Join(fakeHome, ".pi"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	dotFile := filepath.Join(fakeHome, ".report-on-signal.yaml")
+	if err := os.WriteFile(dotFile, []byte("room: test\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HOME", fakeHome)
+
+	h := NewPIHandler(baseDir, "", "", "")
+	if h.piExecPath != filepath.Join(fakeBinDir, "pi") {
+		t.Fatalf("piExecPath = %q, want the fake pi", h.piExecPath)
+	}
+	h.SetHomeCopies([]string{".pi", ".report-on-signal.yaml", "missing-entry"})
+
+	taskDir := filepath.Join(baseDir, "tasks", "task-hc", "abc123")
+	if err := os.MkdirAll(taskDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	j, err := h.setupJail(taskDir, "task-hc", func(LogEntry) error { return nil })
+	if err != nil {
+		t.Fatalf("setupJail failed: %v", err)
+	}
+	defer j.Cleanup()
+
+	// The configured home directory is copied as a tree.
+	if _, err := os.Stat(filepath.Join(j.Path(), fakeHome, ".pi")); err != nil {
+		t.Errorf("configured home dir not copied: %v", err)
+	}
+	// The configured home dot-file is copied with its content.
+	if data, err := os.ReadFile(filepath.Join(j.Path(), fakeHome, ".report-on-signal.yaml")); err != nil {
+		t.Errorf("configured home dot-file not copied: %v", err)
+	} else if string(data) != "room: test\n" {
+		t.Errorf("dot-file content = %q, want the source content", data)
+	}
+	// A configured entry that does not exist on this guest is skipped.
+	if _, err := os.Stat(filepath.Join(j.Path(), fakeHome, "missing-entry")); !os.IsNotExist(err) {
+		t.Errorf("missing configured entry must be skipped (err=%v)", err)
+	}
+}
+
 // TestPIHandler_SetupJail_PiUnresolvable verifies that setupJail fails —
 // and removes the partial jail — when pi is neither pinned at
 // construction nor resolvable via PATH.

@@ -176,6 +176,11 @@ func TestJail_Facade(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(home, ".pi"), 0o755); err != nil {
 		t.Fatal(err)
 	}
+	// A configured home dot-file (issue #201): the facade must carry it
+	// into the skeleton with its content.
+	if err := os.WriteFile(filepath.Join(home, ".report-on-signal.yaml"), []byte("room: test\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	// A fake pi under a node_modules tree.
 	pi := filepath.Join(base, "install", "node_modules", "pi-coding-agent", "bin", "pi")
 	if err := os.MkdirAll(filepath.Dir(pi), 0o755); err != nil {
@@ -186,7 +191,7 @@ func TestJail_Facade(t *testing.T) {
 	}
 
 	j := NewJail(log.New(io.Discard, "", 0))
-	if err := j.Setup(taskDir, home, pi); err != nil {
+	if err := j.Setup(taskDir, home, pi, []string{".pi", ".report-on-signal.yaml", "does-not-exist"}); err != nil {
 		t.Fatalf("Setup: %v", err)
 	}
 	if j.Path() != taskDir+".jail" {
@@ -218,6 +223,22 @@ func TestJail_Facade(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(j.Path(), home, ".pi")); err != nil {
 		t.Errorf("home dot-dir not copied: %v", err)
 	}
+	// The configured home dot-file was copied with its content and mode
+	// (resolved-copy semantics, like the /etc files).
+	if fi, err := os.Stat(filepath.Join(j.Path(), home, ".report-on-signal.yaml")); err != nil {
+		t.Errorf("home dot-file not copied: %v", err)
+	} else {
+		if data, err := os.ReadFile(filepath.Join(j.Path(), home, ".report-on-signal.yaml")); err != nil || string(data) != "room: test\n" {
+			t.Errorf("dot-file content = %q (err=%v), want the source content", data, err)
+		}
+		if fi.Mode().Perm() != 0o600 {
+			t.Errorf("dot-file mode = %v, want 0600 (the source mode)", fi.Mode().Perm())
+		}
+	}
+	// The missing configured entry was skipped (best effort).
+	if _, err := os.Stat(filepath.Join(j.Path(), home, "does-not-exist")); !os.IsNotExist(err) {
+		t.Errorf("missing home entry must be skipped (err=%v)", err)
+	}
 
 	if err := j.Cleanup(); err != nil {
 		t.Fatalf("Cleanup: %v", err)
@@ -238,7 +259,7 @@ func TestCleanup_Missing(t *testing.T) {
 // task directory is missing (the Discover error branch).
 func TestJail_Setup_RequiresTaskDir(t *testing.T) {
 	j := NewJail(log.New(io.Discard, "", 0))
-	if err := j.Setup("", t.TempDir(), t.TempDir()+"/pi"); err == nil {
+	if err := j.Setup("", t.TempDir(), t.TempDir()+"/pi", nil); err == nil {
 		t.Fatal("Setup should fail without a task dir")
 	}
 }
