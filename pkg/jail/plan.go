@@ -60,14 +60,17 @@ func BuildPlan(f Facts) (Plan, error) {
 		Mount{Kind: MountProc, Path: "/proc"},
 	)
 
-	// Per-task copies: /etc files (symlink-resolved), the CA bundle and
-	// the home dot-dirs.
+	// Per-task copies: /etc files (symlink-resolved), the CA bundle,
+	// the home directories and home files.
 	p.CopyFiles = append(p.CopyFiles, f.EtcFiles...)
 	if f.HasCertDir {
 		p.CopyTrees = append(p.CopyTrees, "/etc/ssl/certs")
 	}
-	for _, d := range f.HomeDotDirs {
+	for _, d := range f.HomeCopyTrees {
 		p.CopyTrees = append(p.CopyTrees, filepath.Join(f.HomeDir, d))
+	}
+	for _, e := range f.HomeCopyFiles {
+		p.CopyFiles = append(p.CopyFiles, filepath.Join(f.HomeDir, e))
 	}
 
 	// Usrmerge shims so #!/bin/sh and friends resolve.

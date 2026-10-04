@@ -27,6 +27,11 @@ type PIHandler struct {
 	// piExecPath is the resolved full path to the pi executable
 	// ("" = resolve via PATH).
 	piExecPath string
+	// homeCopies is the set of home paths (relative to the guest home
+	// directory) copied into every task's jail, from the guest config's
+	// home_copies field (issue #201). Nil or empty keeps the jail's
+	// built-in default set. Set at construction via SetHomeCopies.
+	homeCopies []string
 	debugMu    sync.Mutex
 	mu         sync.Mutex
 	// removeDir removes a directory tree during the startup sweep
@@ -49,6 +54,16 @@ func NewPIHandler(cwd string, provider, model, thinkingLevel string) *PIHandler 
 // BaseCWD returns the original working directory set during construction.
 func (h *PIHandler) BaseCWD() string {
 	return h.baseCWD
+}
+
+// SetHomeCopies configures the home paths (relative to the guest home
+// directory) copied into each task's namespace jail, from the guest
+// config's home_copies field (issue #201). A nil or empty set keeps the
+// jail's built-in default set. Entries must be non-empty relative paths
+// without ".." components — the guest config is validated at load, and
+// this method is called once at construction before any task runs.
+func (h *PIHandler) SetHomeCopies(entries []string) {
+	h.homeCopies = entries
 }
 
 // NewPIHandlerDebug creates a new PIHandler with optional RPC debug logging.
@@ -262,7 +277,8 @@ func (h *PIHandler) ExecuteTask(ctx context.Context, task TaskAssignment, sendLo
 	// Set up the namespace jail for task isolation (issue #51). The jail
 	// is a sibling of the task directory; the pi subprocess — and
 	// everything it spawns — sees host absolute paths for the toolchain,
-	// /etc and the home dot-dirs, and the task directory at the fixed
+	// /etc and the home paths (dirs and dot-files, per the guest's
+	// home_copies config), and the task directory at the fixed
 	// path /task.
 	if h.jailEnabled {
 		var err error
@@ -960,10 +976,10 @@ func (h *PIHandler) resetClientWithEnv(ctx context.Context, workDir string, task
 // directory is taskDir. The jail root is a sibling of the task directory
 // (<taskDir>.jail); the task directory itself is bind-mounted read-write
 // at the fixed in-jail path /task, and everything else the pi subprocess
-// needs (the toolchain, /etc files, the home dot-dirs, the pi install)
-// is visible at its host absolute path — read-only, or as a per-task copy
-// — so existing absolute-path references keep working unmodified inside
-// the jail.
+// needs (the toolchain, /etc files, the home paths — dirs and dot-files
+// per the guest's home_copies config — the pi install) is visible at its
+// host absolute path — read-only, or as a per-task copy — so existing
+// absolute-path references keep working unmodified inside the jail.
 //
 // The caller owns the returned jail and must call Cleanup on it
 // (ExecuteTask does this via defer).
@@ -988,7 +1004,7 @@ func (h *PIHandler) setupJail(taskDir, taskID string, sendLog func(LogEntry) err
 	j := jail.NewJail(h.log)
 	h.log.Printf("[JAIL] setting up jail for task %s", taskID)
 	_ = sendLog(LogEntry{TaskID: taskID, Line: "Setting up namespace jail", Level: "system"})
-	if err := j.Setup(taskDir, homeDir, piPath); err != nil {
+	if err := j.Setup(taskDir, homeDir, piPath, h.homeCopies); err != nil {
 		_ = j.Cleanup()
 		return nil, fmt.Errorf("set up jail: %w", err)
 	}

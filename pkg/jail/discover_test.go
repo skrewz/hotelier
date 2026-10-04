@@ -32,7 +32,7 @@ func TestDiscover(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	f, err := Discover(taskDir, home, pi)
+	f, err := Discover(taskDir, home, pi, nil)
 	if err != nil {
 		t.Fatalf("Discover: %v", err)
 	}
@@ -40,11 +40,13 @@ func TestDiscover(t *testing.T) {
 	if f.PiRoot != filepath.Join(base, "install", "node_modules") {
 		t.Errorf("PiRoot = %q, want the node_modules ancestor", f.PiRoot)
 	}
-	if !contains(f.HomeDotDirs, ".pi") || !contains(f.HomeDotDirs, ".tokens") {
-		t.Errorf("HomeDotDirs = %v, want .pi and .tokens", f.HomeDotDirs)
+	// With no configured home copy set, the built-in default set is
+	// probed (issue #201).
+	if !contains(f.HomeCopyTrees, ".pi") || !contains(f.HomeCopyTrees, ".tokens") {
+		t.Errorf("HomeCopyTrees = %v, want .pi and .tokens", f.HomeCopyTrees)
 	}
-	if contains(f.HomeDotDirs, ".certs") {
-		t.Errorf("HomeDotDirs = %v, .certs was not created and must not appear", f.HomeDotDirs)
+	if contains(f.HomeCopyTrees, ".certs") {
+		t.Errorf("HomeCopyTrees = %v, .certs was not created and must not appear", f.HomeCopyTrees)
 	}
 	// The usrmerge flag must match the actual host layout.
 	fi, lerr := os.Lstat("/bin")
@@ -83,7 +85,7 @@ func TestDiscover_PiRootFallback(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	f, err := Discover(taskDir, filepath.Join(base, "home"), pi)
+	f, err := Discover(taskDir, filepath.Join(base, "home"), pi, nil)
 	if err != nil {
 		t.Fatalf("Discover: %v", err)
 	}
@@ -94,7 +96,7 @@ func TestDiscover_PiRootFallback(t *testing.T) {
 
 // TestDiscover_RequiresTaskDir verifies the precondition.
 func TestDiscover_RequiresTaskDir(t *testing.T) {
-	if _, err := Discover("", "/home", "/usr/bin/pi"); err == nil {
+	if _, err := Discover("", "/home", "/usr/bin/pi", nil); err == nil {
 		t.Error("Discover without a task dir should fail")
 	}
 }
@@ -103,7 +105,76 @@ func TestDiscover_RequiresTaskDir(t *testing.T) {
 // is empty (the handler resolves pi before calling Setup; this is the
 // last line of defence).
 func TestDiscover_RequiresPiPath(t *testing.T) {
-	if _, err := Discover(t.TempDir(), "/home", ""); err == nil {
+	if _, err := Discover(t.TempDir(), "/home", "", nil); err == nil {
 		t.Error("Discover without a pi path should fail")
+	}
+}
+
+// TestDiscover_HomeCopiesConfigured verifies that a configured home copy
+// set (issue #201) classifies entries by what they are on this guest:
+// directories become tree copies, files (including dot-files and symlinks
+// to files) become file copies, and entries that do not exist are skipped
+// (best effort, as before).
+func TestDiscover_HomeCopiesConfigured(t *testing.T) {
+	base := t.TempDir()
+	taskDir := filepath.Join(base, "task")
+	if err := os.MkdirAll(taskDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	home := filepath.Join(base, "home")
+	if err := os.MkdirAll(filepath.Join(home, ".pi"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(home, ".report-on-signal.yaml"), []byte("room: test\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// A symlink to a file: probed via Stat (followed) and copied with
+	// the target's content.
+	if err := os.WriteFile(filepath.Join(base, "real-certs.conf"), []byte("certs\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join(base, "real-certs.conf"), filepath.Join(home, ".client-cert.conf")); err != nil {
+		t.Fatal(err)
+	}
+	// A fake pi (required, anything resolvable).
+	binDir := filepath.Join(base, "bin")
+	if err := os.MkdirAll(binDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(binDir, "pi"), []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	f, err := Discover(taskDir, home, filepath.Join(binDir, "pi"),
+		[]string{".pi", ".report-on-signal.yaml", ".client-cert.conf", "does-not-exist"})
+	if err != nil {
+		t.Fatalf("Discover: %v", err)
+	}
+
+	if !contains(f.HomeCopyTrees, ".pi") {
+		t.Errorf("HomeCopyTrees = %v, want .pi (a directory)", f.HomeCopyTrees)
+	}
+	for _, name := range []string{".report-on-signal.yaml", ".client-cert.conf"} {
+		if !contains(f.HomeCopyFiles, name) {
+			t.Errorf("HomeCopyFiles = %v, want %q (a file)", f.HomeCopyFiles, name)
+		}
+		if contains(f.HomeCopyTrees, name) {
+			t.Errorf("HomeCopyTrees = %v, %q is a file and must not be a tree", f.HomeCopyTrees, name)
+		}
+	}
+	// Best effort: a missing entry is skipped, not an error.
+	if contains(f.HomeCopyFiles, "does-not-exist") || contains(f.HomeCopyTrees, "does-not-exist") {
+		t.Error("a configured entry that does not exist must be skipped")
+	}
+	// An empty configured set is treated as "use the built-in default set".
+	if err := os.MkdirAll(filepath.Join(home, ".tokens"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	f2, err := Discover(taskDir, home, filepath.Join(binDir, "pi"), []string{})
+	if err != nil {
+		t.Fatalf("Discover: %v", err)
+	}
+	if !contains(f2.HomeCopyTrees, ".pi") || !contains(f2.HomeCopyTrees, ".tokens") {
+		t.Errorf("HomeCopyTrees = %v, want the built-in default set for an empty config", f2.HomeCopyTrees)
 	}
 }

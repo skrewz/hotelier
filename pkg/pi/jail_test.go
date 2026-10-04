@@ -115,7 +115,7 @@ read -r _ || true
 	}
 
 	j := jail.NewJail(log.New(io.Discard, "", 0))
-	if err := j.Setup(taskDir, homeDir, fakePi); err != nil {
+	if err := j.Setup(taskDir, homeDir, fakePi, nil); err != nil {
 		t.Fatalf("jail setup: %v", err)
 	}
 	t.Cleanup(func() { _ = j.Cleanup() })

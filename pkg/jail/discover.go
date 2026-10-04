@@ -11,7 +11,8 @@ import (
 type Facts struct {
 	// TaskDir is the task's working directory (the only rw bind).
 	TaskDir string
-	// HomeDir is the guest's home directory (dot-dirs are copied).
+	// HomeDir is the guest's home directory (configured home paths are
+	// copied, relative to it).
 	HomeDir string
 	// PiRoot is the directory bind-mounted read-only so the pi
 	// executable is visible inside the jail at its host path: the
@@ -39,11 +40,16 @@ type Facts struct {
 	// HasCertDir reports whether /etc/ssl/certs exists (it is copied,
 	// resolved, so TLS works inside the jail).
 	HasCertDir bool
-	// HomeDotDirs are the guest home subdirectories copied into the
+	// HomeCopyTrees are the guest home subdirectories copied into the
 	// skeleton (per-task copies: no crosstalk between concurrent
-	// tasks). ~/.ssh is deliberately excluded, as before: the git flow
-	// authenticates over HTTPS.
-	HomeDotDirs []string
+	// tasks). Names are relative to HomeDir. ~/.ssh is deliberately
+	// excluded from the default set: the git flow authenticates over
+	// HTTPS.
+	HomeCopyTrees []string
+	// HomeCopyFiles are the guest home files (e.g. dot-files such as a
+	// skill's config file) copied into the skeleton with resolved-copy
+	// semantics, like the /etc files. Names are relative to HomeDir.
+	HomeCopyFiles []string
 }
 
 // etcFiles are the /etc files copied into every jail (best effort —
@@ -73,15 +79,18 @@ var devNodeNames = []string{
 	"tty",
 }
 
-// homeDotDirs are the guest home subdirectories copied into every jail
-// (best effort — missing directories are skipped). They carry the pi
-// agent configuration, TLS certificates, git configs and API tokens
-// that agents rely on.
-var homeDotDirs = []string{".pi", ".certs", ".forgejo-gitconfigs", ".tokens"}
+// defaultHomeCopies is the guest home paths copied into every jail when
+// the guest config declares no home_copies set (issue #201). They carry
+// the pi agent configuration, TLS certificates, git configs and API
+// tokens that agents rely on. A guest config may enumerate a different
+// (and, unlike this built-in set, file-level) set.
+var defaultHomeCopies = []string{".pi", ".certs", ".forgejo-gitconfigs", ".tokens"}
 
 // Discover probes the host and returns the facts for building a jail
-// plan for the given task.
-func Discover(taskDir, homeDir, piPath string) (Facts, error) {
+// plan for the given task. homeCopies is the configured set of home
+// paths to copy (relative to homeDir); nil or empty selects
+// defaultHomeCopies.
+func Discover(taskDir, homeDir, piPath string, homeCopies []string) (Facts, error) {
 	if taskDir == "" {
 		return Facts{}, fmt.Errorf("jail: task dir is required")
 	}
@@ -128,9 +137,22 @@ func Discover(taskDir, homeDir, piPath string) (Facts, error) {
 	if _, err := os.Stat("/etc/ssl/certs"); err == nil {
 		f.HasCertDir = true
 	}
-	for _, d := range homeDotDirs {
-		if fi, err := os.Stat(filepath.Join(homeDir, d)); err == nil && fi.IsDir() {
-			f.HomeDotDirs = append(f.HomeDotDirs, d)
+	// Home copies are best effort: entries that do not exist on this
+	// guest are skipped. Each entry is classified by what it is here —
+	// a directory is copied as a tree, a file (Stat follows symlinks)
+	// as a resolved file copy.
+	if len(homeCopies) == 0 {
+		homeCopies = defaultHomeCopies
+	}
+	for _, e := range homeCopies {
+		fi, err := os.Stat(filepath.Join(homeDir, e))
+		if err != nil {
+			continue
+		}
+		if fi.IsDir() {
+			f.HomeCopyTrees = append(f.HomeCopyTrees, e)
+		} else {
+			f.HomeCopyFiles = append(f.HomeCopyFiles, e)
 		}
 	}
 	return f, nil

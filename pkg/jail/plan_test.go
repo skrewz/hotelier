@@ -14,15 +14,16 @@ import (
 // are copied, and usrmerge symlinks are created.
 func TestBuildPlan_USRmerged(t *testing.T) {
 	f := Facts{
-		TaskDir:     "/home/guest/tasks/task-1-abc123",
-		HomeDir:     "/home/guest",
-		PiRoot:      "/usr/local/lib/node_modules",
-		USRmerged:   true,
-		USRDirs:     []string{"/usr"},
-		DevNodes:    []string{"null", "zero", "urandom", "tty"},
-		EtcFiles:    []string{"/etc/hosts", "/etc/resolv.conf"},
-		HasCertDir:  true,
-		HomeDotDirs: []string{".pi", ".tokens"},
+		TaskDir:       "/home/guest/tasks/task-1-abc123",
+		HomeDir:       "/home/guest",
+		PiRoot:        "/usr/local/lib/node_modules",
+		USRmerged:     true,
+		USRDirs:       []string{"/usr"},
+		DevNodes:      []string{"null", "zero", "urandom", "tty"},
+		EtcFiles:      []string{"/etc/hosts", "/etc/resolv.conf"},
+		HasCertDir:    true,
+		HomeCopyTrees: []string{".pi", ".tokens"},
+		HomeCopyFiles: []string{".report-on-signal.yaml"},
 	}
 	p, err := BuildPlan(f)
 	if err != nil {
@@ -101,6 +102,13 @@ func TestBuildPlan_USRmerged(t *testing.T) {
 		if !contains(p.CopyTrees, d) {
 			t.Errorf("CopyTrees missing %s: %v", d, p.CopyTrees)
 		}
+	}
+	// Home dot-files are copied as resolved files, not trees (issue #201).
+	if !contains(p.CopyFiles, "/home/guest/.report-on-signal.yaml") {
+		t.Errorf("CopyFiles missing /home/guest/.report-on-signal.yaml: %v", p.CopyFiles)
+	}
+	if contains(p.CopyTrees, "/home/guest/.report-on-signal.yaml") {
+		t.Errorf("CopyTrees must not carry a home file entry: %v", p.CopyTrees)
 	}
 
 	// Usrmerge symlinks.
