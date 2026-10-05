@@ -2842,6 +2842,125 @@ const { chromium } = require('playwright');
   }
   console.log('PASS: Compaction block rendered with reason, status, tokens and summary');
 
+  // =====================================================================
+  // Phase 14: Mobile viewport — mobile-friendly UI (issue #203)
+  // =====================================================================
+  // Re-drives the real user journey (navigate → task list → select task →
+  // Logs tab) on a narrow phone-sized viewport and asserts that nothing
+  // overflows horizontally and the key text stays readable. Uses a second
+  // page so the desktop page from the earlier phases is undisturbed.
+  console.log('=== Phase 14: Mobile viewport ===');
+  const mobile = await browser.newPage({ viewport: { width: 390, height: 844 } });
+  const mobileJsErrors = [];
+  mobile.on('pageerror', err => mobileJsErrors.push(err.message));
+  await mobile.goto(baseURL);
+  await mobile.waitForLoadState('networkidle');
+  await mobile.waitForSelector('.task-item', { timeout: 10000 });
+  await mobile.waitForTimeout(500);
+
+  // Containers that must never scroll horizontally (even on desktop they
+  // wrap or clip rather than scroll). Deliberately excludes inner scroll
+  // regions like .tool-output / .md-rendered pre, which may scroll
+  // horizontally at any width.
+  const NO_OVERFLOW_SELECTORS = '.header, .container, .sidebar, .main, .tab-bar, .task-summary, .task-filter-row, .task-item, .task-detail-header, .submit-form, .log-breadcrumb';
+
+  async function assertNoHorizontalOverflow(context, label) {
+    const overflow = await context.evaluate((selectors) => {
+      const bad = [];
+      if (document.documentElement.scrollWidth > document.documentElement.clientWidth + 1) {
+        bad.push('page: scrollWidth=' + document.documentElement.scrollWidth + ' > ' + document.documentElement.clientWidth);
+      }
+      document.querySelectorAll(selectors).forEach(el => {
+        if (el.scrollWidth > el.clientWidth + 1) {
+          bad.push(el.className + ': scrollWidth=' + el.scrollWidth + ' > ' + el.clientWidth);
+        }
+      });
+      return bad;
+    }, NO_OVERFLOW_SELECTORS);
+    if (overflow.length > 0) {
+      fail(label + ': horizontal overflow — ' + overflow.join('; '));
+    }
+    console.log('PASS: ' + label + ' — no horizontal overflow');
+  }
+
+  // 14a: Front page — task list visible, header fits, readable title.
+  await assertNoHorizontalOverflow(mobile, 'mobile front page');
+  const mobileHeaderChecks = await mobile.evaluate(() => {
+    const h1 = document.querySelector('.header h1');
+    return {
+      h1FontSize: h1 ? parseFloat(getComputedStyle(h1).fontSize) : 0,
+      taskItems: document.querySelectorAll('.task-item').length,
+      submitVisible: document.querySelector('.submit-form .btn') !== null,
+    };
+  });
+  if (mobileHeaderChecks.taskItems === 0) fail('mobile: task list did not render');
+  console.log('PASS: mobile task list rendered (' + mobileHeaderChecks.taskItems + ' tasks)');
+  if (mobileHeaderChecks.h1FontSize < 16) {
+    fail('mobile: header title too small to read (computed ' + mobileHeaderChecks.h1FontSize + 'px, want >= 16px)');
+  }
+  console.log('PASS: mobile header title readable (' + mobileHeaderChecks.h1FontSize + 'px)');
+  if (!mobileHeaderChecks.submitVisible) fail('mobile: submit task button not present');
+  console.log('PASS: mobile submit form reachable');
+  await mobile.screenshot({ path: require('path').join(screenshotDir, '14a-mobile-tasks.png'), fullPage: true });
+  console.log('Screenshot saved:', require('path').join(screenshotDir, '14a-mobile-tasks.png'));
+
+  // 14b: Select the running task — detail view must render and fit.
+  await mobile.evaluate((tid) => {
+    const items = document.querySelectorAll('.task-item');
+    for (const item of items) {
+      if (item.textContent.includes(tid)) { item.click(); break; }
+    }
+  }, taskId);
+  await mobile.waitForSelector('.task-detail-header', { timeout: 5000 });
+  await mobile.waitForTimeout(500);
+  await assertNoHorizontalOverflow(mobile, 'mobile task detail');
+  const mobileDetailChecks = await mobile.evaluate(() => {
+    const detail = document.querySelector('#log-view .task-detail');
+    const header = document.querySelector('.task-detail-header');
+    return {
+      detailVisible: detail !== null && detail.offsetHeight > 0,
+      headerFits: header ? header.scrollWidth <= header.clientWidth + 1 : false,
+      hasLogBody: !!detail && detail.querySelector('.task-detail-body') !== null,
+    };
+  });
+  if (!mobileDetailChecks.detailVisible) fail('mobile: task detail not visible after selecting task');
+  if (!mobileDetailChecks.headerFits) fail('mobile: task detail header overflows');
+  if (!mobileDetailChecks.hasLogBody) fail('mobile: task detail log body missing');
+  console.log('PASS: mobile task detail renders and fits');
+  await mobile.screenshot({ path: require('path').join(screenshotDir, '14b-mobile-task-detail.png'), fullPage: true });
+  console.log('Screenshot saved:', require('path').join(screenshotDir, '14b-mobile-task-detail.png'));
+
+  // 14c: Logs tab — follow the real journey: Logs tab → date → task →
+  // entries. Breadcrumb and entry list must fit at mobile width.
+  await mobile.evaluate(() => showTab('logs'));
+  await mobile.waitForSelector('#log-dates-list .log-task-item', { timeout: 10000 });
+  await mobile.evaluate(() => { document.querySelector('#log-dates-list .log-task-item').click(); });
+  await mobile.waitForSelector('.log-breadcrumb', { timeout: 10000 });
+  await mobile.waitForTimeout(300);
+  await mobile.evaluate((tid) => {
+    const items = document.querySelectorAll('.log-task-item');
+    for (const item of items) {
+      const idEl = item.querySelector('.log-task-id');
+      if (idEl && idEl.textContent.includes(tid)) { item.click(); break; }
+    }
+  }, taskId);
+  await mobile.waitForSelector('#log-entries-list .log-msg', { timeout: 10000 });
+  await mobile.waitForTimeout(500);
+  await assertNoHorizontalOverflow(mobile, 'mobile logs tab');
+  const mobileLogsChecks = await mobile.evaluate(() => {
+    const entries = document.querySelectorAll('#log-entries-list .log-msg');
+    const toolBlocks = document.querySelectorAll('#log-entries-list .tool-block');
+    return { entries: entries.length, toolBlocks: toolBlocks.length };
+  });
+  if (mobileLogsChecks.entries === 0) fail('mobile: log entries did not render in Logs tab');
+  console.log('PASS: mobile Logs tab renders (' + mobileLogsChecks.entries + ' entries, ' + mobileLogsChecks.toolBlocks + ' tool blocks)');
+  await mobile.screenshot({ path: require('path').join(screenshotDir, '14c-mobile-logs.png'), fullPage: true });
+  console.log('Screenshot saved:', require('path').join(screenshotDir, '14c-mobile-logs.png'));
+
+  if (mobileJsErrors.length > 0) fail('mobile: page JS errors: ' + mobileJsErrors.join('; '));
+  console.log('PASS: mobile page raised no JS errors');
+  await mobile.close();
+
   console.log('All UI validation checks passed!');
   await browser.close();
 })().catch(e => { console.error('Test failed:', e); process.exit(1); });
