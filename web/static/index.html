@@ -314,6 +314,27 @@
 
         /* Block timestamp — local HH:MM next to chevron */
         .block-timestamp { color: #475569; font-size: 0.65rem; font-family: 'SF Mono', 'Fira Code', monospace; margin-right: 0.25rem; }
+
+        /* Mobile-friendly layout (issue #203) — big screens are untouched; */
+        /* everything below only applies at narrow viewports.           */
+        @media (max-width: 768px) {
+            body { display: flex; flex-direction: column; }
+            .header { flex-wrap: wrap; gap: 0.5rem 1rem; padding: 0.75rem 1rem; }
+            .header h1 { font-size: 1.15rem; }
+            .stats { gap: 1rem; }
+            .stat-value { font-size: 1.15rem; }
+            .container { height: auto; flex: 1; min-height: 0; flex-direction: column; }
+            .sidebar { width: 100%; max-height: 45vh; border-right: none; border-bottom: 1px solid #334155; }
+            .main { padding: 0.75rem; }
+            .tab { padding: 0.5rem 0.75rem; }
+            /* Keep long task IDs/meta from forcing a min-width wider than the screen */
+            .task-id, .task-meta { word-break: break-word; }
+            /* Action buttons move below the task text instead of overlapping it */
+            .task-btn-row { position: static; justify-content: flex-end; margin-top: 0.5rem; }
+            .task-detail-header { flex-wrap: wrap; gap: 0.25rem 1rem; }
+            .task-detail-prompt-header .prompt-preview { max-width: 100%; }
+            .spawn-block-header .spawn-preview { max-width: 100%; }
+        }
     </style>
 </head>
 <body>
