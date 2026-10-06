@@ -315,6 +315,24 @@
         /* Block timestamp — local HH:MM next to chevron */
         .block-timestamp { color: #475569; font-size: 0.65rem; font-family: 'SF Mono', 'Fira Code', monospace; margin-right: 0.25rem; }
 
+        /* Full-screen task logs (issue #205) — the open task's log stream
+           takes the whole viewport: the header stats, the sidebar and the tab
+           bar are hidden so only the log view is left on screen. The toggle
+           lives in the corner of the task detail header (see
+           .task-detail-fullscreen-btn), so one control expands and collapses.
+           The 100vh fallback is for browsers without the dynamic viewport unit;
+           dvh tracks the mobile URL bar as it shows/hides.
+           https://developer.mozilla.org/en-US/docs/Web/CSS/length#viewport_percentage_units */
+        body.logs-fullscreen .header,
+        body.logs-fullscreen .sidebar,
+        body.logs-fullscreen .tab-bar { display: none; }
+        body.logs-fullscreen .container { height: 100vh; height: 100dvh; }
+
+        /* Narrow-viewport only: on a big screen the layout is a side-by-side
+           split screen with room to spare, so the toggle stays hidden and the
+           desktop UX from issue #203 is untouched. */
+        .task-detail-fullscreen-btn { display: none; }
+
         /* Mobile-friendly layout (issue #203) — big screens are untouched; */
         /* everything below only applies at narrow viewports.           */
         @media (max-width: 768px) {
@@ -332,6 +350,9 @@
             /* Action buttons move below the task text instead of overlapping it */
             .task-btn-row { position: static; justify-content: flex-end; margin-top: 0.5rem; }
             .task-detail-header { flex-wrap: wrap; gap: 0.25rem 1rem; }
+            /* Corner button that expands an open task's logs to the whole screen
+               (issue #205) — revealed only where the layout is stacked. */
+            .task-detail-fullscreen-btn { display: inline-block; }
             .task-detail-prompt-header .prompt-preview { max-width: 100%; }
             .spawn-block-header .spawn-preview { max-width: 100%; }
         }
@@ -518,6 +539,9 @@
         //   fromInitialLoad  — when true, URL changes use replaceState
         //                      instead of pushState.
         function showTab(tab, skipUrl, fromInitialLoad) {
+            // Full screen only exists for the task detail view (issue #205);
+            // switching tabs must never leave the dashboard without a sidebar.
+            setLogsFullscreen(false);
             if (!skipUrl) {
                 if (tab === 'tasks') router.push('/tasks');
                 // 'logs' — loadLogDates() pushes /logs, so skip here
@@ -1259,6 +1283,34 @@
             refreshTaskDetail(taskId);
         }
 
+        // =====================================================================
+        // Full-screen task logs (issue #205)
+        // =====================================================================
+        // On a phone the layout stacks the sidebar above the main pane (issue
+        // #203), which leaves the log stream of an open task a fraction of the
+        // screen. setLogsFullscreen expands it to the whole viewport, or back
+        // to that split-screen view. The single corner button in the task
+        // detail header is both the expand and the collapse affordance, so the
+        // state lives on <body> (where the CSS hangs off) and the button is
+        // only re-labelled — re-rendering the detail view (polling, WS updates)
+        // therefore never loses the mode.
+        function setLogsFullscreen(on) {
+            document.body.classList.toggle('logs-fullscreen', on);
+            const btn = document.querySelector('.task-detail-fullscreen-btn');
+            if (btn) {
+                btn.textContent = on ? '\u26F6 Split screen' : '\u26F6 Full screen';
+                btn.title = on ? 'Back to the split-screen view' : 'View these logs in full screen';
+                btn.setAttribute('aria-pressed', on ? 'true' : 'false');
+            }
+            // The log pane grows or shrinks; keep it pinned to the newest line.
+            const logBody = document.querySelector('#log-view .task-detail-body');
+            if (logBody) logBody.scrollTop = logBody.scrollHeight;
+        }
+
+        function toggleLogsFullscreen() {
+            setLogsFullscreen(!document.body.classList.contains('logs-fullscreen'));
+        }
+
         async function refreshTaskDetail(taskId) {
             try {
                 const res = await fetch(`/api/tasks/${taskId}`);
@@ -1618,6 +1670,7 @@
                     </div>
                     <div style="display:flex;gap:0.5rem;align-items:center;">
                         ${task.status === 'PENDING' && task.priority ? `<span class="badge badge-priority" title="Priority">🔜${priorityToEmoji(task.priority)}</span>` : ''}
+                        <button class="btn btn-sm btn-ghost task-detail-fullscreen-btn" onclick="toggleLogsFullscreen()" aria-pressed="false" title="View these logs in full screen">&#x26F6; Full screen</button>
                         <button class="btn btn-sm btn-ghost" onclick="rerunTask('${task.id}')">🔄 Re-run</button>
                         ${task.status !== 'COMPLETED' && task.status !== 'FAILED' && task.status !== 'CANCELLED' ? `<button class="btn btn-sm btn-danger" onclick="cancelTask('${task.id}')">✖ Cancel</button>` : ''}
                         <button class="btn btn-sm btn-ghost" onclick="closeTaskDetail()">Close</button>
@@ -1643,6 +1696,10 @@
             highlightCommandLines(detailBody);
             view.innerHTML = '';
             view.appendChild(detailContainer);
+
+            // Polling re-renders the whole detail header, so re-apply the
+            // full-screen label/aria state to the freshly built button.
+            if (document.body.classList.contains('logs-fullscreen')) setLogsFullscreen(true);
 
             // Sync taskLogs so appendLogToDetail doesn't double-render
             if (activeTaskId && taskLogs[task.id]) {
