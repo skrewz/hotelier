@@ -2961,6 +2961,186 @@ const { chromium } = require('playwright');
   console.log('PASS: mobile page raised no JS errors');
   await mobile.close();
 
+  // =====================================================================
+  // Phase 15: Full-screen task logs on mobile (issue #205)
+  // =====================================================================
+  // The mobile layout stacks the sidebar above the main pane (issue #203),
+  // so the log stream of an open task only gets a fraction of the screen.
+  // The task detail header carries a corner button that expands the logs to
+  // the whole viewport and collapses them back to that split-screen view.
+  // The affordance is narrow-viewport only: the desktop layout stays as it
+  // was, per issue #203.
+  console.log('=== Phase 15: Full-screen task logs (mobile) ===');
+
+  // 15a: Big screens must be untouched — the toggle is hidden there.
+  const desktopFs = await browser.newPage({ viewport: { width: 1280, height: 900 } });
+  await desktopFs.goto(baseURL + '/task/' + taskId);
+  await desktopFs.waitForSelector('.task-detail-header', { timeout: 10000 });
+  const desktopFsBtn = await desktopFs.evaluate(() => {
+    const btn = document.querySelector('.task-detail-fullscreen-btn');
+    return btn ? getComputedStyle(btn).display : 'missing';
+  });
+  if (desktopFsBtn !== 'none') {
+    fail('desktop: full-screen toggle should be hidden (display=' + desktopFsBtn + ')');
+  }
+  console.log('PASS: full-screen toggle hidden on a desktop viewport');
+  await desktopFs.close();
+
+  // 15b: Phone viewport — open a task, expand its logs, collapse again.
+  const fsPage = await browser.newPage({ viewport: { width: 390, height: 844 } });
+  const fsJsErrors = [];
+  fsPage.on('pageerror', err => fsJsErrors.push(err.message));
+  await fsPage.goto(baseURL);
+  await fsPage.waitForLoadState('networkidle');
+  await fsPage.waitForSelector('.task-item', { timeout: 10000 });
+  await fsPage.evaluate((tid) => {
+    for (const item of document.querySelectorAll('.task-item')) {
+      if (item.textContent.includes(tid)) { item.click(); break; }
+    }
+  }, taskId);
+  await fsPage.waitForSelector('#log-view .task-detail-body', { timeout: 10000 });
+  await fsPage.waitForTimeout(500);
+
+  const fsBefore = await fsPage.evaluate(() => {
+    const btn = document.querySelector('.task-detail-fullscreen-btn');
+    return {
+      btnVisible: btn !== null && btn.offsetHeight > 0,
+      btnPressed: btn ? btn.getAttribute('aria-pressed') : null,
+      mainH: document.querySelector('.main').offsetHeight,
+      logBodyH: document.querySelector('#log-view .task-detail-body').offsetHeight,
+      sidebarH: document.querySelector('.sidebar').offsetHeight,
+      innerH: window.innerHeight,
+    };
+  });
+  if (!fsBefore.btnVisible) fail('mobile: full-screen toggle not visible in the task detail header');
+  if (fsBefore.btnPressed !== 'false') fail('mobile: toggle should start un-pressed, got ' + fsBefore.btnPressed);
+  if (fsBefore.sidebarH === 0) fail('mobile: sidebar should be part of the split-screen view');
+  // Sanity check the premise: in split-screen the main pane is squeezed.
+  if (fsBefore.mainH >= fsBefore.innerH * 0.9) {
+    fail('mobile: split-screen main pane already fills the viewport (' + fsBefore.mainH + '/' + fsBefore.innerH + ') — nothing to expand');
+  }
+  console.log('PASS: mobile split-screen detail shows the toggle (main pane ' + fsBefore.mainH + 'px of ' + fsBefore.innerH + 'px)');
+
+  // 15c: Expand — header, sidebar and tab bar are gone, the log stream
+  // fills the viewport and gains vertical room.
+  await fsPage.evaluate(() => document.querySelector('.task-detail-fullscreen-btn').click());
+  await fsPage.waitForTimeout(300);
+  const fsExpanded = await fsPage.evaluate(() => {
+    const mainRect = document.querySelector('.main').getBoundingClientRect();
+    return {
+      on: document.body.classList.contains('logs-fullscreen'),
+      ariaPressed: document.querySelector('.task-detail-fullscreen-btn').getAttribute('aria-pressed'),
+      headerH: document.querySelector('.header').offsetHeight,
+      sidebarH: document.querySelector('.sidebar').offsetHeight,
+      tabBarH: document.querySelector('.tab-bar').offsetHeight,
+      mainW: mainRect.width, mainTop: mainRect.top, mainH: mainRect.height,
+      logBodyH: document.querySelector('#log-view .task-detail-body').offsetHeight,
+      innerW: window.innerWidth, innerH: window.innerHeight,
+    };
+  });
+  if (!fsExpanded.on) fail('mobile: toggling should put the log stream in full screen');
+  if (fsExpanded.ariaPressed !== 'true') fail('mobile: toggle should report aria-pressed=true in full screen');
+  if (fsExpanded.headerH !== 0 || fsExpanded.sidebarH !== 0 || fsExpanded.tabBarH !== 0) {
+    fail('mobile: full screen must hide the header, sidebar and tab bar (got ' + fsExpanded.headerH + '/' + fsExpanded.sidebarH + '/' + fsExpanded.tabBarH + 'px)');
+  }
+  if (fsExpanded.mainTop > 1) fail('mobile: main pane should start at the top of the viewport, top=' + fsExpanded.mainTop);
+  if (fsExpanded.mainH < fsExpanded.innerH - 1) fail('mobile: main pane should fill the viewport height (' + fsExpanded.mainH + ' < ' + fsExpanded.innerH + ')');
+  if (fsExpanded.mainW < fsExpanded.innerW - 1) fail('mobile: main pane should fill the viewport width (' + fsExpanded.mainW + ' < ' + fsExpanded.innerW + ')');
+  if (fsExpanded.logBodyH <= fsBefore.logBodyH) {
+    fail('mobile: log stream should get taller in full screen (' + fsExpanded.logBodyH + ' <= ' + fsBefore.logBodyH + ')');
+  }
+  await assertNoHorizontalOverflow(fsPage, 'mobile full-screen logs');
+  console.log('PASS: full screen fills the viewport and grows the log stream (' + fsBefore.logBodyH + 'px -> ' + fsExpanded.logBodyH + 'px)');
+  await fsPage.screenshot({ path: require('path').join(screenshotDir, '15a-mobile-logs-fullscreen.png') });
+  console.log('Screenshot saved:', require('path').join(screenshotDir, '15a-mobile-logs-fullscreen.png'));
+
+  // 15d: The same corner button goes back to the split-screen view.
+  await fsPage.evaluate(() => document.querySelector('.task-detail-fullscreen-btn').click());
+  await fsPage.waitForTimeout(300);
+  const fsCollapsed = await fsPage.evaluate(() => ({
+    on: document.body.classList.contains('logs-fullscreen'),
+    ariaPressed: document.querySelector('.task-detail-fullscreen-btn').getAttribute('aria-pressed'),
+    sidebarH: document.querySelector('.sidebar').offsetHeight,
+    headerH: document.querySelector('.header').offsetHeight,
+    mainH: document.querySelector('.main').offsetHeight,
+    innerH: window.innerHeight,
+  }));
+  if (fsCollapsed.on) fail('mobile: corner button should leave full screen');
+  if (fsCollapsed.ariaPressed !== 'false') fail('mobile: toggle should report aria-pressed=false in split screen');
+  if (fsCollapsed.sidebarH === 0 || fsCollapsed.headerH === 0) fail('mobile: split-screen view should show the sidebar and header again');
+  if (fsCollapsed.mainH >= fsCollapsed.innerH * 0.9) fail('mobile: main pane should return to the stacked split-screen height (' + fsCollapsed.mainH + '/' + fsCollapsed.innerH + ')');
+  console.log('PASS: corner button returns to the split-screen view');
+  await fsPage.screenshot({ path: require('path').join(screenshotDir, '15b-mobile-logs-split-screen.png') });
+  console.log('Screenshot saved:', require('path').join(screenshotDir, '15b-mobile-logs-split-screen.png'));
+
+  // 15f: Crossing the 768px breakpoint while full screen — a phone rotated to
+  // landscape (844x390) — must self-heal. The toggle only exists at narrow
+  // viewports, so a mode that outlived the breakpoint would leave the user
+  // with no visible way back to the split-screen view.
+  await fsPage.evaluate(() => document.querySelector('.task-detail-fullscreen-btn').click());
+  await fsPage.waitForTimeout(200);
+  if (!(await fsPage.evaluate(() => document.body.classList.contains('logs-fullscreen')))) {
+    fail('mobile: precondition for the rotation check — should be full screen at 390x844');
+  }
+  await fsPage.setViewportSize({ width: 844, height: 390 });
+  await fsPage.waitForTimeout(300);
+  const fsRotated = await fsPage.evaluate(() => {
+    const btn = document.querySelector('.task-detail-fullscreen-btn');
+    return {
+      on: document.body.classList.contains('logs-fullscreen'),
+      ariaPressed: btn ? btn.getAttribute('aria-pressed') : null,
+      btnVisible: btn !== null && btn.offsetHeight > 0,
+      headerH: document.querySelector('.header').offsetHeight,
+      sidebarH: document.querySelector('.sidebar').offsetHeight,
+      tabBarH: document.querySelector('.tab-bar').offsetHeight,
+    };
+  });
+  if (fsRotated.on) fail('rotation: crossing the breakpoint should drop out of full screen');
+  if (fsRotated.ariaPressed !== 'false') fail('rotation: toggle should report aria-pressed=false after crossing the breakpoint, got ' + fsRotated.ariaPressed);
+  if (fsRotated.btnVisible) fail('rotation: the toggle must stay hidden above the breakpoint');
+  if (fsRotated.headerH === 0 || fsRotated.sidebarH === 0 || fsRotated.tabBarH === 0) {
+    fail('rotation: layout must self-heal past the breakpoint (header/sidebar/tab bar = ' + fsRotated.headerH + '/' + fsRotated.sidebarH + '/' + fsRotated.tabBarH + 'px)');
+  }
+  await assertNoHorizontalOverflow(fsPage, 'rotated out of full screen');
+  console.log('PASS: rotating past the breakpoint leaves full screen and restores the layout');
+
+  // Rotating back must not silently put the user back in full screen — the
+  // mode was dropped when the viewport widened.
+  await fsPage.setViewportSize({ width: 390, height: 844 });
+  await fsPage.waitForTimeout(300);
+  const fsRotatedBack = await fsPage.evaluate(() => ({
+    on: document.body.classList.contains('logs-fullscreen'),
+    sidebarH: document.querySelector('.sidebar').offsetHeight,
+    mainH: document.querySelector('.main').offsetHeight,
+    innerH: window.innerHeight,
+  }));
+  if (fsRotatedBack.on) fail('rotation: rotating back should not re-enter full screen');
+  if (fsRotatedBack.sidebarH === 0) fail('rotation: sidebar must be visible after rotating back to portrait');
+  if (fsRotatedBack.mainH >= fsRotatedBack.innerH * 0.9) fail('rotation: main pane should be the stacked split-screen height after rotating back (' + fsRotatedBack.mainH + '/' + fsRotatedBack.innerH + ')');
+  console.log('PASS: rotating back to portrait keeps the split-screen view');
+  await fsPage.screenshot({ path: require('path').join(screenshotDir, '15c-mobile-logs-after-rotation.png') });
+  console.log('Screenshot saved:', require('path').join(screenshotDir, '15c-mobile-logs-after-rotation.png'));
+
+  // 15e: Leaving the task detail must never leave the dashboard without
+  // its sidebar — full screen only exists for the detail view.
+  await fsPage.evaluate(() => document.querySelector('.task-detail-fullscreen-btn').click());
+  await fsPage.waitForTimeout(200);
+  await fsPage.evaluate(() => document.querySelectorAll('.tab')[0].click());
+  await fsPage.waitForTimeout(400);
+  const fsAfterLeave = await fsPage.evaluate(() => ({
+    on: document.body.classList.contains('logs-fullscreen'),
+    sidebarH: document.querySelector('.sidebar').offsetHeight,
+    tasksVisible: document.getElementById('tab-tasks').style.display !== 'none',
+  }));
+  if (fsAfterLeave.on) fail('mobile: navigating to the Tasks tab should drop out of full screen');
+  if (fsAfterLeave.sidebarH === 0) fail('mobile: sidebar must be back after leaving full screen via the Tasks tab');
+  if (!fsAfterLeave.tasksVisible) fail('mobile: Tasks tab should be shown after leaving full screen');
+  console.log('PASS: leaving the task detail resets full screen');
+
+  if (fsJsErrors.length > 0) fail('mobile full-screen: page JS errors: ' + fsJsErrors.join('; '));
+  console.log('PASS: full-screen journey raised no JS errors');
+  await fsPage.close();
+
   console.log('All UI validation checks passed!');
   await browser.close();
 })().catch(e => { console.error('Test failed:', e); process.exit(1); });
