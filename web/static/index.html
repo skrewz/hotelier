@@ -315,22 +315,9 @@
         /* Block timestamp — local HH:MM next to chevron */
         .block-timestamp { color: #475569; font-size: 0.65rem; font-family: 'SF Mono', 'Fira Code', monospace; margin-right: 0.25rem; }
 
-        /* Full-screen task logs (issue #205) — the open task's log stream
-           takes the whole viewport: the header stats, the sidebar and the tab
-           bar are hidden so only the log view is left on screen. The toggle
-           lives in the corner of the task detail header (see
-           .task-detail-fullscreen-btn), so one control expands and collapses.
-           The 100vh fallback is for browsers without the dynamic viewport unit;
-           dvh tracks the mobile URL bar as it shows/hides.
-           https://developer.mozilla.org/en-US/docs/Web/CSS/length#viewport_percentage_units */
-        body.logs-fullscreen .header,
-        body.logs-fullscreen .sidebar,
-        body.logs-fullscreen .tab-bar { display: none; }
-        body.logs-fullscreen .container { height: 100vh; height: 100dvh; }
-
-        /* Narrow-viewport only: on a big screen the layout is a side-by-side
-           split screen with room to spare, so the toggle stays hidden and the
-           desktop UX from issue #203 is untouched. */
+        /* Full-screen task logs (issue #205) exist only where the layout is
+           stacked, so both the toggle and the rules it drives live inside the
+           narrow-viewport media query below. */
         .task-detail-fullscreen-btn { display: none; }
 
         /* Mobile-friendly layout (issue #203) — big screens are untouched; */
@@ -353,6 +340,23 @@
             /* Corner button that expands an open task's logs to the whole screen
                (issue #205) — revealed only where the layout is stacked. */
             .task-detail-fullscreen-btn { display: inline-block; }
+            /* Full-screen task logs (issue #205) — the open task's log stream
+               takes the whole viewport: the header stats, the sidebar and the tab
+               bar are hidden so only the log view is left on screen. The toggle
+               lives in the corner of the task detail header (see
+               .task-detail-fullscreen-btn), so one control expands and collapses.
+               Scoping these rules to the same media query that reveals the toggle
+               keeps the mode and its exit in one place: if the viewport crosses
+               the breakpoint while full screen is active (a phone rotated to
+               landscape), the layout self-heals instead of stranding the user
+               with no visible way out. The 100vh fallback is for browsers without
+               the dynamic viewport unit; dvh tracks the mobile URL bar as it
+               shows/hides.
+               https://developer.mozilla.org/en-US/docs/Web/CSS/length#viewport_percentage_units */
+            body.logs-fullscreen .header,
+            body.logs-fullscreen .sidebar,
+            body.logs-fullscreen .tab-bar { display: none; }
+            body.logs-fullscreen .container { height: 100vh; height: 100dvh; }
             .task-detail-prompt-header .prompt-preview { max-width: 100%; }
             .spawn-block-header .spawn-preview { max-width: 100%; }
         }
@@ -1310,6 +1314,18 @@
         function toggleLogsFullscreen() {
             setLogsFullscreen(!document.body.classList.contains('logs-fullscreen'));
         }
+
+        // Full screen is a narrow-viewport-only mode: the CSS that hides the
+        // header, sidebar and tab bar is scoped to the same 768px breakpoint
+        // that reveals the toggle. Crossing that breakpoint with the mode still
+        // active (a phone rotated to landscape) would leave the layout hidden by
+        // CSS but its only exit button hidden too, so drop the mode as soon as
+        // the viewport stops matching the media query.
+        // https://developer.mozilla.org/en-US/docs/Web/API/Window/matchMedia
+        const narrowViewport = window.matchMedia('(max-width: 768px)');
+        narrowViewport.addEventListener('change', () => {
+            if (!narrowViewport.matches) setLogsFullscreen(false);
+        });
 
         async function refreshTaskDetail(taskId) {
             try {
