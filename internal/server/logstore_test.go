@@ -540,3 +540,157 @@ func TestLogAPI_3PartPathNonDownloadReturns404(t *testing.T) {
 		t.Errorf("expected 404 for non-download 3-part path, got %d", w.Code)
 	}
 }
+
+// appendTrace writes one JSONL entry per line for taskID at the given date,
+// so tests can arrange an on-disk trace in a known date partition.
+func appendTrace(t *testing.T, srv *Server, taskID string, year int, month time.Month, day int, lines []string) {
+	t.Helper()
+	for i, line := range lines {
+		if err := srv.diskLogStore.Append(logstore.Entry{
+			TaskID:    taskID,
+			Line:      line,
+			Level:     "text",
+			Timestamp: time.Date(year, month, day, 12, i, 0, 0, time.UTC),
+		}); err != nil {
+			t.Fatalf("append log entry: %v", err)
+		}
+	}
+}
+
+// TestTaskLogDownload_Success verifies /api/tasks/:id/download serves the raw
+// JSONL trace of a task as an attachment, without the caller having to know
+// the date partition the trace lives in (issue #208).
+func TestTaskLogDownload_Success(t *testing.T) {
+	dir, err := os.MkdirTemp("", "hotelier-taskdownload-*")
+	if err != nil {
+		t.Fatalf("create temp dir: %v", err)
+	}
+	defer os.RemoveAll(dir)
+
+	srv := New(config.ServerConfig{Host: "127.0.0.1", Port: 0, LogDir: dir})
+	appendTrace(t, srv, "task-123", 2026, 5, 10, []string{"Task started", "[TOOL] read file"})
+
+	req := httptest.NewRequest(http.MethodGet, "/api/tasks/task-123/download", nil)
+	w := httptest.NewRecorder()
+	srv.HandleTaskDetail(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d (body %q)", w.Code, w.Body.String())
+	}
+	if ct := w.Header().Get("Content-Type"); ct != "application/x-ndjson" {
+		t.Errorf("expected Content-Type application/x-ndjson, got %q", ct)
+	}
+	if cd := w.Header().Get("Content-Disposition"); cd != `attachment; filename="task-123.jsonl"` {
+		t.Errorf("unexpected Content-Disposition: %q", cd)
+	}
+	body := w.Body.String()
+	if !strings.Contains(body, "Task started") {
+		t.Errorf("download body should contain the raw trace, got %q", body)
+	}
+	if lines := strings.Split(strings.TrimSpace(body), "\n"); len(lines) != 2 {
+		t.Errorf("expected 2 JSONL lines, got %d", len(lines))
+	}
+}
+
+// TestTaskLogDownload_PicksNewestPartition verifies a task whose trace spans
+// midnight is served from its most recent date partition — the same segment
+// the Logs tab shows, and the one holding the newest output.
+func TestTaskLogDownload_PicksNewestPartition(t *testing.T) {
+	dir, err := os.MkdirTemp("", "hotelier-taskdownload-span-*")
+	if err != nil {
+		t.Fatalf("create temp dir: %v", err)
+	}
+	defer os.RemoveAll(dir)
+
+	srv := New(config.ServerConfig{Host: "127.0.0.1", Port: 0, LogDir: dir})
+	appendTrace(t, srv, "task-123", 2026, 5, 10, []string{"before midnight"})
+	appendTrace(t, srv, "task-123", 2026, 5, 11, []string{"after midnight"})
+
+	req := httptest.NewRequest(http.MethodGet, "/api/tasks/task-123/download", nil)
+	w := httptest.NewRecorder()
+	srv.HandleTaskDetail(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+	if body := w.Body.String(); !strings.Contains(body, "after midnight") {
+		t.Errorf("expected the newest partition's trace, got %q", body)
+	}
+}
+
+// TestTaskLogDownload_NotFound verifies 404 when no trace exists on disk for
+// the task (never ran, or nothing flushed yet).
+func TestTaskLogDownload_NotFound(t *testing.T) {
+	dir, err := os.MkdirTemp("", "hotelier-taskdownload-nf-*")
+	if err != nil {
+		t.Fatalf("create temp dir: %v", err)
+	}
+	defer os.RemoveAll(dir)
+
+	srv := New(config.ServerConfig{Host: "127.0.0.1", Port: 0, LogDir: dir})
+
+	req := httptest.NewRequest(http.MethodGet, "/api/tasks/no-such-task/download", nil)
+	w := httptest.NewRecorder()
+	srv.HandleTaskDetail(w, req)
+
+	if w.Code != http.StatusNotFound {
+		t.Errorf("expected 404, got %d", w.Code)
+	}
+}
+
+// TestTaskLogDownload_Disabled verifies 503 when log_dir is not configured,
+// matching the date-partitioned download endpoint.
+func TestTaskLogDownload_Disabled(t *testing.T) {
+	srv := New(config.ServerConfig{Host: "127.0.0.1", Port: 0})
+
+	req := httptest.NewRequest(http.MethodGet, "/api/tasks/task-123/download", nil)
+	w := httptest.NewRecorder()
+	srv.HandleTaskDetail(w, req)
+
+	if w.Code != http.StatusServiceUnavailable {
+		t.Errorf("expected 503 when log store disabled, got %d", w.Code)
+	}
+}
+
+// TestTaskLogDownload_MethodNotAllowed verifies 405 for non-GET methods.
+func TestTaskLogDownload_MethodNotAllowed(t *testing.T) {
+	dir, err := os.MkdirTemp("", "hotelier-taskdownload-meth-*")
+	if err != nil {
+		t.Fatalf("create temp dir: %v", err)
+	}
+	defer os.RemoveAll(dir)
+
+	srv := New(config.ServerConfig{Host: "127.0.0.1", Port: 0, LogDir: dir})
+
+	for _, method := range []string{"POST", "PUT", "DELETE"} {
+		req := httptest.NewRequest(method, "/api/tasks/task-123/download", nil)
+		w := httptest.NewRecorder()
+		srv.HandleTaskDetail(w, req)
+		if w.Code != http.StatusMethodNotAllowed {
+			t.Errorf("%s download: expected 405, got %d", method, w.Code)
+		}
+	}
+}
+
+// TestTaskLogDownload_InvalidTaskID verifies 400 when the task ID segment
+// carries characters that would produce a malformed Content-Disposition
+// header or escape the log store directory.
+func TestTaskLogDownload_InvalidTaskID(t *testing.T) {
+	dir, err := os.MkdirTemp("", "hotelier-taskdownload-badid-*")
+	if err != nil {
+		t.Fatalf("create temp dir: %v", err)
+	}
+	defer os.RemoveAll(dir)
+
+	srv := New(config.ServerConfig{Host: "127.0.0.1", Port: 0, LogDir: dir})
+
+	// Percent-encoded quote, space and tab, plus a traversal attempt.
+	for _, taskID := range []string{"bad%22task", "bad%20task", "tab%09id", "..%2f..%2fetc"} {
+		req := httptest.NewRequest(http.MethodGet, "/api/tasks/"+taskID+"/download", nil)
+		w := httptest.NewRecorder()
+		srv.HandleTaskDetail(w, req)
+		if w.Code != http.StatusBadRequest {
+			t.Errorf("task id %q: expected 400, got %d", taskID, w.Code)
+		}
+	}
+}

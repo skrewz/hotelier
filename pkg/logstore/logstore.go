@@ -294,6 +294,37 @@ func (s *LogStore) ListTasks(date string) ([]string, error) {
 	return tasks, nil
 }
 
+// FindTaskDate returns the date partition that holds a task's log file,
+// searching the newest partition first so a trace that spans midnight yields
+// its most recent segment. The boolean is false when no partition holds the
+// task. It performs no validation of taskID; callers must reject anything
+// that is not a plain task ID before handing it in.
+func (s *LogStore) FindTaskDate(taskID string) (string, bool, error) {
+	dates, err := s.ListDates()
+	if err != nil {
+		return "", false, err
+	}
+
+	// ListDates sorts ascending; walk it backwards for newest-first.
+	for i := len(dates) - 1; i >= 0; i-- {
+		if hasLogFile(filepath.Join(s.dir, dates[i], taskID)) {
+			return dates[i], true, nil
+		}
+	}
+	return "", false, nil
+}
+
+// hasLogFile reports whether a task directory holds a log file in either the
+// current (bzip2) or the legacy uncompressed format.
+func hasLogFile(taskDir string) bool {
+	for _, name := range []string{"logs.jsonl.bz2", "logs.jsonl"} {
+		if _, err := os.Stat(filepath.Join(taskDir, name)); err == nil {
+			return true
+		}
+	}
+	return false
+}
+
 // ReadLogs reads all log entries for a task from its log file.
 // Supports both compressed (.bz2) and uncompressed (.jsonl) formats
 // for backward compatibility. Compressed files are preferred.

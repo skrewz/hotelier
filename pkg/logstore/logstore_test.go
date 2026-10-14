@@ -742,3 +742,72 @@ func TestLogStore_ReadRawJSONL_CorruptCompressed(t *testing.T) {
 		t.Errorf("corrupt bz2 must not be masked as ErrLogNotFound, got %v", err)
 	}
 }
+
+// TestLogStore_FindTaskDate_NewestPartitionFirst verifies the date partition
+// holding a task's trace is found, preferring the newest when a task spans
+// midnight.
+func TestLogStore_FindTaskDate_NewestPartitionFirst(t *testing.T) {
+	s, dir := newTestLogStore(t)
+	defer func() {
+		s.CloseAll()
+		os.RemoveAll(dir)
+	}()
+
+	s.Append(Entry{TaskID: "task-span", Line: "before midnight", Timestamp: time.Date(2026, 5, 10, 23, 59, 0, 0, time.UTC)})
+	s.Append(Entry{TaskID: "task-span", Line: "after midnight", Timestamp: time.Date(2026, 5, 11, 0, 1, 0, 0, time.UTC)})
+	s.CloseAll()
+
+	date, ok, err := s.FindTaskDate("task-span")
+	if err != nil {
+		t.Fatalf("find task date: %v", err)
+	}
+	if !ok {
+		t.Fatal("expected the task to be found")
+	}
+	if date != "2026-05-11" {
+		t.Errorf("expected the newest partition 2026-05-11, got %q", date)
+	}
+}
+
+// TestLogStore_FindTaskDate_LegacyUncompressed verifies a legacy .jsonl file
+// counts as a trace, so older tasks stay downloadable.
+func TestLogStore_FindTaskDate_LegacyUncompressed(t *testing.T) {
+	s, dir := newTestLogStore(t)
+	defer func() {
+		s.CloseAll()
+		os.RemoveAll(dir)
+	}()
+
+	legacy := filepath.Join(dir, "2026-05-09", "task-legacy")
+	if err := os.MkdirAll(legacy, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(legacy, "logs.jsonl"), []byte("{}\n"), 0o644); err != nil {
+		t.Fatalf("write legacy jsonl: %v", err)
+	}
+
+	date, ok, err := s.FindTaskDate("task-legacy")
+	if err != nil {
+		t.Fatalf("find task date: %v", err)
+	}
+	if !ok || date != "2026-05-09" {
+		t.Errorf("expected 2026-05-09, got %q (found: %v)", date, ok)
+	}
+}
+
+// TestLogStore_FindTaskDate_UnknownTask verifies an absent task reports not
+// found rather than an error.
+func TestLogStore_FindTaskDate_UnknownTask(t *testing.T) {
+	s, dir := newTestLogStore(t)
+	defer func() {
+		s.CloseAll()
+		os.RemoveAll(dir)
+	}()
+
+	s.Append(Entry{TaskID: "task-1", Line: "hello", Timestamp: time.Date(2026, 5, 10, 12, 0, 0, 0, time.UTC)})
+	s.CloseAll()
+
+	if date, ok, err := s.FindTaskDate("task-nope"); err != nil || ok {
+		t.Errorf("expected not found with no error, got date=%q ok=%v err=%v", date, ok, err)
+	}
+}

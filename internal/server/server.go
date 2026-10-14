@@ -1530,6 +1530,13 @@ func (s *Server) HandleTaskDetail(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Check for download sub-path: /api/tasks/:id/download
+	if strings.HasSuffix(path, "/download") {
+		taskID := strings.TrimSuffix(path, "/download")
+		s.handleTaskLogDownload(w, r, taskID)
+		return
+	}
+
 	taskID := path
 	if taskID == "" {
 		http.Error(w, "task id required", http.StatusBadRequest)
@@ -1832,6 +1839,56 @@ func (s *Server) handleLogDownload(w http.ResponseWriter, date, taskID string) {
 	}
 
 	// Override the JSON Content-Type set at the top of HandleLogEntry.
+	writeLogAttachment(w, taskID, raw)
+}
+
+// handleTaskLogDownload serves a task's whole execution trace as a
+// downloadable JSONL attachment without the caller having to know which date
+// partition the trace lives in (Issue #208). It backs the "Download" button
+// in the task view, which only knows the task ID.
+func (s *Server) handleTaskLogDownload(w http.ResponseWriter, r *http.Request, taskID string) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	// Validate before the ID is used to build a path and reflected into the
+	// Content-Disposition header.
+	if !logTaskIDPattern.MatchString(taskID) {
+		http.Error(w, "invalid task id", http.StatusBadRequest)
+		return
+	}
+
+	if s.diskLogStore == nil {
+		http.Error(w, "log store not configured", http.StatusServiceUnavailable)
+		return
+	}
+
+	date, ok, err := s.diskLogStore.FindTaskDate(taskID)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if !ok {
+		http.Error(w, "log not found", http.StatusNotFound)
+		return
+	}
+
+	raw, err := s.diskLogStore.ReadRawJSONL(date, taskID)
+	if err != nil {
+		if errors.Is(err, logstore.ErrLogNotFound) {
+			http.Error(w, "log not found", http.StatusNotFound)
+			return
+		}
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	writeLogAttachment(w, taskID, raw)
+}
+
+// writeLogAttachment sends raw JSONL as an attachment named after the task.
+func writeLogAttachment(w http.ResponseWriter, taskID, raw string) {
 	w.Header().Set("Content-Type", "application/x-ndjson")
 	w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=\"%s.jsonl\"", taskID))
 	w.WriteHeader(http.StatusOK)

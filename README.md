@@ -143,6 +143,7 @@ curl -X POST http://localhost:8080/api/tasks \
 | `GET` | `/api/tasks` | List all tasks |
 | `POST` | `/api/tasks` | Submit a new task |
 | `GET` | `/api/tasks/:id` | Get task details |
+| `GET` | `/api/tasks/:id/download` | Download the task's whole log trace as JSONL |
 | `GET` | `/api/guests` | List connected guests |
 | `GET` | `/api/guests/:id` | Get guest details |
 | `GET` | `/api/health` | Health check |

@@ -1687,6 +1687,7 @@
                     <div style="display:flex;gap:0.5rem;align-items:center;">
                         ${task.status === 'PENDING' && task.priority ? `<span class="badge badge-priority" title="Priority">🔜${priorityToEmoji(task.priority)}</span>` : ''}
                         <button class="btn btn-sm btn-ghost task-detail-fullscreen-btn" onclick="toggleLogsFullscreen()" aria-pressed="false" title="View these logs in full screen">&#x26F6; Full screen</button>
+                        <button class="btn btn-sm btn-ghost download-task-btn" onclick="downloadTaskLog('${task.id}')" title="Download the whole trace as JSONL">⬇ Download</button>
                         <button class="btn btn-sm btn-ghost" onclick="rerunTask('${task.id}')">🔄 Re-run</button>
                         ${task.status !== 'COMPLETED' && task.status !== 'FAILED' && task.status !== 'CANCELLED' ? `<button class="btn btn-sm btn-danger" onclick="cancelTask('${task.id}')">✖ Cancel</button>` : ''}
                         <button class="btn btn-sm btn-ghost" onclick="closeTaskDetail()">Close</button>
@@ -2696,6 +2697,20 @@
         // for a task (Issue #6).
         function downloadLog(date, taskID) {
             const url = '/api/logs/' + date + '/' + taskID + '/download';
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = taskID + '.jsonl';
+            document.body.appendChild(a);
+            a.click();
+            document.body.removeChild(a);
+        }
+
+        // downloadTaskLog triggers a browser download of a task's whole
+        // execution trace (Issue #208). Unlike downloadLog it needs no date
+        // partition — the task view only knows the task ID, and the server
+        // resolves which date directory holds the trace.
+        function downloadTaskLog(taskID) {
+            const url = '/api/tasks/' + taskID + '/download';
             const a = document.createElement('a');
             a.href = url;
             a.download = taskID + '.jsonl';

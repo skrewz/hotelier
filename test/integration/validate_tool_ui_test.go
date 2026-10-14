@@ -2232,6 +2232,31 @@ const { chromium } = require('playwright');
   if (!directNavUrl.startsWith('/task/')) fail('URL should be /task/:id, got: ' + directNavUrl);
   console.log('PASS: URL is', directNavUrl, '(kept for backwards compat)');
 
+  // --- Download button in the task detail header (Issue #208) ---
+  // The task view must offer the whole trace as a downloadable JSONL file
+  // without the user navigating to the date-partitioned Logs browser.
+  const taskDetailDownload = await page.evaluate(() => {
+    const btn = document.querySelector('.task-detail-header .download-task-btn');
+    return {
+      present: btn !== null,
+      onclick: btn ? (btn.getAttribute('onclick') || '') : '',
+    };
+  });
+  if (!taskDetailDownload.present) fail('task detail header must have a download button');
+  if (!taskDetailDownload.onclick.includes('downloadTaskLog')) fail('download button should call downloadTaskLog(), got: ' + taskDetailDownload.onclick);
+  console.log('PASS: task detail header has a download button calling downloadTaskLog()');
+
+  const [taskTraceDownload] = await Promise.all([
+    page.waitForEvent('download'),
+    page.click('.task-detail-header .download-task-btn'),
+  ]);
+  const taskTraceFilename = taskTraceDownload.suggestedFilename();
+  if (taskTraceFilename !== taskId + '.jsonl') {
+    fail('task trace download should be ' + taskId + '.jsonl, got ' + taskTraceFilename);
+  }
+  console.log('PASS: task detail download button triggers download of ' + taskTraceFilename);
+  await taskTraceDownload.cancel();
+
   await takeScreenshot('08-direct-task-nav');
 
   // Navigate directly to /logs
