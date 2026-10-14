@@ -1227,6 +1227,15 @@
             return div.innerHTML;
         }
 
+        // escapeAttr escapes a value for interpolation into a double-quoted
+        // HTML attribute. escapeHtml is not enough for that context: it
+        // serialises via innerHTML, which leaves quotes untouched, so a value
+        // containing a quote would break out of the attribute.
+        function escapeAttr(value) {
+            const entities = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' };
+            return String(value ?? '').replace(/[&<>"']/g, (c) => entities[c]);
+        }
+
 // priorityToEmoji maps the API priority string to its display emoji.
         // API values are plain English: "firefighter", "teacher", "orangutan".
         function priorityToEmoji(priority) {
@@ -1687,9 +1696,9 @@
                     <div style="display:flex;gap:0.5rem;align-items:center;">
                         ${task.status === 'PENDING' && task.priority ? `<span class="badge badge-priority" title="Priority">🔜${priorityToEmoji(task.priority)}</span>` : ''}
                         <button class="btn btn-sm btn-ghost task-detail-fullscreen-btn" onclick="toggleLogsFullscreen()" aria-pressed="false" title="View these logs in full screen">&#x26F6; Full screen</button>
-                        <button class="btn btn-sm btn-ghost download-task-btn" onclick="downloadTaskLog('${task.id}')" title="Download the whole trace as JSONL">⬇ Download</button>
-                        <button class="btn btn-sm btn-ghost" onclick="rerunTask('${task.id}')">🔄 Re-run</button>
-                        ${task.status !== 'COMPLETED' && task.status !== 'FAILED' && task.status !== 'CANCELLED' ? `<button class="btn btn-sm btn-danger" onclick="cancelTask('${task.id}')">✖ Cancel</button>` : ''}
+                        <button class="btn btn-sm btn-ghost download-task-btn" data-task-id="${escapeAttr(task.id)}" onclick="downloadTaskLog(this.dataset.taskId)" title="Download the whole trace as JSONL">⬇ Download</button>
+                        <button class="btn btn-sm btn-ghost" data-task-id="${escapeAttr(task.id)}" onclick="rerunTask(this.dataset.taskId)">🔄 Re-run</button>
+                        ${task.status !== 'COMPLETED' && task.status !== 'FAILED' && task.status !== 'CANCELLED' ? `<button class="btn btn-sm btn-danger" data-task-id="${escapeAttr(task.id)}" onclick="cancelTask(this.dataset.taskId)">✖ Cancel</button>` : ''}
                         <button class="btn btn-sm btn-ghost" onclick="closeTaskDetail()">Close</button>
                     </div>
                 </div>
@@ -1772,7 +1781,7 @@
         // rerunTask creates a new task from an existing one.
         async function rerunTask(taskId) {
             try {
-                const res = await fetch('/api/tasks/' + taskId + '/rerun', {
+                const res = await fetch('/api/tasks/' + encodeURIComponent(taskId) + '/rerun', {
                     method: 'POST',
                 });
                 if (!res.ok) {
@@ -1794,7 +1803,7 @@
         async function cancelTask(taskId) {
             if (!confirm('Are you sure you want to cancel this task?')) return;
             try {
-                const res = await fetch('/api/tasks/' + taskId + '/cancel', {
+                const res = await fetch('/api/tasks/' + encodeURIComponent(taskId) + '/cancel', {
                     method: 'POST',
                 });
                 if (!res.ok) {
@@ -2705,18 +2714,36 @@
             document.body.removeChild(a);
         }
 
-        // downloadTaskLog triggers a browser download of a task's whole
-        // execution trace (Issue #208). Unlike downloadLog it needs no date
-        // partition — the task view only knows the task ID, and the server
-        // resolves which date directory holds the trace.
-        function downloadTaskLog(taskID) {
-            const url = '/api/tasks/' + taskID + '/download';
-            const a = document.createElement('a');
-            a.href = url;
-            a.download = taskID + '.jsonl';
-            document.body.appendChild(a);
-            a.click();
-            document.body.removeChild(a);
+        // downloadTaskLog downloads a task's whole execution trace (Issue
+        // #208). Unlike downloadLog it needs no date partition — the task view
+        // only knows the task ID, and the server resolves which date
+        // directories hold the trace and stitches them together. It fetches
+        // rather than clicking an anchor so a failure (nothing flushed yet, log
+        // store disabled) surfaces as an error instead of being saved to disk
+        // as a .jsonl file containing the error text.
+        async function downloadTaskLog(taskID) {
+            const url = '/api/tasks/' + encodeURIComponent(taskID) + '/download';
+            try {
+                const res = await fetch(url);
+                if (!res.ok) {
+                    alert('Failed to download trace (HTTP ' + res.status + '): ' + (await res.text()).trim());
+                    return;
+                }
+                // The server names the file, including the date span when the
+                // trace was spread over several partitions.
+                const match = (res.headers.get('Content-Disposition') || '').match(/filename="([^"]+)"/);
+                const blob = await res.blob();
+                const href = URL.createObjectURL(blob);
+                const a = document.createElement('a');
+                a.href = href;
+                a.download = match ? match[1] : taskID + '.jsonl';
+                document.body.appendChild(a);
+                a.click();
+                a.remove();
+                URL.revokeObjectURL(href);
+            } catch (e) {
+                alert('Failed to download trace: ' + e.message);
+            }
         }
 
         // Handle browser back/forward — re-dispatch to the correct view.
