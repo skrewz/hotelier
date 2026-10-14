@@ -2232,6 +2232,36 @@ const { chromium } = require('playwright');
   if (!directNavUrl.startsWith('/task/')) fail('URL should be /task/:id, got: ' + directNavUrl);
   console.log('PASS: URL is', directNavUrl, '(kept for backwards compat)');
 
+  // --- Download button in the task detail header (Issue #208) ---
+  // The task view must offer the whole trace as a downloadable JSONL file
+  // without the user navigating to the date-partitioned Logs browser. The task
+  // ID must reach downloadTaskLog() through a data attribute, not interpolated
+  // into the onclick as a JS string literal — task IDs are caller-supplied.
+  const taskDetailDownload = await page.evaluate(() => {
+    const btn = document.querySelector('.task-detail-header .download-task-btn');
+    return {
+      present: btn !== null,
+      onclick: btn ? (btn.getAttribute('onclick') || '') : '',
+      dataset: btn ? btn.dataset.taskId : null,
+    };
+  });
+  if (!taskDetailDownload.present) fail('task detail header must have a download button');
+  if (!taskDetailDownload.onclick.includes('downloadTaskLog')) fail('download button should call downloadTaskLog(), got: ' + taskDetailDownload.onclick);
+  if (taskDetailDownload.onclick.includes("'")) fail('download button onclick must not embed a quoted task id, got: ' + taskDetailDownload.onclick);
+  if (taskDetailDownload.dataset !== taskId) fail('download button data-task-id should be ' + taskId + ', got: ' + taskDetailDownload.dataset);
+  console.log('PASS: task detail download button passes the task id via data-task-id');
+
+  const [taskTraceDownload] = await Promise.all([
+    page.waitForEvent('download'),
+    page.click('.task-detail-header .download-task-btn'),
+  ]);
+  const taskTraceFilename = taskTraceDownload.suggestedFilename();
+  if (taskTraceFilename !== taskId + '.jsonl') {
+    fail('task trace download should be ' + taskId + '.jsonl, got ' + taskTraceFilename);
+  }
+  console.log('PASS: task detail download button triggers download of ' + taskTraceFilename);
+  await taskTraceDownload.cancel();
+
   await takeScreenshot('08-direct-task-nav');
 
   // Navigate directly to /logs

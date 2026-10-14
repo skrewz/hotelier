@@ -21,6 +21,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -177,6 +178,10 @@ func (s *LogStore) ListDates() ([]string, error) {
 			dates = append(dates, e.Name())
 		}
 	}
+	// os.ReadDir returns lexical order, which happens to be chronological for
+	// YYYY-MM-DD names; sort explicitly so the ascending guarantee does not
+	// depend on that.
+	sort.Strings(dates)
 	return dates, nil
 }
 
@@ -292,6 +297,72 @@ func (s *LogStore) ListTasks(date string) ([]string, error) {
 		}
 	}
 	return tasks, nil
+}
+
+// FindTaskDates returns every date partition that holds a log file for the
+// task, oldest first — a task whose trace spans midnight has one file per
+// date directory. The slice is empty when no partition holds the task. It
+// performs no validation of taskID; callers must reject anything that is not a
+// plain task ID before handing it in.
+func (s *LogStore) FindTaskDates(taskID string) ([]string, error) {
+	dates, err := s.ListDates()
+	if err != nil {
+		return nil, err
+	}
+
+	var found []string
+	for _, date := range dates {
+		if hasLogFile(filepath.Join(s.dir, date, taskID)) {
+			found = append(found, date)
+		}
+	}
+	return found, nil
+}
+
+// ReadTaskRawJSONL reads a task's whole trace across every date partition it
+// appears in, concatenated oldest segment first, so a task that ran across
+// midnight downloads as one file rather than silently losing its earlier
+// segments. It returns the raw JSONL together with the partitions it came
+// from. Returns ErrLogNotFound when no partition holds the task.
+func (s *LogStore) ReadTaskRawJSONL(taskID string) (string, []string, error) {
+	dates, err := s.FindTaskDates(taskID)
+	if err != nil {
+		return "", nil, err
+	}
+	if len(dates) == 0 {
+		return "", nil, ErrLogNotFound
+	}
+
+	var out strings.Builder
+	segmentEndsNewline := true
+	for _, date := range dates {
+		raw, err := s.ReadRawJSONL(date, taskID)
+		if err != nil {
+			return "", nil, err
+		}
+		if raw == "" {
+			continue
+		}
+		// Keep the concatenation line-delimited even if a segment was
+		// written without a trailing newline.
+		if out.Len() > 0 && !segmentEndsNewline {
+			out.WriteByte('\n')
+		}
+		out.WriteString(raw)
+		segmentEndsNewline = strings.HasSuffix(raw, "\n")
+	}
+	return out.String(), dates, nil
+}
+
+// hasLogFile reports whether a task directory holds a log file in either the
+// current (bzip2) or the legacy uncompressed format.
+func hasLogFile(taskDir string) bool {
+	for _, name := range []string{"logs.jsonl.bz2", "logs.jsonl"} {
+		if _, err := os.Stat(filepath.Join(taskDir, name)); err == nil {
+			return true
+		}
+	}
+	return false
 }
 
 // ReadLogs reads all log entries for a task from its log file.
