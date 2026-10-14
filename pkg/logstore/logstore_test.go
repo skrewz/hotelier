@@ -743,35 +743,33 @@ func TestLogStore_ReadRawJSONL_CorruptCompressed(t *testing.T) {
 	}
 }
 
-// TestLogStore_FindTaskDate_NewestPartitionFirst verifies the date partition
-// holding a task's trace is found, preferring the newest when a task spans
-// midnight.
-func TestLogStore_FindTaskDate_NewestPartitionFirst(t *testing.T) {
+// TestLogStore_FindTaskDates_OldestFirst verifies every date partition holding
+// a task's trace is reported, oldest first, so a trace spanning midnight can be
+// assembled in chronological order.
+func TestLogStore_FindTaskDates_OldestFirst(t *testing.T) {
 	s, dir := newTestLogStore(t)
 	defer func() {
 		s.CloseAll()
 		os.RemoveAll(dir)
 	}()
 
-	s.Append(Entry{TaskID: "task-span", Line: "before midnight", Timestamp: time.Date(2026, 5, 10, 23, 59, 0, 0, time.UTC)})
 	s.Append(Entry{TaskID: "task-span", Line: "after midnight", Timestamp: time.Date(2026, 5, 11, 0, 1, 0, 0, time.UTC)})
+	s.Append(Entry{TaskID: "task-span", Line: "before midnight", Timestamp: time.Date(2026, 5, 10, 23, 59, 0, 0, time.UTC)})
 	s.CloseAll()
 
-	date, ok, err := s.FindTaskDate("task-span")
+	dates, err := s.FindTaskDates("task-span")
 	if err != nil {
-		t.Fatalf("find task date: %v", err)
+		t.Fatalf("find task dates: %v", err)
 	}
-	if !ok {
-		t.Fatal("expected the task to be found")
-	}
-	if date != "2026-05-11" {
-		t.Errorf("expected the newest partition 2026-05-11, got %q", date)
+	want := []string{"2026-05-10", "2026-05-11"}
+	if len(dates) != len(want) || dates[0] != want[0] || dates[1] != want[1] {
+		t.Errorf("expected %v oldest-first, got %v", want, dates)
 	}
 }
 
-// TestLogStore_FindTaskDate_LegacyUncompressed verifies a legacy .jsonl file
+// TestLogStore_FindTaskDates_LegacyUncompressed verifies a legacy .jsonl file
 // counts as a trace, so older tasks stay downloadable.
-func TestLogStore_FindTaskDate_LegacyUncompressed(t *testing.T) {
+func TestLogStore_FindTaskDates_LegacyUncompressed(t *testing.T) {
 	s, dir := newTestLogStore(t)
 	defer func() {
 		s.CloseAll()
@@ -786,18 +784,18 @@ func TestLogStore_FindTaskDate_LegacyUncompressed(t *testing.T) {
 		t.Fatalf("write legacy jsonl: %v", err)
 	}
 
-	date, ok, err := s.FindTaskDate("task-legacy")
+	dates, err := s.FindTaskDates("task-legacy")
 	if err != nil {
-		t.Fatalf("find task date: %v", err)
+		t.Fatalf("find task dates: %v", err)
 	}
-	if !ok || date != "2026-05-09" {
-		t.Errorf("expected 2026-05-09, got %q (found: %v)", date, ok)
+	if len(dates) != 1 || dates[0] != "2026-05-09" {
+		t.Errorf("expected [2026-05-09], got %v", dates)
 	}
 }
 
-// TestLogStore_FindTaskDate_UnknownTask verifies an absent task reports not
-// found rather than an error.
-func TestLogStore_FindTaskDate_UnknownTask(t *testing.T) {
+// TestLogStore_FindTaskDates_UnknownTask verifies an absent task reports no
+// partitions rather than an error.
+func TestLogStore_FindTaskDates_UnknownTask(t *testing.T) {
 	s, dir := newTestLogStore(t)
 	defer func() {
 		s.CloseAll()
@@ -807,7 +805,75 @@ func TestLogStore_FindTaskDate_UnknownTask(t *testing.T) {
 	s.Append(Entry{TaskID: "task-1", Line: "hello", Timestamp: time.Date(2026, 5, 10, 12, 0, 0, 0, time.UTC)})
 	s.CloseAll()
 
-	if date, ok, err := s.FindTaskDate("task-nope"); err != nil || ok {
-		t.Errorf("expected not found with no error, got date=%q ok=%v err=%v", date, ok, err)
+	if dates, err := s.FindTaskDates("task-nope"); err != nil || len(dates) != 0 {
+		t.Errorf("expected no partitions and no error, got %v (err: %v)", dates, err)
+	}
+}
+
+// TestLogStore_ReadTaskRawJSONL_StitchesPartitions verifies a task whose trace
+// spans midnight yields every segment concatenated oldest to newest, so the
+// download really is the whole trace (issue #208).
+func TestLogStore_ReadTaskRawJSONL_StitchesPartitions(t *testing.T) {
+	s, dir := newTestLogStore(t)
+	defer func() {
+		s.CloseAll()
+		os.RemoveAll(dir)
+	}()
+
+	s.Append(Entry{TaskID: "task-span", Line: "before midnight", Timestamp: time.Date(2026, 5, 10, 23, 59, 0, 0, time.UTC)})
+	s.Append(Entry{TaskID: "task-span", Line: "after midnight", Timestamp: time.Date(2026, 5, 11, 0, 1, 0, 0, time.UTC)})
+	s.CloseAll()
+
+	raw, dates, err := s.ReadTaskRawJSONL("task-span")
+	if err != nil {
+		t.Fatalf("read task trace: %v", err)
+	}
+	if len(dates) != 2 || dates[0] != "2026-05-10" || dates[1] != "2026-05-11" {
+		t.Errorf("expected the span [2026-05-10 2026-05-11], got %v", dates)
+	}
+	lines := strings.Split(strings.TrimSpace(raw), "\n")
+	if len(lines) != 2 {
+		t.Fatalf("expected 2 stitched JSONL lines, got %d (%q)", len(lines), raw)
+	}
+	if !strings.Contains(lines[0], "before midnight") || !strings.Contains(lines[1], "after midnight") {
+		t.Errorf("expected oldest segment first, got %q then %q", lines[0], lines[1])
+	}
+}
+
+// TestLogStore_ReadTaskRawJSONL_SinglePartition verifies the common case: one
+// date partition, returned as-is with the partition it came from.
+func TestLogStore_ReadTaskRawJSONL_SinglePartition(t *testing.T) {
+	s, dir := newTestLogStore(t)
+	defer func() {
+		s.CloseAll()
+		os.RemoveAll(dir)
+	}()
+
+	s.Append(Entry{TaskID: "task-one", Line: "only segment", Timestamp: time.Date(2026, 5, 10, 12, 0, 0, 0, time.UTC)})
+	s.CloseAll()
+
+	raw, dates, err := s.ReadTaskRawJSONL("task-one")
+	if err != nil {
+		t.Fatalf("read task trace: %v", err)
+	}
+	if len(dates) != 1 || dates[0] != "2026-05-10" {
+		t.Errorf("expected [2026-05-10], got %v", dates)
+	}
+	if !strings.Contains(raw, "only segment") {
+		t.Errorf("expected the raw trace, got %q", raw)
+	}
+}
+
+// TestLogStore_ReadTaskRawJSONL_UnknownTask verifies an absent task yields
+// ErrLogNotFound so the caller can answer 404.
+func TestLogStore_ReadTaskRawJSONL_UnknownTask(t *testing.T) {
+	s, dir := newTestLogStore(t)
+	defer func() {
+		s.CloseAll()
+		os.RemoveAll(dir)
+	}()
+
+	if _, _, err := s.ReadTaskRawJSONL("task-nope"); !errors.Is(err, ErrLogNotFound) {
+		t.Errorf("expected ErrLogNotFound, got %v", err)
 	}
 }

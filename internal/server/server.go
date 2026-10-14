@@ -1839,13 +1839,14 @@ func (s *Server) handleLogDownload(w http.ResponseWriter, date, taskID string) {
 	}
 
 	// Override the JSON Content-Type set at the top of HandleLogEntry.
-	writeLogAttachment(w, taskID, raw)
+	writeLogAttachment(w, taskID+".jsonl", raw)
 }
 
 // handleTaskLogDownload serves a task's whole execution trace as a
 // downloadable JSONL attachment without the caller having to know which date
-// partition the trace lives in (Issue #208). It backs the "Download" button
-// in the task view, which only knows the task ID.
+// partitions the trace lives in (Issue #208). Segments spread over several
+// partitions are concatenated oldest first. It backs the "Download" button in
+// the task view, which only knows the task ID.
 func (s *Server) handleTaskLogDownload(w http.ResponseWriter, r *http.Request, taskID string) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -1864,35 +1865,38 @@ func (s *Server) handleTaskLogDownload(w http.ResponseWriter, r *http.Request, t
 		return
 	}
 
-	date, ok, err := s.diskLogStore.FindTaskDate(taskID)
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-	if !ok {
-		http.Error(w, "log not found", http.StatusNotFound)
-		return
-	}
-
-	raw, err := s.diskLogStore.ReadRawJSONL(date, taskID)
+	raw, dates, err := s.diskLogStore.ReadTaskRawJSONL(taskID)
 	if err != nil {
 		if errors.Is(err, logstore.ErrLogNotFound) {
 			http.Error(w, "log not found", http.StatusNotFound)
 			return
 		}
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		// Log-store errors embed absolute filesystem paths; keep them
+		// server-side rather than echoing them to the client.
+		s.log.Printf("task trace download %s: %v", taskID, err)
+		http.Error(w, "failed to read log", http.StatusInternalServerError)
 		return
 	}
 
-	writeLogAttachment(w, taskID, raw)
+	writeLogAttachment(w, traceFilename(taskID, dates), raw)
 }
 
-// writeLogAttachment sends raw JSONL as an attachment named after the task.
-func writeLogAttachment(w http.ResponseWriter, taskID, raw string) {
+// traceFilename names a task-trace download. A trace confined to one date
+// partition is named after the task; one spread over several partitions says
+// which span the file covers.
+func traceFilename(taskID string, dates []string) string {
+	if len(dates) < 2 {
+		return taskID + ".jsonl"
+	}
+	return fmt.Sprintf("%s-%s_to_%s.jsonl", taskID, dates[0], dates[len(dates)-1])
+}
+
+// writeLogAttachment sends raw JSONL as an attachment with the given filename.
+func writeLogAttachment(w http.ResponseWriter, filename, raw string) {
 	w.Header().Set("Content-Type", "application/x-ndjson")
-	w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=\"%s.jsonl\"", taskID))
+	w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=\"%s\"", filename))
 	w.WriteHeader(http.StatusOK)
 	if _, err := w.Write([]byte(raw)); err != nil {
-		log.Printf("write log download for %s: %v", taskID, err)
+		log.Printf("write log download %s: %v", filename, err)
 	}
 }

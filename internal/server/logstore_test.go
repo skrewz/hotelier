@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -592,10 +593,11 @@ func TestTaskLogDownload_Success(t *testing.T) {
 	}
 }
 
-// TestTaskLogDownload_PicksNewestPartition verifies a task whose trace spans
-// midnight is served from its most recent date partition — the same segment
-// the Logs tab shows, and the one holding the newest output.
-func TestTaskLogDownload_PicksNewestPartition(t *testing.T) {
+// TestTaskLogDownload_StitchesPartitions verifies a task whose trace spans
+// midnight downloads as one file holding every segment, oldest first, and that
+// the filename says which span it covers — a partial trace must not be handed
+// over as if it were the whole one (issue #208).
+func TestTaskLogDownload_StitchesPartitions(t *testing.T) {
 	dir, err := os.MkdirTemp("", "hotelier-taskdownload-span-*")
 	if err != nil {
 		t.Fatalf("create temp dir: %v", err)
@@ -613,8 +615,49 @@ func TestTaskLogDownload_PicksNewestPartition(t *testing.T) {
 	if w.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d", w.Code)
 	}
-	if body := w.Body.String(); !strings.Contains(body, "after midnight") {
-		t.Errorf("expected the newest partition's trace, got %q", body)
+	body := w.Body.String()
+	if !strings.Contains(body, "before midnight") || !strings.Contains(body, "after midnight") {
+		t.Errorf("expected both partitions in the trace, got %q", body)
+	}
+	if before, after := strings.Index(body, "before midnight"), strings.Index(body, "after midnight"); before > after {
+		t.Errorf("expected the oldest segment first, got %q", body)
+	}
+	if lines := strings.Split(strings.TrimSpace(body), "\n"); len(lines) != 2 {
+		t.Errorf("expected 2 stitched JSONL lines, got %d (%q)", len(lines), body)
+	}
+	if cd := w.Header().Get("Content-Disposition"); cd != `attachment; filename="task-123-2026-05-10_to_2026-05-11.jsonl"` {
+		t.Errorf("expected the filename to carry the date span, got %q", cd)
+	}
+}
+
+// TestTaskLogDownload_ReadErrorDoesNotLeakPaths verifies a log-store read error
+// yields a generic body. Store errors embed absolute filesystem paths, which
+// must not be echoed to the client.
+func TestTaskLogDownload_ReadErrorDoesNotLeakPaths(t *testing.T) {
+	dir, err := os.MkdirTemp("", "hotelier-taskdownload-err-*")
+	if err != nil {
+		t.Fatalf("create temp dir: %v", err)
+	}
+	defer os.RemoveAll(dir)
+
+	srv := New(config.ServerConfig{Host: "127.0.0.1", Port: 0, LogDir: dir})
+	appendTrace(t, srv, "task-123", 2026, 5, 10, []string{"Task started"})
+
+	// Corrupt the stored stream so reading it fails.
+	bz2 := filepath.Join(dir, "2026-05-10", "task-123", "logs.jsonl.bz2")
+	if err := os.WriteFile(bz2, []byte("not a bzip2 stream at all"), 0o644); err != nil {
+		t.Fatalf("corrupt log file: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/tasks/task-123/download", nil)
+	w := httptest.NewRecorder()
+	srv.HandleTaskDetail(w, req)
+
+	if w.Code != http.StatusInternalServerError {
+		t.Fatalf("expected 500, got %d (body %q)", w.Code, w.Body.String())
+	}
+	if body := w.Body.String(); strings.Contains(body, dir) {
+		t.Errorf("error body must not disclose the log store path, got %q", body)
 	}
 }
 
