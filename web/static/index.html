@@ -59,6 +59,11 @@
         .task-detail-header { display: flex; justify-content: space-between; align-items: center; padding: 1rem; background: #1e293b; border-radius: 0.5rem 0.5rem 0 0; border: 1px solid #334155; border-bottom: none; }
         .task-detail-id { font-weight: 600; font-size: 0.875rem; color: #38bdf8; }
         .task-detail-meta { font-size: 0.75rem; color: #94a3b8; margin-top: 0.25rem; }
+        /* Hourglass spinner for running tasks (issue #210). Rotation is keyed
+           off the task's log count (angle = log_count % 360 degrees), so the
+           ⏳ advances each time a new log entry arrives. inline-block so the
+           transform applies to the glyph; the transition animates the step. */
+        .task-spinner { display: inline-block; transform: rotate(0deg); transition: transform 0.3s ease; }
         /* Collapsible prompt section */
         .task-detail-prompt { border: 1px solid #334155; border-top: none; border-radius: 0 0 0.5rem 0.5rem; margin-bottom: 1rem; overflow: hidden; }
         .task-detail-prompt-header { display: flex; align-items: center; justify-content: space-between; padding: 0.5rem 1rem; background: #1e293b; cursor: pointer; user-select: none; font-size: 0.8rem; }
@@ -698,7 +703,7 @@
                 const isRerunnable = t.status === 'FAILED' || t.status === 'CANCELLED';
                 const rerunBtn = isRerunnable ? `<button class="btn btn-sm btn-ghost" onclick="event.stopPropagation(); rerunTask('${t.id}')">🔄</button>` : '';
                 const btnRow = (rerunBtn || cancelBtn) ? `<div class="task-btn-row">${rerunBtn}${cancelBtn}</div>` : '';
-                const logCount = t.log_count != null ? ` · ${t.log_count} log${t.log_count === 1 ? '' : 's'}` : '';
+                const logCount = t.log_count != null ? ` · ${t.log_count} log${t.log_count === 1 ? '' : 's'}${spinnerHTML(t.log_count, isTaskRunning(t))}` : '';
                 // Priority label shown only for PENDING tasks
                 const priorityLabel = t.status === 'PENDING' && t.priority ? `<span class="badge badge-priority" title="Priority">🔜${priorityToEmoji(t.priority)}</span>` : '';
                 const personaBadge = t.persona ? ` <span class="persona-badge ${personaColourClass(t.persona)}" title="Persona: ${escapeHtml(t.persona)}">🧑 ${escapeHtml(t.persona)}</span>` : '';
@@ -1227,6 +1232,24 @@
             return div.innerHTML;
         }
 
+        // A task counts as "running" while it is assigned to a guest or
+        // actively executing. Matches the convention used when deciding
+        // whether the log stream is still live in renderTaskDetail().
+        function isTaskRunning(task) {
+            return !!task && (task.status === 'RUNNING' || task.status === 'ASSIGNED');
+        }
+
+        // spinnerHTML returns the ⏳ spinner shown next to a running task's
+        // log count (issue #210). Its rotation is keyed off the number: the
+        // count modulo 360 gives an angle in degrees, so the hourglass turns
+        // a little every time a new log entry arrives. Returns '' when the
+        // task is not running, keeping callers free of status checks.
+        function spinnerHTML(logCount, running) {
+            if (!running) return '';
+            const angle = (logCount || 0) % 360;
+            return ` <span class="task-spinner" style="transform: rotate(${angle}deg)" title="Task running">⏳</span>`;
+        }
+
         // escapeAttr escapes a value for interpolation into a double-quoted
         // HTML attribute. escapeHtml is not enough for that context: it
         // serialises via innerHTML, which leaves quotes untouched, so a value
@@ -1418,7 +1441,10 @@
                         ? 'Guest: ' + escapeHtml(task.assigned_to)
                         : 'Unassigned';
                     const logCount = data.log_count || 0;
-                    metaEl.textContent = `${guestPart} · ${logCount} log entries`;
+                    // innerHTML (not textContent) so the spinner span is
+                    // added for running tasks and removed once they settle.
+                    // guestPart is already escaped above.
+                    metaEl.innerHTML = `${guestPart} · <span class="meta-log-count">${logCount} log entries</span>${spinnerHTML(logCount, isTaskRunning(task))}`;
                 }
             } catch (e) {
                 console.error('failed to patch task detail meta:', e);
@@ -1439,7 +1465,7 @@
             if (logs.length === 0) {
                 logsHtml += '<div class="log-msg system">Waiting for guest output...</div>';
             } else {
-                const isRunning = task.status === 'RUNNING' || task.status === 'ASSIGNED';
+                const isRunning = isTaskRunning(task);
                 let currentToolBlock = null;
                 let currentCompaction = null;
 
@@ -1691,7 +1717,7 @@
                 <div class="task-detail-header">
                     <div>
                         <div class="task-detail-id">${escapeHtml(task.id)} <span class="badge ${badgeClass}">${task.status}</span>${personaBadge}</div>
-                        <div class="task-detail-meta">${task.assigned_to ? 'Guest: ' + escapeHtml(task.assigned_to) : 'Unassigned'} · ${logs.length} log entries</div>
+                        <div class="task-detail-meta">${task.assigned_to ? 'Guest: ' + escapeHtml(task.assigned_to) : 'Unassigned'} · <span class="meta-log-count">${logs.length} log entries</span>${spinnerHTML(logs.length, isTaskRunning(task))}</div>
                     </div>
                     <div style="display:flex;gap:0.5rem;align-items:center;">
                         ${task.status === 'PENDING' && task.priority ? `<span class="badge badge-priority" title="Priority">🔜${priorityToEmoji(task.priority)}</span>` : ''}
@@ -2361,11 +2387,20 @@
             }
             scrollToBottomIfNeeded(body, wasAtBottom);
 
-            // Update log count in header
+            // Update log count in header, and with it the hourglass spinner's
+            // rotation (issue #210): the angle is the count modulo 360, so
+            // the ⏳ advances on every streamed entry. Update the existing
+            // spans in place — replacing meta.innerHTML would recreate the
+            // spinner span and lose the CSS rotation transition.
             const meta = view.querySelector('.task-detail-meta');
             if (meta) {
                 const count = taskLogs[logEntry.task_id]?.length || 0;
-                meta.textContent = `${meta.textContent.split(' · ')[0]} · ${count} log entries`;
+                const countEl = meta.querySelector('.meta-log-count');
+                if (countEl) {
+                    countEl.textContent = `${count} log entries`;
+                    const spinner = meta.querySelector('.task-spinner');
+                    if (spinner) spinner.style.transform = `rotate(${count % 360}deg)`;
+                }
             }
         }
 

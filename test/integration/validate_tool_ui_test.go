@@ -1086,6 +1086,38 @@ const { chromium } = require('playwright');
   if (!runningTaskHasLogs) fail('At least one visible task should have log entries > 0');
   console.log('PASS: Log counts displayed in task meta:', logCountResult.map(r => r.count + ' logs').join(', '));
 
+  // Hourglass spinner for running tasks (issue #210): each visible task
+  // card shows an ⏳ next to its log count exactly while the task is
+  // running, rotated by the log count modulo 360 degrees.
+  const spinnerListResult = await page.evaluate(() => {
+    const items = [];
+    for (const item of document.querySelectorAll('.task-item')) {
+      const meta = item.querySelector('.task-meta');
+      const badge = item.querySelector('.badge');
+      const sp = meta ? meta.querySelector('.task-spinner') : null;
+      const match = meta ? meta.textContent.match(/(\d+)\s+logs?/) : null;
+      items.push({
+        status: badge ? badge.textContent.trim() : '',
+        count: match ? parseInt(match[1], 10) : -1,
+        hasSpinner: !!sp,
+        transform: sp ? sp.style.transform : null,
+        glyph: sp ? sp.textContent : null,
+      });
+    }
+    return items;
+  });
+  for (const r of spinnerListResult) {
+    const running = r.status === 'RUNNING' || r.status === 'ASSIGNED';
+    if (running && !r.hasSpinner) fail('Running task card (' + r.status + ') should show the ⏳ spinner');
+    if (!running && r.hasSpinner) fail('Non-running task card (' + r.status + ') should not show a spinner');
+    if (r.hasSpinner) {
+      if (r.glyph !== '⏳') fail('Spinner glyph should be ⏳, got: ' + r.glyph);
+      const expected = 'rotate(' + (r.count %% 360) + 'deg)';
+      if (r.transform !== expected) fail('Spinner rotation should be ' + expected + ' for ' + r.count + ' logs, got: ' + r.transform);
+    }
+  }
+  console.log('PASS: ⏳ spinner on task cards is keyed off status and log count');
+
   // =====================================================================
   // Phase 1c: Persona badge colours
   // =====================================================================
@@ -2784,6 +2816,87 @@ const { chromium } = require('playwright');
     process.exit(1);
   }
   await takeScreenshot('13-compaction-flush');
+
+  // =====================================================================
+  // Phase 13b: ⏳ hourglass spinner for running tasks (issue #210)
+  // Unit-style: the task detail header shows a spinner rotated by the log
+  // count modulo 360 degrees; streaming one more entry advances both the
+  // counter and the rotation in place; a settled task has no spinner.
+  // =====================================================================
+  console.log('=== Phase 13b: hourglass spinner ===');
+
+  // Step 1: spinnerHTML unit behaviour + a RUNNING task detail header with
+  // 375 entries -> spinner present, rotated 375 %% 360 = 15 degrees.
+  const spinnerRender = await page.evaluate(() => {
+    const mkLogs = n => Array.from({ length: n }, (_, i) => ({
+      level: 'info', line: 'spinner line ' + i, timestamp: '2026-09-15T10:00:00Z',
+    }));
+    const out = {};
+    // spinnerHTML: angle = log count modulo 360; nothing for non-running tasks.
+    out.helper375 = spinnerHTML(375, true);
+    out.helperNotRunning = spinnerHTML(10, false);
+    const runningTask = { id: 'unit-spinner-task', status: 'RUNNING', prompt: 'spinner check', assigned_to: 'guest-1' };
+    const logs = mkLogs(375);
+    renderTaskDetail(runningTask, logs, logs.length);
+    // Seed the global accumulator the streaming path reads, mirroring the
+    // WebSocket handler which pushes the entry before calling appendLogToDetail.
+    taskLogs[runningTask.id] = logs.slice();
+    const meta = document.querySelector('.task-detail-meta');
+    const countEl = meta.querySelector('.meta-log-count');
+    out.headerCount = countEl ? countEl.textContent : null;
+    const sp = meta.querySelector('.task-spinner');
+    out.headerTransform = sp ? sp.style.transform : null;
+    return out;
+  });
+  await takeScreenshot('13b-spinner-running');
+
+  // Step 2: streaming path — one more entry arrives via appendLogToDetail;
+  // the counter and the spinner rotation must both advance in place.
+  const spinnerStream = await page.evaluate(() => {
+    const out = {};
+    taskLogs['unit-spinner-task'].push({ level: 'info', line: 'spinner line 375', timestamp: '2026-09-15T10:00:01Z' });
+    const spBefore = document.querySelector('.task-detail-meta .task-spinner');
+    appendLogToDetail({ task_id: 'unit-spinner-task', level: 'info', line: 'spinner line 375', timestamp: '2026-09-15T10:00:01Z' });
+    const spAfter = document.querySelector('.task-detail-meta .task-spinner');
+    out.sameNode = spBefore === spAfter;
+    const countEl = document.querySelector('.task-detail-meta .meta-log-count');
+    out.count = countEl ? countEl.textContent : null;
+    out.transform = spAfter ? spAfter.style.transform : null;
+    return out;
+  });
+
+  // Step 3: a settled task renders no spinner at all.
+  const spinnerSettled = await page.evaluate(() => {
+    const mkLogs = n => Array.from({ length: n }, (_, i) => ({
+      level: 'info', line: 'spinner line ' + i, timestamp: '2026-09-15T10:00:00Z',
+    }));
+    renderTaskDetail({ id: 'unit-spinner-done', status: 'COMPLETED', prompt: 'spinner check' }, mkLogs(5), 5);
+    return { hasSpinner: document.querySelector('.task-detail-meta .task-spinner') !== null };
+  });
+
+  const spinnerChecks = [
+    { name: 'spinnerHTML keys the angle off the count (375 -> rotate(15deg))', pass: spinnerRender.helper375.includes('⏳') && spinnerRender.helper375.includes('rotate(15deg)') },
+    { name: 'spinnerHTML renders nothing for non-running tasks', pass: spinnerRender.helperNotRunning === '' },
+    { name: 'running task header counts 375 log entries', pass: spinnerRender.headerCount === '375 log entries' },
+    { name: 'running task header spinner rotated by 375 %% 360 = 15 degrees', pass: spinnerRender.headerTransform === 'rotate(15deg)' },
+    { name: 'streaming entry advances the count to 376', pass: spinnerStream.count === '376 log entries' },
+    { name: 'streaming entry advances rotation to 16 degrees in the same element', pass: spinnerStream.sameNode && spinnerStream.transform === 'rotate(16deg)' },
+    { name: 'settled task header has no spinner', pass: !spinnerSettled.hasSpinner },
+  ];
+  let spinnerFailed = false;
+  for (const check of spinnerChecks) {
+    if (!check.pass) { console.error('FAIL:', check.name); spinnerFailed = true; }
+    else { console.log('PASS:', check.name); }
+  }
+  if (spinnerFailed) {
+    console.error('spinner render result:', JSON.stringify(spinnerRender));
+    console.error('spinner stream result:', JSON.stringify(spinnerStream));
+    console.error('spinner settled result:', JSON.stringify(spinnerSettled));
+    await takeScreenshot('13b-spinner-failed');
+    process.exit(1);
+  }
+  console.log('PASS: hourglass spinner rotation keyed off log count');
+  await takeScreenshot('13b-spinner-settled');
 
   // Navigate to Tasks tab
   await page.locator('.tab').filter({ hasText: 'Tasks' }).click();
