@@ -9,6 +9,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/gorilla/websocket"
 )
@@ -552,15 +553,32 @@ func (h *Hub) SendNotification(connID string, role ConnectionRole, method string
 
 // Client is a JSON-RPC client that connects to a server.
 type Client struct {
-	id       string
-	conn     *websocket.Conn
-	send     chan []byte
-	hub      *ClientHub
-	mu       sync.Mutex
-	closed   atomic.Bool
-	closeCh  chan struct{}
-	callResp chan *JSONRPCMessage
-	onClose  func() // called when the connection is lost unexpectedly
+	id          string
+	conn        *websocket.Conn
+	send        chan []byte
+	hub         *ClientHub
+	mu          sync.Mutex
+	closed      atomic.Bool
+	closeCh     chan struct{}
+	callResp    chan *JSONRPCMessage
+	callTimeout atomic.Int64 // per-call response bound in ns (issue #215)
+	onClose     func()       // called when the connection is lost unexpectedly
+}
+
+// DefaultCallTimeout bounds how long Client.Call waits for a response.
+// It is comfortably longer than the server's slowest legitimate handler,
+// yet shorter than the default heartbeat interval of 30 seconds
+// (pkg/config DefaultServerConfig), so a wedged connection surfaces as a
+// heartbeat failure rather than as silence (issue #215).
+const DefaultCallTimeout = 10 * time.Second
+
+// SetCallTimeout bounds how long subsequent Call invocations wait for a
+// response. A non-positive duration restores DefaultCallTimeout.
+func (c *Client) SetCallTimeout(d time.Duration) {
+	if d <= 0 {
+		d = DefaultCallTimeout
+	}
+	c.callTimeout.Store(int64(d))
 }
 
 // ClientHub manages client connections.
@@ -635,13 +653,15 @@ func (h *ClientHub) InvokeNotificationHandler(method string, params json.RawMess
 
 // NewClient creates a new JSON-RPC client.
 func NewClient(id string, hub *ClientHub, logf func(format string, args ...interface{})) *Client {
-	return &Client{
+	c := &Client{
 		id:       id,
 		hub:      hub,
 		send:     make(chan []byte, 256),
 		closeCh:  make(chan struct{}),
 		callResp: make(chan *JSONRPCMessage, 1),
 	}
+	c.callTimeout.Store(int64(DefaultCallTimeout))
+	return c
 }
 
 // SetOnClose sets a callback that is invoked when the connection is lost.
@@ -792,8 +812,21 @@ func (c *Client) Call(method string, params interface{}) (json.RawMessage, error
 		return nil, err
 	}
 
-	// Wait for response via the readLoop goroutine
-	resp := <-c.callResp
+	// Wait for the response delivered by the readLoop goroutine, but never
+	// block forever: a lost connection or a response that never arrives
+	// must surface as an error, not a silent hang (issue #215).
+	timer := time.NewTimer(time.Duration(c.callTimeout.Load()))
+	defer timer.Stop()
+
+	var resp *JSONRPCMessage
+	select {
+	case resp = <-c.callResp:
+	case <-c.closeCh:
+		return nil, fmt.Errorf("connection closed waiting for %s response", method)
+	case <-timer.C:
+		return nil, fmt.Errorf("timeout waiting for %s response", method)
+	}
+
 	if resp.Error != nil {
 		return nil, resp.Error
 	}
