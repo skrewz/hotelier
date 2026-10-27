@@ -579,6 +579,16 @@ func (s *Server) reload(cfg config.ServerConfig) bool {
 		s.log.Printf("log_retention_days updated: %d", cfg.LogRetentionDays)
 	}
 
+	// WebSocket keepalive applies to connections created after the reload
+	// (issue #220); existing connections keep the knobs they were armed with.
+	if cfg.KeepalivePingInterval != old.KeepalivePingInterval || cfg.KeepalivePongTimeout != old.KeepalivePongTimeout {
+		s.hub.SetKeepAlive(
+			time.Duration(cfg.KeepalivePingInterval)*time.Second,
+			time.Duration(cfg.KeepalivePongTimeout)*time.Second,
+		)
+		s.log.Printf("keepalive updated: ping_interval=%ds pong_timeout=%ds", cfg.KeepalivePingInterval, cfg.KeepalivePongTimeout)
+	}
+
 	return drain
 }
 
@@ -719,6 +729,14 @@ func New(cfg config.ServerConfig) *Server {
 		webDir:         "web/static",
 		templateDir:    "web/templates",
 	}
+
+	// Mirror the guest-side WebSocket keepalive on every hub connection,
+	// including browser connections (browsers answer pings automatically).
+	// Zero config values fall back to the rpc package defaults (issue #220).
+	s.hub.SetKeepAlive(
+		time.Duration(cfg.KeepalivePingInterval)*time.Second,
+		time.Duration(cfg.KeepalivePongTimeout)*time.Second,
+	)
 
 	// Set max guests on orchestrator
 	s.orchestrator.SetMaxGuests(cfg.MaxGuests)

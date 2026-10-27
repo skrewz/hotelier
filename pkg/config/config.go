@@ -51,6 +51,15 @@ type ServerConfig struct {
 	// removal. Default: 180 seconds (6 missed heartbeats at the default 30s
 	// interval).
 	SilenceTimeout int `yaml:"silence_timeout"`
+	// KeepalivePingInterval is how often the server pings each WebSocket
+	// connection (seconds, 0 = default 10). Pings detect links that died
+	// without a FIN/RST reaching either side — the classic "proxy dropped an
+	// idle upstream" case (issue #220).
+	KeepalivePingInterval int `yaml:"keepalive_ping_interval"`
+	// KeepalivePongTimeout is how long a connection may send nothing (data
+	// or pong) before the server drops it (seconds, 0 = default 30). Keep it
+	// well inside any reverse-proxy idle timeout (issue #220).
+	KeepalivePongTimeout int `yaml:"keepalive_pong_timeout"`
 	// TaskAssignmentTimeout is the duration before an ASSIGNED task is considered
 	// stuck. If a task has been ASSIGNED for longer than this and the guest has
 	// not heartbeated with that task_id, the server fails the task and re-queues
@@ -150,6 +159,15 @@ type GuestConfig struct {
 	// SilenceTimeout is the duration of RPC silence before the server kills the task.
 	// 0 = use server default.
 	SilenceTimeout int `yaml:"silence_timeout"`
+	// KeepalivePingInterval is how often the guest sends WebSocket ping
+	// control frames (seconds, 0 = default 10). Deliberately shorter than
+	// heartbeat_interval so the transport notices a dead link before the
+	// application layer does (issue #220).
+	KeepalivePingInterval int `yaml:"keepalive_ping_interval"`
+	// KeepalivePongTimeout is how long the guest tolerates a peer that
+	// answers neither data nor pongs before declaring the connection dead
+	// and reconnecting (seconds, 0 = default 30; issue #220).
+	KeepalivePongTimeout int `yaml:"keepalive_pong_timeout"`
 	// WorkingDir is the base working directory for task execution.
 	WorkingDir string `yaml:"working_dir"`
 	// LogLevel is the logging level (debug, info, warn, error).
@@ -188,6 +206,9 @@ func DefaultServerConfig() ServerConfig {
 		LogRetentionDays:      14,  // prune task logs older than two weeks
 		MaxConcurrentTasks:    0,   // unlimited
 		ScheduleTimezone:      "UTC",
+
+		KeepalivePingInterval: 10,
+		KeepalivePongTimeout:  30,
 	}
 }
 
@@ -199,6 +220,9 @@ func DefaultGuestConfig() GuestConfig {
 		LogLevel:          "info",
 		ClientCert:        "",
 		ClientKey:         "",
+
+		KeepalivePingInterval: 10,
+		KeepalivePongTimeout:  30,
 	}
 }
 

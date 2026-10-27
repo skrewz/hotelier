@@ -12,6 +12,14 @@ tags:
   - "frontend"
 task_timeout: 1800
 heartbeat_interval: 15
+# WebSocket keepalive (issue #220): the guest pings the host and
+# reconnects if nothing (data or pong) comes back within
+# keepalive_ping_interval + keepalive_pong_timeout. The ping interval is
+# deliberately shorter than heartbeat_interval so a dead link is noticed at
+# the transport level before the application layer does. 0 selects the
+# built-in defaults (10 / 30 seconds).
+keepalive_ping_interval: 10
+keepalive_pong_timeout: 30
 working_dir: "/tmp/hotelier"
 log_level: "info"
 
