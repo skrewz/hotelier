@@ -52,3 +52,29 @@ func TestLoadGuestConfigKeepalive(t *testing.T) {
 		t.Errorf("keepalive_pong_timeout = %d, want 12", cfg.KeepalivePongTimeout)
 	}
 }
+
+// TestLoadServerConfigKeepalive verifies the server-side knobs can be set
+// from YAML too: server.example.yaml advertises them, so a typo in the
+// struct tag must not ship unnoticed.
+func TestLoadServerConfigKeepalive(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "server.yaml")
+	body := "host: 0.0.0.0\n" +
+		"port: 8080\n" +
+		"keepalive_ping_interval: 7\n" +
+		"keepalive_pong_timeout: 21\n"
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := LoadServerConfig(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.KeepalivePingInterval != 7 {
+		t.Errorf("keepalive_ping_interval = %d, want 7", cfg.KeepalivePingInterval)
+	}
+	if cfg.KeepalivePongTimeout != 21 {
+		t.Errorf("keepalive_pong_timeout = %d, want 21", cfg.KeepalivePongTimeout)
+	}
+}

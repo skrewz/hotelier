@@ -263,3 +263,74 @@ func TestServerKeepaliveKeepsIdlePeerAlive(t *testing.T) {
 	conn.Close()
 	readWG.Wait()
 }
+
+// TestKeepalivePingSurvivesTransientWriteError proves a ping that fails for
+// a transient reason does not retire the ping goroutine for the rest of the
+// connection's life. WriteControl's write-mutex timeout is the realistic
+// transient: a data write holding the mutex past keepaliveWriteTimeout makes
+// a ping fail on a perfectly healthy link. Retiring keepalive there would
+// leave this endpoint's read deadline dependent on the peer's ping cadence —
+// the very blind spot issue #220 removes.
+func TestKeepalivePingSurvivesTransientWriteError(t *testing.T) {
+	hub := NewHub(testLogf(t))
+	hub.SetKeepAlive(50*time.Millisecond, 500*time.Millisecond)
+	hub.RegisterMethod("test.ping", func(ctx context.Context, params json.RawMessage) (interface{}, *RPCError) {
+		return map[string]bool{"ok": true}, nil
+	})
+	go hub.Run()
+	url := hubWithSilentDropServer(t, hub)
+
+	var attempts, failures atomic.Int64
+	const injectedFailures = 3
+	originalWritePing := writePing
+	writePing = func(conn *websocket.Conn, deadline time.Time) error {
+		if attempts.Add(1) <= injectedFailures {
+			failures.Add(1)
+			// Stands in for gorilla's unexported write-timeout error.
+			return fmt.Errorf("websocket: write timeout")
+		}
+		return originalWritePing(conn, deadline)
+	}
+	t.Cleanup(func() { writePing = originalWritePing })
+
+	clientHub := NewClientHub(testLogf(t))
+	client := NewClient("transient-ping-test", clientHub, testLogf(t))
+	client.SetKeepAlive(50*time.Millisecond, 500*time.Millisecond)
+
+	lost := make(chan struct{})
+	var lostOnce sync.Once
+	client.SetOnClose(func() { lostOnce.Do(func() { close(lost) }) })
+
+	if err := client.Connect(url); err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	defer client.Close()
+
+	// Long enough for many pings, of which the first few fail.
+	time.Sleep(time.Second)
+
+	select {
+	case <-lost:
+		t.Fatal("connection was torn down after a transient ping failure")
+	default:
+	}
+
+	if failures.Load() != injectedFailures {
+		t.Fatalf("injected failures reached = %d, want %d (was the ping loop armed?)", failures.Load(), injectedFailures)
+	}
+	if attempts.Load() <= injectedFailures {
+		t.Fatalf("ping goroutine stopped ticking after a transient failure (%d attempts)", attempts.Load())
+	}
+
+	// The link must still carry application traffic.
+	result, err := client.Call("test.ping", nil)
+	if err != nil {
+		t.Fatalf("call after transient ping failures failed: %v", err)
+	}
+	var out struct {
+		OK bool `json:"ok"`
+	}
+	if err := json.Unmarshal(result, &out); err != nil || !out.OK {
+		t.Fatalf("unexpected call result: %s (err %v)", result, err)
+	}
+}

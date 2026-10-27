@@ -318,9 +318,10 @@ func (h *Hub) SetOnDisconnect(fn func(connectionID string)) {
 
 // SetKeepAlive configures the WebSocket keepalive parameters applied to
 // connections created afterwards via NewConnection (issue #220). A
-// non-positive value selects the corresponding package default. Call it
-// before Hub.Run; it is not synchronised against concurrent NewConnection
-// calls.
+// non-positive value selects the corresponding package default. Safe to
+// call at any time, including from Server.Reload: it takes h.mu and
+// NewConnection reads the values under h.mu.RLock. Connections already
+// created keep the knobs they were armed with.
 func (h *Hub) SetKeepAlive(pingInterval, pongTimeout time.Duration) {
 	h.mu.Lock()
 	defer h.mu.Unlock()

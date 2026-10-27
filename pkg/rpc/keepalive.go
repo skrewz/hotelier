@@ -1,6 +1,7 @@
 package rpc
 
 import (
+	"errors"
 	"time"
 
 	"github.com/gorilla/websocket"
@@ -52,6 +53,14 @@ const (
 	keepaliveWriteTimeout = 10 * time.Second
 )
 
+// writePing writes one ping control frame. It is a variable so a test can
+// inject a transient write failure; production always calls
+// websocket.Conn.WriteControl, the only write method that is safe to use
+// alongside the write loop.
+var writePing = func(conn *websocket.Conn, deadline time.Time) error {
+	return conn.WriteControl(websocket.PingMessage, nil, deadline)
+}
+
 // effectiveKeepalive resolves zero/unset knobs to the package defaults.
 func effectiveKeepalive(ping, pong time.Duration) (time.Duration, time.Duration) {
 	if ping <= 0 {
@@ -77,9 +86,9 @@ func configureKeepalive(conn *websocket.Conn, deadline time.Duration) {
 }
 
 // startKeepalivePing launches the per-connection ping goroutine. It exits
-// when closeCh is closed or a ping write fails (a failed write means the
-// connection is broken; the read deadline will surface the failure through
-// the normal failure path shortly after).
+// when closeCh is closed, or when a ping reports the connection is being
+// torn down. A failed ping on its own does *not* end the goroutine: see the
+// comment at the write site for why a transient failure must be survived.
 func startKeepalivePing(conn *websocket.Conn, interval time.Duration, closeCh chan struct{}, logf func(format string, args ...interface{}), prefix string) {
 	go func() {
 		ticker := time.NewTicker(interval)
@@ -89,10 +98,27 @@ func startKeepalivePing(conn *websocket.Conn, interval time.Duration, closeCh ch
 			case <-closeCh:
 				return
 			case <-ticker.C:
-				if err := conn.WriteControl(websocket.PingMessage, nil, time.Now().Add(keepaliveWriteTimeout)); err != nil {
-					logf("%s keepalive ping failed: %v", prefix, err)
+				err := writePing(conn, time.Now().Add(keepaliveWriteTimeout))
+				if err == nil {
+					continue
+				}
+				// A failed ping is not by itself evidence of a dead
+				// connection. WriteControl waits for the connection's
+				// write mutex and returns a timeout when another writer
+				// holds it past keepaliveWriteTimeout (see
+				// https://pkg.go.dev/github.com/gorilla/websocket@v1.5.3#hdr-Control_Messages),
+				// so one large frame into a saturated TCP send buffer
+				// would otherwise retire keepalive for the lifetime of a
+				// healthy link — leaving liveness to the peer's own ping
+				// cadence, which is the blind spot issue #220 exists to
+				// close. Keep ticking: a genuinely broken connection fails
+				// its read deadline shortly after, and that closes closeCh
+				// and ends this goroutine.
+				if errors.Is(err, websocket.ErrCloseSent) {
+					logf("%s keepalive ping stopping: connection closing: %v", prefix, err)
 					return
 				}
+				logf("%s keepalive ping failed, will retry: %v", prefix, err)
 			}
 		}
 	}()
