@@ -99,19 +99,25 @@ type Handler func(ctx context.Context, task TaskAssignment, sendLog LogCallback)
 
 // Guest is the client-side guest that connects to the Check-In Host.
 type Guest struct {
-	id            string
-	name          string
-	tags          []string
-	config        config.GuestConfig
-	client        *rpc.Client
-	hub           *rpc.ClientHub
-	log           *log.Logger
-	handler       Handler
-	mu            sync.Mutex
-	running       bool
-	cancel        context.CancelFunc // cancels the current task's context
-	stopCh        chan struct{}
-	connLost      chan struct{} // closed when the connection drops
+	id      string
+	name    string
+	tags    []string
+	config  config.GuestConfig
+	client  *rpc.Client
+	hub     *rpc.ClientHub
+	log     *log.Logger
+	handler Handler
+	mu      sync.Mutex
+	running bool
+	cancel  context.CancelFunc // cancels the current task's context
+	stopCh  chan struct{}
+	// connMu guards connLost alone. It is deliberately not g.mu: g.mu is
+	// held across blocking RPC calls (see ExecuteTask), and the
+	// connection-lost signal must never queue behind an in-flight call.
+	// connMu is a leaf lock — never take g.mu or a Client lock while
+	// holding it. See issue #218.
+	connMu        sync.Mutex
+	connLost      chan struct{} // closed when the connection drops (guarded by connMu)
 	callResp      chan *rpc.JSONRPCMessage
 	taskCh        chan TaskAssignment // incoming task assignments
 	currentTaskID string              // task currently being worked on (for task-aware heartbeat)
@@ -235,6 +241,21 @@ func (g *Guest) registerNotificationHandlers() {
 func (g *Guest) Connect() error {
 	client := rpc.NewClient(g.id, g.hub, g.log.Printf)
 
+	// Wire the connection-lost callback *before* connecting. Connect
+	// spawns the client's read loop, which reports a closed socket through
+	// this callback; registering it afterwards lets a connection that the
+	// server closes immediately (restart, proxy hiccup, early
+	// guest.register failure) be seen as lost before the callback exists —
+	// the signal was then silently dropped and Start() waited on a
+	// connLost nothing would ever close. resetConn hands *this* attempt a
+	// channel of its own and the callback is bound to it, so a late report
+	// from a previous client can never be mistaken for the loss of this
+	// connection — on a successful reconnect or after a failed attempt.
+	// The channel check runs under connMu — not g.mu, which ExecuteTask
+	// holds across blocking RPC calls — so a dying socket is reported
+	// immediately even while a Call is wedged. See issue #218.
+	client.SetOnClose(g.connLostCallback(g.resetConn()))
+
 	// Build TLS config if mTLS is configured
 	tlsConfig, err := g.config.TLSConfig()
 	if err != nil {
@@ -262,7 +283,6 @@ func (g *Guest) Connect() error {
 		}
 	}
 	g.setRPCClient(client)
-	client.SetOnClose(g.setConnLost)
 	g.log.Printf("connected to host")
 	return nil
 }
@@ -285,24 +305,70 @@ func (g *Guest) setRPCClient(c *rpc.Client) {
 	g.client = c
 }
 
-// setConnLost signals that the connection has been lost.
-// This is called by the readLoop when the WebSocket closes unexpectedly.
-func (g *Guest) setConnLost() {
-	select {
-	case <-g.connLost:
-		// already lost
-	default:
-		close(g.connLost)
+// connLostCallback builds the onClose callback Connect hands to an RPC
+// client. The callback is bound to the connLost channel that was current
+// when the client was created: if the guest has since moved on to a new
+// channel (resetConn), a late report from this client is a no-op rather
+// than a false "connection lost" for the fresh connection. The check runs
+// under connMu — never g.mu, which ExecuteTask holds across blocking RPC
+// calls — so a dying socket is always reported promptly. See issue #218.
+func (g *Guest) connLostCallback(lostCh chan struct{}) func() {
+	return func() {
+		g.connMu.Lock()
+		defer g.connMu.Unlock()
+		if g.connLost == lostCh {
+			signalChanLocked(lostCh)
+		}
 	}
 }
 
-// resetConn prepares for a new connection after a reconnect.
-// It resets the connLost channel so future disconnections can be detected.
-func (g *Guest) resetConn() {
-	g.mu.Lock()
-	defer g.mu.Unlock()
+// setConnLost signals that the connection has been lost.
+// This is called by the readLoop when the WebSocket closes unexpectedly,
+// and by the heartbeat loop when the server reports the guest unknown.
+// The check and the close happen under connMu, serialised against
+// resetConn: two concurrent callers can no longer both pass the "not yet
+// closed" check and double-close the channel, which panicked the whole
+// guest process (issue #218).
+func (g *Guest) setConnLost() {
+	g.connMu.Lock()
+	defer g.connMu.Unlock()
+	signalChanLocked(g.connLost)
+}
+
+// connLostSignal returns the channel that signals the loss of the current
+// connection. Callers must not assume it stays valid across a reconnect:
+// snapshot it under connMu (i.e. through this helper) rather than reading
+// the field in a select, which would race with resetConn.
+func (g *Guest) connLostSignal() chan struct{} {
+	g.connMu.Lock()
+	defer g.connMu.Unlock()
+	return g.connLost
+}
+
+// signalChanLocked closes ch unless it is already closed. The caller must
+// hold connMu.
+func signalChanLocked(ch chan struct{}) {
+	select {
+	case <-ch:
+		// already lost
+	default:
+		close(ch)
+	}
+}
+
+// resetConn gives the next connection attempt a connLost channel of its
+// own and returns it, so a later disconnection can be detected and so a
+// late onClose from a previous client cannot close the channel this
+// attempt is waiting on. Every Connect runs it — whether the attempt ends
+// up succeeding or not — which is what makes the channel-identity guard in
+// connLostCallback hold on every path, including an attempt that failed
+// after its own channel had already been closed (issue #218).
+func (g *Guest) resetConn() chan struct{} {
+	g.connMu.Lock()
+	defer g.connMu.Unlock()
 
 	g.connLost = make(chan struct{})
+	return g.connLost
 }
 
 // Register registers the guest with the Check-In Host. The notification
@@ -534,6 +600,10 @@ func (g *Guest) DeclineTask(taskID, reason string) {
 // Start starts the guest's main loop with automatic reconnection.
 func (g *Guest) Start() error {
 	for {
+		// Each attempt — successful or not — is bound to a connLost channel
+		// of its own by Connect's resetConn, so a stale client winding down
+		// can never close the channel a live connection is waiting on.
+		// See issue #218.
 		if err := g.connectAndRegister(); err != nil {
 			g.log.Printf("connection failed: %v, retrying in 5s...", err)
 			select {
@@ -555,14 +625,18 @@ func (g *Guest) Start() error {
 		// Start task dispatcher — handles incoming task.assign notifications
 		go g.taskDispatcher(connCtx)
 
-		// Wait for shutdown or connection loss
+		// Wait for shutdown or connection loss. The channel is snapshotted
+		// under connMu (as heartbeatLoop does) rather than read bare in the
+		// select: it is the same channel Connect bound the onClose callback
+		// to. See issue #218.
+		lost := g.connLostSignal()
 		g.log.Printf("guest ready, waiting for tasks...")
 		select {
 		case <-g.stopCh:
 			cancelConn()
 			g.log.Printf("guest shutting down")
 			return nil
-		case <-g.connLost:
+		case <-lost:
 			g.log.Printf("connection lost, reconnecting...")
 			// Cancel the connection context so the old goroutines exit.
 			cancelConn()
@@ -572,9 +646,6 @@ func (g *Guest) Start() error {
 				g.setRPCClient(nil)
 			}
 		}
-
-		// Reset for reconnect
-		g.resetConn()
 	}
 }
 
@@ -651,6 +722,12 @@ func (g *Guest) heartbeatLoop(ctx context.Context) {
 	defer ticker.Stop()
 
 	for {
+		// Snapshot the connLost channel under connMu: the Start loop
+		// replaces the field in resetConn between reconnections, and an
+		// unsynchronised read here (as part of the select below) would
+		// race with that write. See issue #218.
+		lost := g.connLostSignal()
+
 		select {
 		case <-ctx.Done():
 			return
@@ -669,7 +746,7 @@ func (g *Guest) heartbeatLoop(ctx context.Context) {
 			}
 		case <-g.stopCh:
 			return
-		case <-g.connLost:
+		case <-lost:
 			// Connection lost — the Start loop will handle reconnection.
 			return
 		}
