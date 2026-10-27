@@ -555,7 +555,6 @@ func (h *Hub) SendNotification(connID string, role ConnectionRole, method string
 type Client struct {
 	id          string
 	conn        *websocket.Conn
-	send        chan []byte
 	hub         *ClientHub
 	mu          sync.Mutex
 	closed      atomic.Bool
@@ -615,7 +614,6 @@ func (h *ClientHub) Run() {
 			h.mu.Lock()
 			if _, ok := h.connections[c.id]; ok {
 				delete(h.connections, c.id)
-				close(c.send)
 			}
 			h.mu.Unlock()
 		}
@@ -656,7 +654,6 @@ func NewClient(id string, hub *ClientHub, logf func(format string, args ...inter
 	c := &Client{
 		id:       id,
 		hub:      hub,
-		send:     make(chan []byte, 256),
 		closeCh:  make(chan struct{}),
 		callResp: make(chan *JSONRPCMessage, 1),
 	}
@@ -697,8 +694,44 @@ func (c *Client) ConnectWithTLS(url string, tlsConfig *tls.Config) error {
 	go c.hub.Run()
 	c.hub.register <- c
 	go c.readLoop()
-	go c.writeLoop()
 	return nil
+}
+
+// shutdown tears the connection down exactly once and reports whether this
+// call was the one that did it.
+func (c *Client) shutdown() bool {
+	if c.closed.Swap(true) {
+		return false
+	}
+	close(c.closeCh)
+	c.conn.Close()
+	c.hub.unregister <- c
+	return true
+}
+
+// fail declares the connection unusable: it closes closeCh, closes the
+// socket, drops the client from the hub and notifies the owner via onClose,
+// all exactly once.
+//
+// INVARIANT: every goroutine that discovers the connection is unusable — a
+// failed read, a failed write, or any other hard error — must go through
+// fail. Guest.Start() waits solely on the channel onClose closes, so a path
+// that reports the error to its caller without calling fail leaves the guest
+// convinced it is still connected (issue #217).
+//
+// onClose is invoked outside c.mu and must not call back into the client.
+func (c *Client) fail(err error) {
+	if !c.shutdown() {
+		return
+	}
+	c.hub.logf("client %s: connection lost: %v", c.id, err)
+
+	c.mu.Lock()
+	onClose := c.onClose
+	c.mu.Unlock()
+	if onClose != nil {
+		onClose()
+	}
 }
 
 func (c *Client) readLoop() {
@@ -719,9 +752,7 @@ func (c *Client) readLoop() {
 				c.hub.logf("client %s read error: %v", c.id, err)
 			}
 			// Notify the guest that the connection is lost.
-			if c.onClose != nil {
-				c.onClose()
-			}
+			c.fail(err)
 			return
 		}
 
@@ -744,24 +775,6 @@ func (c *Client) readLoop() {
 		// Handle incoming notifications from server (no ID)
 		if msg.Method != "" {
 			c.handleNotification(msg)
-		}
-	}
-}
-
-func (c *Client) writeLoop() {
-	defer c.Close()
-	for {
-		select {
-		case <-c.closeCh:
-			return
-		case data := <-c.send:
-			c.mu.Lock()
-			err := c.conn.WriteMessage(websocket.TextMessage, data)
-			c.mu.Unlock()
-			if err != nil {
-				c.hub.logf("client %s: write error: %v", c.id, err)
-				return
-			}
 		}
 	}
 }
@@ -809,6 +822,8 @@ func (c *Client) Call(method string, params interface{}) (json.RawMessage, error
 	c.mu.Unlock()
 
 	if err != nil {
+		// The socket is gone: tell the reconnect loop, not just the caller.
+		c.fail(err)
 		return nil, err
 	}
 
@@ -857,18 +872,22 @@ func (c *Client) SendNotification(method string, params interface{}) error {
 	}
 
 	c.mu.Lock()
-	defer c.mu.Unlock()
-	return c.conn.WriteMessage(websocket.TextMessage, data)
+	err = c.conn.WriteMessage(websocket.TextMessage, data)
+	c.mu.Unlock()
+	if err != nil {
+		// The socket is gone: tell the reconnect loop, not just the caller.
+		c.fail(err)
+		return err
+	}
+
+	return nil
 }
 
-// Close closes the client connection.
+// Close closes the client connection. It is the graceful path and therefore
+// deliberately does not report a connection loss; unexpected failures go
+// through fail instead.
 func (c *Client) Close() {
-	if c.closed.Swap(true) {
-		return
-	}
-	close(c.closeCh)
-	c.conn.Close()
-	c.hub.unregister <- c
+	c.shutdown()
 }
 
 // Upgrader is a wrapper around the WebSocket upgrader with configurable options.
