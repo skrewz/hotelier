@@ -561,7 +561,7 @@ type Client struct {
 	closeCh     chan struct{}
 	callResp    chan *JSONRPCMessage
 	callTimeout atomic.Int64 // per-call response bound in ns (issue #215)
-	onClose     func()       // called when the connection is lost unexpectedly
+	onClose     func()       // called when the connection is lost unexpectedly; guarded by mu
 }
 
 // DefaultCallTimeout bounds how long Client.Call waits for a response.
@@ -662,7 +662,14 @@ func NewClient(id string, hub *ClientHub, logf func(format string, args ...inter
 }
 
 // SetOnClose sets a callback that is invoked when the connection is lost.
+// The callback must be registered before Connect: Connect spawns the read
+// loop, which can observe a socket the server closed immediately — if the
+// callback were wired afterwards, that loss would be reported to nothing
+// (see issue #218). The field itself is mutex-guarded so a later
+// SetOnClose call is safe while the read loop is running.
 func (c *Client) SetOnClose(fn func()) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	c.onClose = fn
 }
 
@@ -751,7 +758,9 @@ func (c *Client) readLoop() {
 				websocket.CloseAbnormalClosure) {
 				c.hub.logf("client %s read error: %v", c.id, err)
 			}
-			// Notify the guest that the connection is lost.
+			// Notify the guest that the connection is lost. fail loads
+			// onClose under the mutex, so a concurrent SetOnClose cannot
+			// race with this read (issues #217, #218).
 			c.fail(err)
 			return
 		}

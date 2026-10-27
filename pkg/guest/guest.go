@@ -235,6 +235,27 @@ func (g *Guest) registerNotificationHandlers() {
 func (g *Guest) Connect() error {
 	client := rpc.NewClient(g.id, g.hub, g.log.Printf)
 
+	// Wire the connection-lost callback *before* connecting. Connect
+	// spawns the client's read loop, which reports a closed socket through
+	// this callback; registering it afterwards lets a connection that the
+	// server closes immediately (restart, proxy hiccup, early
+	// guest.register failure) be seen as lost before the callback exists —
+	// the signal was then silently dropped and Start() waited on a
+	// connLost nothing would ever close. The callback is bound to the
+	// connLost channel current at connect time so a stale client winding
+	// down after a reconnect cannot close the *fresh* channel and declare
+	// a brand-new connection lost. See issue #218.
+	g.mu.Lock()
+	lostCh := g.connLost
+	g.mu.Unlock()
+	client.SetOnClose(func() {
+		g.mu.Lock()
+		defer g.mu.Unlock()
+		if g.connLost == lostCh {
+			signalChanLocked(lostCh)
+		}
+	})
+
 	// Build TLS config if mTLS is configured
 	tlsConfig, err := g.config.TLSConfig()
 	if err != nil {
@@ -262,7 +283,6 @@ func (g *Guest) Connect() error {
 		}
 	}
 	g.setRPCClient(client)
-	client.SetOnClose(g.setConnLost)
 	g.log.Printf("connected to host")
 	return nil
 }
@@ -286,13 +306,26 @@ func (g *Guest) setRPCClient(c *rpc.Client) {
 }
 
 // setConnLost signals that the connection has been lost.
-// This is called by the readLoop when the WebSocket closes unexpectedly.
+// This is called by the readLoop when the WebSocket closes unexpectedly,
+// and by the heartbeat loop when the server reports the guest unknown.
+// The check and the close happen under g.mu, serialised against
+// resetConn: two concurrent callers can no longer both pass the "not yet
+// closed" check and double-close the channel, which panicked the whole
+// guest process (issue #218).
 func (g *Guest) setConnLost() {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	signalChanLocked(g.connLost)
+}
+
+// signalChanLocked closes ch unless it is already closed. The caller must
+// hold the guest mutex.
+func signalChanLocked(ch chan struct{}) {
 	select {
-	case <-g.connLost:
+	case <-ch:
 		// already lost
 	default:
-		close(g.connLost)
+		close(ch)
 	}
 }
 
@@ -651,6 +684,14 @@ func (g *Guest) heartbeatLoop(ctx context.Context) {
 	defer ticker.Stop()
 
 	for {
+		// Read the connLost channel under the mutex: the Start loop
+		// replaces the field in resetConn between reconnections, and an
+		// unsynchronised read here (as part of the select below) would
+		// race with that write. See issue #218.
+		g.mu.Lock()
+		lost := g.connLost
+		g.mu.Unlock()
+
 		select {
 		case <-ctx.Done():
 			return
@@ -669,7 +710,7 @@ func (g *Guest) heartbeatLoop(ctx context.Context) {
 			}
 		case <-g.stopCh:
 			return
-		case <-g.connLost:
+		case <-lost:
 			// Connection lost — the Start loop will handle reconnection.
 			return
 		}
