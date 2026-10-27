@@ -721,9 +721,14 @@ func (c *Client) readLoop() {
 			continue
 		}
 
-		// Handle incoming notifications from server (no ID)
+		// Handle incoming notifications from server (no ID).
+		// Dispatch off the readLoop: a handler that performs a Call would
+		// otherwise wait on callResp for a response that only readLoop can
+		// deliver — a self-deadlock that wedges the connection forever
+		// (issue #214). Guests must therefore keep their handlers safe to
+		// run concurrently.
 		if msg.Method != "" {
-			c.handleNotification(msg)
+			go c.handleNotification(msg)
 		}
 	}
 }
