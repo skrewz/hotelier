@@ -126,10 +126,7 @@ func TestGuest_ImmediateCloseAfterUpgrade_SignalsConnLost(t *testing.T) {
 			t.Fatalf("iteration %d: connect: %v", i, err)
 		}
 
-		g.mu.Lock()
-		lost := g.connLost
-		g.mu.Unlock()
-
+		lost := g.connLostSignal()
 		select {
 		case <-lost:
 			// expected — the loss was reported
@@ -137,13 +134,12 @@ func TestGuest_ImmediateCloseAfterUpgrade_SignalsConnLost(t *testing.T) {
 			t.Fatalf("iteration %d: server closed the connection immediately but connLost was never signalled", i)
 		}
 
-		// Tear down and reset for the next iteration, mirroring what
-		// the Start loop does between reconnects.
+		// Tear down for the next iteration, mirroring what the Start loop
+		// does between reconnects (Connect installs the fresh channel).
 		if c := g.rpcClient(); c != nil {
 			c.Close()
 			g.setRPCClient(nil)
 		}
-		g.resetConn()
 	}
 
 	if got := upgrades.Load(); got < iterations {
@@ -187,4 +183,174 @@ func TestGuest_ConnLostDoubleCloseDoesNotPanic(t *testing.T) {
 		t.Fatal("resetConn loop did not finish")
 	}
 	// Reaching here without a close-of-closed-channel panic is success.
+}
+
+// TestGuest_StaleOnCloseDoesNotCloseTheFreshChannel pins the
+// channel-identity guard in connLostCallback. A client that has already
+// been replaced can still be winding down when its socket finally dies;
+// its late onClose must not close the channel the *current* connection is
+// waiting on, or Start() tears a healthy connection down and the guest
+// reconnects in a loop (issue #218). The positive control at the end
+// proves the reports really do reach the guest, so the test cannot pass by
+// silently dropping every connection-lost signal.
+func TestGuest_StaleOnCloseDoesNotCloseTheFreshChannel(t *testing.T) {
+	srv, wsURL := startTestServer(t)
+
+	cfg := config.GuestConfig{
+		Name:              "Stale OnClose Guest",
+		Tags:              []string{"test"},
+		URL:               wsURL,
+		HeartbeatInterval: 3600,
+	}
+	g := New(cfg, func(ctx context.Context, task TaskAssignment, _ LogCallback) (*TaskResult, error) {
+		return &TaskResult{TaskID: task.TaskID, Success: true}, nil
+	})
+	t.Cleanup(func() {
+		for _, id := range srv.Hub().GetAllConnectionIDs() {
+			if c, ok := srv.Hub().GetConnection(id); ok {
+				c.Close()
+			}
+		}
+	})
+
+	// First attempt: bound to the channel Connect installed.
+	if err := g.Connect(); err != nil {
+		t.Fatalf("first connect: %v", err)
+	}
+	firstIDs := srv.Hub().GetAllConnectionIDs()
+	if len(firstIDs) != 1 {
+		t.Fatalf("expected exactly one server connection after the first connect, got %d", len(firstIDs))
+	}
+	stale := g.connLostSignal()
+
+	// Second attempt: Connect must hand it a channel of its own.
+	if err := g.Connect(); err != nil {
+		t.Fatalf("second connect: %v", err)
+	}
+	fresh := g.connLostSignal()
+	if fresh == stale {
+		t.Fatal("the second connect reused the first attempt's connLost channel")
+	}
+
+	// The first attempt's connection is the one that was already there.
+	staleConn, ok := srv.Hub().GetConnection(firstIDs[0])
+	if !ok {
+		t.Fatalf("connection %s not found", firstIDs[0])
+	}
+	staleConn.Close()
+
+	// The stale client's report must never close the fresh channel. Watch
+	// for a whole second so a report that lands late is still caught.
+	for i := 0; i < 100; i++ {
+		select {
+		case <-fresh:
+			t.Fatal("a late onClose from a replaced client closed the fresh connLost channel")
+		default:
+			time.Sleep(10 * time.Millisecond)
+		}
+	}
+
+	// Positive control: losing the live connection must close that channel.
+	for _, id := range srv.Hub().GetAllConnectionIDs() {
+		if c, ok := srv.Hub().GetConnection(id); ok {
+			c.Close()
+		}
+	}
+	select {
+	case <-fresh:
+		// expected — the live connection reported its own loss
+	case <-time.After(2 * time.Second):
+		t.Fatal("losing the live connection did not signal connLost; the guard was never exercised")
+	}
+}
+
+// TestGuest_FailedAttemptDoesNotPoisonTheNextConnection covers the path
+// Start's error branch takes: the socket dies while guest.register is in
+// flight, so the attempt reports its own loss and the loop retries without
+// ever having had a successful cycle. The next attempt must not inherit
+// that already-closed channel — if it did, Start's select would fire
+// "connection lost" on a healthy connection the moment it connected.
+func TestGuest_FailedAttemptDoesNotPoisonTheNextConnection(t *testing.T) {
+	upgrader := websocket.Upgrader{
+		CheckOrigin: func(r *http.Request) bool { return true },
+	}
+	mux := http.NewServeMux()
+	mux.HandleFunc("/ws", func(w http.ResponseWriter, r *http.Request) {
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		_ = conn.Close()
+	})
+	dying := httptest.NewServer(mux)
+	t.Cleanup(dying.Close)
+
+	_, healthyURL := startTestServer(t)
+
+	g := New(config.GuestConfig{
+		Name:              "Failed Attempt Guest",
+		Tags:              []string{"test"},
+		URL:               "ws" + strings.TrimPrefix(dying.URL, "http") + "/ws",
+		HeartbeatInterval: 3600,
+	}, func(ctx context.Context, task TaskAssignment, _ LogCallback) (*TaskResult, error) {
+		return &TaskResult{TaskID: task.TaskID, Success: true}, nil
+	})
+
+	if err := g.connectAndRegister(); err == nil {
+		t.Fatal("expected the attempt against a host that drops the socket to fail")
+	}
+
+	// The healthy attempt the Start loop makes next.
+	g.config.URL = healthyURL
+	if err := g.connectAndRegister(); err != nil {
+		t.Fatalf("connect and register on the healthy host: %v", err)
+	}
+
+	lost := g.connLostSignal()
+	select {
+	case <-lost:
+		t.Fatal("the healthy connection inherited the failed attempt's closed connLost channel")
+	case <-time.After(500 * time.Millisecond):
+		// expected — the connection was not declared lost
+	}
+}
+
+// TestGuest_ConnLostSignalIsNotGatedByTheGuestMutex pins the reason connMu
+// exists. ExecuteTask holds g.mu across the task.acknowledge Call, and that
+// Call can wait out the full RPC timeout on a dead socket; if reporting a
+// lost connection had to queue behind g.mu, the reconnect would stall for
+// that whole window — the "connected to nothing" symptom issue #218 is
+// about, and invisible to -race.
+func TestGuest_ConnLostSignalIsNotGatedByTheGuestMutex(t *testing.T) {
+	g := New(config.GuestConfig{ID: "test", Name: "Test", Tags: []string{"test"}},
+		func(ctx context.Context, task TaskAssignment, _ LogCallback) (*TaskResult, error) {
+			return &TaskResult{TaskID: task.TaskID, Success: true}, nil
+		})
+
+	lostCh := g.connLostSignal()
+	onClose := g.connLostCallback(lostCh)
+
+	// Stand in for ExecuteTask: g.mu held, an RPC in flight.
+	g.mu.Lock()
+	defer g.mu.Unlock()
+
+	reported := make(chan struct{})
+	go func() {
+		onClose()
+		close(reported)
+	}()
+
+	select {
+	case <-reported:
+		// expected — reporting the loss does not wait on g.mu
+	case <-time.After(2 * time.Second):
+		t.Fatal("the connection-lost signal queued behind g.mu; reconnecting would stall behind the in-flight Call")
+	}
+
+	select {
+	case <-lostCh:
+		// expected
+	default:
+		t.Fatal("the connection loss was not signalled")
+	}
 }
