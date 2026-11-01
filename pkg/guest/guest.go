@@ -314,11 +314,7 @@ func (g *Guest) setRPCClient(c *rpc.Client) {
 // calls — so a dying socket is always reported promptly. See issue #218.
 func (g *Guest) connLostCallback(lostCh chan struct{}) func() {
 	return func() {
-		g.connMu.Lock()
-		defer g.connMu.Unlock()
-		if g.connLost == lostCh {
-			signalChanLocked(lostCh)
-		}
+		g.signalConnLostIfCurrent(lostCh)
 	}
 }
 
@@ -333,6 +329,22 @@ func (g *Guest) setConnLost() {
 	g.connMu.Lock()
 	defer g.connMu.Unlock()
 	signalChanLocked(g.connLost)
+}
+
+// signalConnLostIfCurrent closes ch if and only if ch is still the
+// guest's current connLost channel. Callers that snapshot the channel for
+// one connection (a heartbeat loop, an onClose callback) must escalate
+// through this helper rather than setConnLost: if the guest has since run
+// resetConn for a new connection, the signal belongs to a replaced
+// connection and declaring the fresh one lost would drop a healthy
+// socket. See issue #218 (callback binding) and #230 (heartbeat
+// escalation).
+func (g *Guest) signalConnLostIfCurrent(ch chan struct{}) {
+	g.connMu.Lock()
+	defer g.connMu.Unlock()
+	if g.connLost == ch {
+		signalChanLocked(ch)
+	}
 }
 
 // connLostSignal returns the channel that signals the loss of the current
@@ -489,6 +501,15 @@ func (g *Guest) Unregister() error {
 // If the guest is currently executing a task, the task_id is included
 // so the server can verify the guest is heartbeating with its assigned task.
 // Retries with exponential backoff (3 attempts) on failure.
+//
+// Errors keep their type through the %w wraps so heartbeatLoop can tell a
+// server-side RPCError (connection fine — log only) from a transport
+// failure (connection gone — reconnect), as issue #219 requires. The
+// retry loop here also retries application errors, which the loop-level
+// escalation makes redundant but harmless: it only stretches the
+// worst-case escalation time (3 call timeouts + 7s of backoff), and a
+// transient blip on an otherwise healthy connection is worth retrying
+// in place before the heavier reconnect path runs.
 func (g *Guest) Heartbeat() error {
 	g.mu.Lock()
 	taskID := g.currentTaskID
@@ -712,6 +733,21 @@ func isGuestNotFound(err error) bool {
 	return false
 }
 
+// isApplicationError reports whether err is (or wraps) a JSON-RPC error
+// response from the server. Such an error proves the connection carried
+// the request and the answer, so it must not be treated as a lost
+// connection — unlike transport errors (failed writes, closed sockets,
+// Call timeouts), which arrive as plain errors. rpc.Call returns
+// *rpc.RPCError only for a JSON-RPC error response, and Heartbeat wraps
+// with %w, so errors.As across the chain discriminates reliably.
+func isApplicationError(err error) bool {
+	if err == nil {
+		return false
+	}
+	var rpcErr *rpc.RPCError
+	return errors.As(err, &rpcErr)
+}
+
 func (g *Guest) heartbeatLoop(ctx context.Context) {
 	interval := g.config.HeartbeatInterval
 	if interval == 0 {
@@ -742,7 +778,29 @@ func (g *Guest) heartbeatLoop(ctx context.Context) {
 					g.setConnLost()
 					return
 				}
-				g.log.Printf("heartbeat failed: %v", err)
+				if isApplicationError(err) {
+					// The server answered the heartbeat with an
+					// ordinary JSON-RPC error. The transport
+					// demonstrably works, so tearing the
+					// connection down would be wrong: log and
+					// keep ticking (issue #219).
+					g.log.Printf("heartbeat rejected by server: %v", err)
+					continue
+				}
+				// Everything else — a dead socket, a nil client,
+				// or exhausted Call timeouts — is a statement
+				// about the transport. A guest whose heartbeats
+				// never reach the server is, to the orchestrator,
+				// indistinguishable from a dead one; logging and
+				// retrying forever on the same dead connection
+				// wedged guests with their tasks stuck ASSIGNED
+				// (issues #230, #219). Escalate to the reconnect
+				// loop Start() owns, signalling only *this*
+				// loop's connection so a stale failure cannot
+				// drop a fresh socket (#218 discipline).
+				g.log.Printf("heartbeat failed, triggering reconnect: %v", err)
+				g.signalConnLostIfCurrent(lost)
+				return
 			}
 		case <-g.stopCh:
 			return

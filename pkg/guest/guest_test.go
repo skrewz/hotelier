@@ -1041,10 +1041,15 @@ func TestGuestHeartbeatLoop_ReconnectsOnGuestNotFound(t *testing.T) {
 	g.heartbeatForTest = originalHeartbeat
 }
 
-// TestGuestHeartbeatLoop_ContinuesOnTransientError verifies that when
-// Heartbeat() returns a transient error (not "guest not found"), the
-// heartbeatLoop continues normally without signalling connLost.
-func TestGuestHeartbeatLoop_ContinuesOnTransientError(t *testing.T) {
+// TestGuestHeartbeatLoop_ContinuesOnApplicationError verifies that when
+// Heartbeat() returns an application-level JSON-RPC error (the server
+// answered, and it is not "guest not found"), the heartbeatLoop continues
+// normally without signalling connLost. The transport demonstrably works
+// in that case — tearing the connection down would be wrong (issue #219).
+// Formerly this test asserted log-and-continue for *transport* errors
+// too; issue #230 proved that reading wedges the guest, so transport
+// failures now escalate to a reconnect.
+func TestGuestHeartbeatLoop_ContinuesOnApplicationError(t *testing.T) {
 	cfg := config.GuestConfig{
 		ID:                "test-guest-transient",
 		Name:              "Test Guest",
@@ -1056,10 +1061,12 @@ func TestGuestHeartbeatLoop_ContinuesOnTransientError(t *testing.T) {
 	}
 	g := New(cfg, handler)
 
-	// Replace Heartbeat with a stub that returns a transient error.
+	// Replace Heartbeat with a stub that returns an application error:
+	// the server answered with an ordinary RPC error.
 	originalHeartbeat := g.heartbeatForTest
 	g.heartbeatForTest = func() error {
-		return fmt.Errorf("websocket write: connection reset by peer")
+		return fmt.Errorf("heartbeat: all 3 attempts failed: %w",
+			&rpc.RPCError{Code: rpc.CodeInvalidParams, Message: "bad request"})
 	}
 
 	done := make(chan struct{})
@@ -1071,10 +1078,10 @@ func TestGuestHeartbeatLoop_ContinuesOnTransientError(t *testing.T) {
 	// Wait for a heartbeat to fire (should NOT exit).
 	time.Sleep(2 * time.Second)
 
-	// connLost should NOT be signalled for transient errors.
+	// connLost should NOT be signalled for application errors.
 	select {
 	case <-g.connLost:
-		t.Error("expected connLost to NOT be signalled for transient error")
+		t.Error("expected connLost to NOT be signalled for an application error")
 	default:
 		// expected — connLost should still be open
 	}
@@ -1082,7 +1089,7 @@ func TestGuestHeartbeatLoop_ContinuesOnTransientError(t *testing.T) {
 	// heartbeatLoop should still be running.
 	select {
 	case <-done:
-		t.Error("expected heartbeatLoop to still be running after transient error")
+		t.Error("expected heartbeatLoop to still be running after an application error")
 	default:
 		// expected — still running
 	}
