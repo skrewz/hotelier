@@ -1416,6 +1416,8 @@ func (s *Server) handleGetTasks(w http.ResponseWriter, r *http.Request) {
 			"tags":        t.Tags,
 			"repo_ref":    t.RepoRef,
 			"persona":     t.Persona,
+			"title":       t.Title,
+			"url":         t.URL,
 			"priority":    t.Priority,
 			"status":      t.Status.String(),
 			"created_at":  t.CreatedAt,
@@ -1560,7 +1562,8 @@ func (s *Server) HandleTaskDetail(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleTaskRerun creates a new task from an existing one.
-// POST /api/tasks/:id/rerun — clones the task's prompt and tags
+// POST /api/tasks/:id/rerun — clones the task's prompt, tags, title and
+// reference URL
 // into a fresh task with a new ID.
 func (s *Server) handleTaskRerun(w http.ResponseWriter, r *http.Request, taskID string) {
 	if r.Method != http.MethodPost {
@@ -1586,6 +1589,8 @@ func (s *Server) handleTaskRerun(w http.ResponseWriter, r *http.Request, taskID 
 		Tags:     orig.Tags,
 		RepoRef:  orig.RepoRef,
 		Persona:  orig.Persona,
+		Title:    orig.Title,
+		URL:      orig.URL,
 		Priority: orig.Priority,
 	}
 

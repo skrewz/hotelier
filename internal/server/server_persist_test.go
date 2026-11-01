@@ -169,3 +169,29 @@ func TestNew_WithQueueDir_MissingDirIsCreated(t *testing.T) {
 		t.Errorf("expected task file in created directory: %v", err)
 	}
 }
+
+// TestNew_WithQueueDir_RestoresTitleAndURL verifies that a task's optional
+// title and reference URL survive a restart (issue #228).
+func TestNew_WithQueueDir_RestoresTitleAndURL(t *testing.T) {
+	dir := t.TempDir()
+	writeQueuedTask(t, dir, &queue.Task{
+		ID:     "task-title-url",
+		Prompt: "persisted with extras",
+		Title:  "Persisted title",
+		URL:    "https://example.com/s-git/hotelier/pulls/1",
+		Status: queue.TaskStatusPending,
+	})
+
+	srv := newPersistingTestServer(t, dir)
+
+	task, ok := srv.TaskQueue().Get("task-title-url")
+	if !ok {
+		t.Fatal("expected task to be restored")
+	}
+	if task.Title != "Persisted title" {
+		t.Errorf("expected title 'Persisted title', got %q", task.Title)
+	}
+	if task.URL != "https://example.com/s-git/hotelier/pulls/1" {
+		t.Errorf("expected URL 'https://example.com/s-git/hotelier/pulls/1', got %q", task.URL)
+	}
+}

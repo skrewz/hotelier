@@ -125,6 +125,8 @@ type Task struct {
 	Tags       []string   `json:"tags"`
 	RepoRef    string     `json:"repo_ref,omitempty"` // git repository URL to clone (optional)
 	Persona    string     `json:"persona,omitempty"`  // persona name to apply (optional)
+	Title      string     `json:"title,omitempty"`    // human-readable title for the task (optional)
+	URL        string     `json:"url,omitempty"`      // reference URL for the task, e.g. a pull request (optional)
 	Priority   string     `json:"priority,omitempty"` // priority level: firefighter, teacher, or orangutan (default)
 	Status     TaskStatus `json:"status"`
 	CreatedAt  time.Time  `json:"created_at"`
