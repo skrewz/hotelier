@@ -117,6 +117,13 @@ curl -X POST http://localhost:8080/api/tasks \
 
 Or through the web UI dashboard.
 
+### Title and reference URL
+
+Tasks may carry an optional `title` (a short human-readable description)
+and `url` (a reference link, e.g. to a pull request). Neither is required;
+a submission without them behaves exactly as before. Both are persisted
+across restarts and returned by the task-list and task-detail endpoints.
+
 ### Deduplication
 
 Tasks may carry an optional `dedup_key`. When a task is submitted with a
@@ -284,10 +291,10 @@ subdirectories:
 
 When the server starts, persisted tasks are restored to the queue. Pending
 tasks re-enter as they were; assigned and running tasks re-enter as PENDING
-(their original prompt, tags, priority and creation time are preserved) and
-are (re-)assigned afresh when guests reconnect — a running task is
-effectively re-started from the beginning. Terminal tasks (completed, failed,
-cancelled) are not persisted.
+(their original prompt, tags, priority, title, URL and creation time are
+preserved) and are (re-)assigned afresh when guests reconnect — a running
+task is effectively re-started from the beginning. Terminal tasks
+(completed, failed, cancelled) are not persisted.
 
 Run with queue persistence:
 

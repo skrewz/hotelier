@@ -1344,3 +1344,59 @@ func TestTaskQueue_Restore_DuplicateErrors(t *testing.T) {
 		t.Error("expected error restoring duplicate task, got nil")
 	}
 }
+
+// TestTaskQueue_TitleAndURLRoundTrip verifies that a task carrying an
+// optional title and reference URL keeps both through the queue, and that
+// a task submitted without either behaves exactly as before (empty fields,
+// both keys omitted from the task's JSON encoding).
+func TestTaskQueue_TitleAndURLRoundTrip(t *testing.T) {
+	q := newTestQueue(t)
+
+	withFields := &Task{
+		ID:     "task-1",
+		Prompt: "do the thing",
+		Title:  "Fix the login button",
+		URL:    "https://example.com/s-git/hotelier/pulls/1",
+	}
+	if err := q.Add(withFields); err != nil {
+		t.Fatalf("Add failed: %v", err)
+	}
+	withoutFields := &Task{ID: "task-2", Prompt: "no extras"}
+	if err := q.Add(withoutFields); err != nil {
+		t.Fatalf("Add failed: %v", err)
+	}
+
+	task1, ok := q.Get("task-1")
+	if !ok {
+		t.Fatal("expected task-1 to exist")
+	}
+	if task1.Title != "Fix the login button" {
+		t.Errorf("expected title 'Fix the login button', got %q", task1.Title)
+	}
+	if task1.URL != "https://example.com/s-git/hotelier/pulls/1" {
+		t.Errorf("expected URL 'https://example.com/s-git/hotelier/pulls/1', got %q", task1.URL)
+	}
+
+	task2, ok := q.Get("task-2")
+	if !ok {
+		t.Fatal("expected task-2 to exist")
+	}
+	if task2.Title != "" || task2.URL != "" {
+		t.Errorf("expected empty title and URL, got %q and %q", task2.Title, task2.URL)
+	}
+
+	data, err := json.Marshal(task2)
+	if err != nil {
+		t.Fatalf("marshal failed: %v", err)
+	}
+	var raw map[string]interface{}
+	if err := json.Unmarshal(data, &raw); err != nil {
+		t.Fatalf("unmarshal failed: %v", err)
+	}
+	if _, ok := raw["title"]; ok {
+		t.Error("expected title key to be omitted when empty")
+	}
+	if _, ok := raw["url"]; ok {
+		t.Error("expected url key to be omitted when empty")
+	}
+}

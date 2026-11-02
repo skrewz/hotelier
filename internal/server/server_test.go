@@ -4501,3 +4501,133 @@ func TestHandleTasks_GET_IncludesDedupKey(t *testing.T) {
 		t.Errorf("expected dedup_key 'deploy-service-44', got %v", got)
 	}
 }
+
+// --- title / URL tests (issue #228) ---
+
+// TestHandleTasks_POST_WithTitleAndURL verifies that a submission carrying
+// an optional title and reference URL is accepted, echoed back on the 201
+// response, and surfaced in the task-list response consumed by the web UI.
+func TestHandleTasks_POST_WithTitleAndURL(t *testing.T) {
+	srv := newTestServer(t)
+
+	task := map[string]interface{}{
+		"prompt": "Build a feature",
+		"tags":   []string{"business-default"},
+		"title":  "Build feature X",
+		"url":    "https://example.com/s-git/hotelier/pulls/1",
+	}
+	body, _ := json.Marshal(task)
+	req := httptest.NewRequest(http.MethodPost, "/api/tasks", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	srv.HandleTasks(w, req)
+
+	if w.Code != http.StatusCreated {
+		t.Fatalf("expected 201, got %d", w.Code)
+	}
+
+	var createdTask queue.Task
+	if err := json.Unmarshal(w.Body.Bytes(), &createdTask); err != nil {
+		t.Fatalf("failed to unmarshal response: %v", err)
+	}
+	if createdTask.Title != "Build feature X" {
+		t.Errorf("expected title 'Build feature X', got %q", createdTask.Title)
+	}
+	if createdTask.URL != "https://example.com/s-git/hotelier/pulls/1" {
+		t.Errorf("expected URL 'https://example.com/s-git/hotelier/pulls/1', got %q", createdTask.URL)
+	}
+
+	// Task-list response (the map built by handleGetTasks) must carry both.
+	listReq := httptest.NewRequest(http.MethodGet, "/api/tasks", nil)
+	listW := httptest.NewRecorder()
+	srv.HandleTasks(listW, listReq)
+
+	var listResponse struct {
+		Tasks []map[string]interface{} `json:"tasks"`
+	}
+	if err := json.Unmarshal(listW.Body.Bytes(), &listResponse); err != nil {
+		t.Fatalf("failed to unmarshal task list: %v", err)
+	}
+	if len(listResponse.Tasks) != 1 {
+		t.Fatalf("expected 1 task, got %d", len(listResponse.Tasks))
+	}
+	if got := listResponse.Tasks[0]["title"]; got != "Build feature X" {
+		t.Errorf("expected task-list title 'Build feature X', got %v", got)
+	}
+	if got := listResponse.Tasks[0]["url"]; got != "https://example.com/s-git/hotelier/pulls/1" {
+		t.Errorf("expected task-list url 'https://example.com/s-git/hotelier/pulls/1', got %v", got)
+	}
+}
+
+// TestHandleTasks_POST_WithoutTitleOrURL verifies that a submission with
+// neither field behaves exactly as before: the task is created and both
+// fields come back empty.
+func TestHandleTasks_POST_WithoutTitleOrURL(t *testing.T) {
+	srv := newTestServer(t)
+
+	task := map[string]interface{}{
+		"prompt": "Build a feature",
+		"tags":   []string{"business-default"},
+	}
+	body, _ := json.Marshal(task)
+	req := httptest.NewRequest(http.MethodPost, "/api/tasks", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	srv.HandleTasks(w, req)
+
+	if w.Code != http.StatusCreated {
+		t.Fatalf("expected 201, got %d", w.Code)
+	}
+
+	var createdTask queue.Task
+	if err := json.Unmarshal(w.Body.Bytes(), &createdTask); err != nil {
+		t.Fatalf("failed to unmarshal response: %v", err)
+	}
+	if createdTask.Title != "" {
+		t.Errorf("expected empty title, got %q", createdTask.Title)
+	}
+	if createdTask.URL != "" {
+		t.Errorf("expected empty URL, got %q", createdTask.URL)
+	}
+}
+
+// TestHandleTaskRerun_PreservesTitleAndURL verifies that a rerun clones
+// the title and reference URL along with the prompt and tags.
+func TestHandleTaskRerun_PreservesTitleAndURL(t *testing.T) {
+	srv := newTestServer(t)
+
+	origTask := map[string]interface{}{
+		"id":     "orig-title-task",
+		"prompt": "Build a feature",
+		"title":  "Original title",
+		"url":    "https://example.com/s-git/hotelier/pulls/1",
+	}
+	body, _ := json.Marshal(origTask)
+	req := httptest.NewRequest(http.MethodPost, "/api/tasks", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	srv.HandleTasks(w, req)
+
+	if w.Code != http.StatusCreated {
+		t.Fatalf("expected 201 for original task, got %d", w.Code)
+	}
+
+	rerunReq := httptest.NewRequest(http.MethodPost, "/api/tasks/orig-title-task/rerun", nil)
+	rerunW := httptest.NewRecorder()
+	srv.HandleTaskDetail(rerunW, rerunReq)
+
+	if rerunW.Code != http.StatusCreated {
+		t.Fatalf("expected 201 for rerun, got %d", rerunW.Code)
+	}
+
+	var newTask queue.Task
+	if err := json.Unmarshal(rerunW.Body.Bytes(), &newTask); err != nil {
+		t.Fatalf("failed to unmarshal rerun response: %v", err)
+	}
+	if newTask.Title != "Original title" {
+		t.Errorf("expected rerun to carry title 'Original title', got %q", newTask.Title)
+	}
+	if newTask.URL != "https://example.com/s-git/hotelier/pulls/1" {
+		t.Errorf("expected rerun to carry URL 'https://example.com/s-git/hotelier/pulls/1', got %q", newTask.URL)
+	}
+}
