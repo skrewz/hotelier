@@ -38,6 +38,15 @@
         .task-item.cancelled { border-left-color: #94a3b8; }
         .task-btn-row { position: absolute; top: 0.5rem; right: 0.5rem; display: flex; gap: 0.25rem; align-items: center; }
         .task-id { font-weight: 600; font-size: 0.875rem; }
+        /* Task title shown ahead of the ID (issue #229). In the overview
+           list it truncates with an ellipsis (the full title stays
+           available via the element's title attribute); the drill-down
+           shows it in full. */
+        .task-title { font-weight: 600; margin-right: 0.375rem; }
+        .task-item .task-title { display: inline-block; max-width: 65%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; vertical-align: bottom; }
+        .task-detail-id .task-title { white-space: normal; overflow-wrap: anywhere; }
+        .task-title a { color: inherit; text-decoration: underline; text-underline-offset: 2px; }
+        .task-title a:hover { text-decoration: none; }
         .task-meta { font-size: 0.75rem; color: #94a3b8; margin-top: 0.25rem; }
         .task-prompt { font-size: 0.85rem; color: #cbd5e1; margin-top: 0.5rem; }
         .submit-form { padding: 1rem; background: #1e293b; border-radius: 0.375rem; margin-bottom: 1rem; }
@@ -58,6 +67,7 @@
         .task-detail { display: flex; flex-direction: column; flex: 1; min-height: 0; }
         .task-detail-header { display: flex; justify-content: space-between; align-items: center; padding: 1rem; background: #1e293b; border-radius: 0.5rem 0.5rem 0 0; border: 1px solid #334155; border-bottom: none; }
         .task-detail-id { font-weight: 600; font-size: 0.875rem; color: #38bdf8; }
+        .task-detail-id .task-title a { color: inherit; }
         .task-detail-meta { font-size: 0.75rem; color: #94a3b8; margin-top: 0.25rem; }
         /* Hourglass spinner for running tasks (issue #210). Rotation is keyed
            off the task's log count (angle = log_count % 360 degrees), so the
@@ -708,7 +718,7 @@
                 const priorityLabel = t.status === 'PENDING' && t.priority ? `<span class="badge badge-priority" title="Priority">🔜${priorityToEmoji(t.priority)}</span>` : '';
                 const personaBadge = t.persona ? ` <span class="persona-badge ${personaColourClass(t.persona)}" title="Persona: ${escapeHtml(t.persona)}">🧑 ${escapeHtml(t.persona)}</span>` : '';
                 return `<div class="task-item ${itemClass}${isActive}" onclick="selectTask('${t.id}')">
-                    <div class="task-id">${t.id} <span class="badge ${badgeClass}">${t.status}</span>${priorityLabel}${personaBadge}</div>
+                    <div class="task-id">${taskTitleHTML(t)}${t.id} <span class="badge ${badgeClass}">${t.status}</span>${priorityLabel}${personaBadge}</div>
                     <div class="task-meta">${t.assigned_to ? '→ ' + t.assigned_to : 'unassigned'} · ${new Date(t.created_at).toLocaleString()}${logCount}</div>
                     <div class="task-prompt">${escapeHtml(t.prompt.substring(0, 120))}${t.prompt.length > 120 ? '...' : ''}</div>
                     ${errorHtml}
@@ -1259,6 +1269,25 @@
             return String(value ?? '').replace(/[&<>"']/g, (c) => entities[c]);
         }
 
+        // taskTitleHTML renders a task's optional title for display in
+        // front of the task ID (issue #229). Returns '' when the task
+        // carries no title, leaving the row exactly as it rendered before.
+        // When the task also carries an http(s) reference URL the title
+        // becomes an anchor opening in a new tab; any other scheme (or no
+        // URL at all) renders as plain text, so a hostile caller cannot
+        // smuggle a javascript: link through the task metadata. Titles
+        // arrive from arbitrary callers, so they are always rendered as
+        // escaped text, never as raw HTML.
+        function taskTitleHTML(task) {
+            if (!task || !task.title) return '';
+            const text = escapeHtml(task.title);
+            let inner = text;
+            if (/^https?:\/\//i.test(task.url || '')) {
+                inner = `<a href="${escapeAttr(task.url)}" target="_blank" rel="noopener noreferrer">${text}</a>`;
+            }
+            return `<span class="task-title" title="${escapeAttr(task.title)}">${inner}</span>`;
+        }
+
 // priorityToEmoji maps the API priority string to its display emoji.
         // API values are plain English: "firefighter", "teacher", "orangutan".
         function priorityToEmoji(priority) {
@@ -1716,7 +1745,7 @@
             detailContainer.innerHTML = `
                 <div class="task-detail-header">
                     <div>
-                        <div class="task-detail-id">${escapeHtml(task.id)} <span class="badge ${badgeClass}">${task.status}</span>${personaBadge}</div>
+                        <div class="task-detail-id">${taskTitleHTML(task)}${escapeHtml(task.id)} <span class="badge ${badgeClass}">${task.status}</span>${personaBadge}</div>
                         <div class="task-detail-meta">${task.assigned_to ? 'Guest: ' + escapeHtml(task.assigned_to) : 'Unassigned'} · <span class="meta-log-count">${logs.length} log entries</span>${spinnerHTML(logs.length, isTaskRunning(task))}</div>
                     </div>
                     <div style="display:flex;gap:0.5rem;align-items:center;">
