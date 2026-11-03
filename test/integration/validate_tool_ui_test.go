@@ -329,6 +329,18 @@ func testLogEntriesTitleOnly(taskID string) []testLogEntry {
 	)
 }
 
+// testLogEntriesTitleBadURL returns log entries for a task that carries a
+// title and a non-http(s) reference URL (issue #229, review feedback on
+// PR #233), parsed from the same real Pi RPC capture as the
+// completed-task flow.
+func testLogEntriesTitleBadURL(taskID string) []testLogEntry {
+	return loadCaptureEntries(
+		"test/integration/pi_rpc_capture_completed_redacted.log",
+		taskID,
+		"Render a title whose URL is not http(s)",
+	)
+}
+
 // testLogEntriesEdit returns log entries for the edit-tool flow (issue #2),
 // parsed from a real Pi RPC capture of a run that read and then edited a
 // file. The capture contains a read tool call and an edit tool call whose
@@ -662,11 +674,13 @@ func TestValidateToolUI(t *testing.T) {
 	}
 	t.Logf("Edit task created: %s", editTaskID)
 
-	// Step 4h: Create two tasks that carry a title (issue #229): one with
-	// a title and a reference URL, one with a title only. Both stay RUNNING
-	// so they are visible under the default filter. Log entries come from a
-	// real Pi RPC capture and are delivered via the guest.log RPC, like
-	// every other task.
+	// Step 4h: Create three tasks that carry a title (issue #229): one with
+	// a title and a reference URL, one with a title only, and one whose
+	// reference URL carries a non-http(s) scheme to exercise the scheme
+	// allow-list in taskTitleHTML (review feedback on PR #233). All stay
+	// RUNNING so they are visible under the default filter. Log entries come
+	// from a real Pi RPC capture and are delivered via the guest.log RPC,
+	// like every other task.
 	titleUrlTaskID := fmt.Sprintf("ui-test-title-url-task-%d", time.Now().UnixNano())
 	titleUrlTaskTitle := "Investigate <b>flaky</b> tests & raise a fix"
 	titleUrlTaskURL := "https://example.com/pulls/1"
@@ -711,7 +725,33 @@ func TestValidateToolUI(t *testing.T) {
 	flushAccumulator(t, srv)
 	t.Logf("Title-only task created: %s (title: %s)", titleOnlyTaskID, titleOnlyTaskTitle)
 
-	validateUI(t, baseURL, taskID, compactionTaskID, failedTaskID, completedTaskID, pendingTaskID, failureReason, editTaskID, titleUrlTaskID, titleUrlTaskTitle, titleUrlTaskURL, titleOnlyTaskID, titleOnlyTaskTitle, projectRoot)
+	// The URL deliberately uses mixed-case "JavaScript:" so the assertion
+	// also covers the case-insensitivity of the /^https?:\/\//i guard: a
+	// non-http(s) scheme must downgrade the title to plain text.
+	titleBadURLTaskID := fmt.Sprintf("ui-test-title-bad-url-task-%d", time.Now().UnixNano())
+	titleBadURLTaskTitle := "Task with a hostile reference URL"
+	titleBadURLTaskURL := "JavaScript:alert(1)"
+	titleBadURLTask := &queue.Task{
+		ID:     titleBadURLTaskID,
+		Prompt: "Render a title whose URL is not http(s)",
+		Tags:   []string{"business-default"},
+		Title:  titleBadURLTaskTitle,
+		URL:    titleBadURLTaskURL,
+	}
+	if err := srv.TaskQueue().Add(titleBadURLTask); err != nil {
+		t.Fatalf("add title+bad-URL task: %v", err)
+	}
+	if err := srv.TaskQueue().Assign(titleBadURLTaskID, "ui-test-guest"); err != nil {
+		t.Fatalf("assign title+bad-URL task: %v", err)
+	}
+	if err := srv.TaskQueue().Start(titleBadURLTaskID); err != nil {
+		t.Fatalf("start title+bad-URL task: %v", err)
+	}
+	sendLogEntries(t, guestWS, titleBadURLTaskID, testLogEntriesTitleBadURL(titleBadURLTaskID))
+	flushAccumulator(t, srv)
+	t.Logf("Title+bad-URL task created: %s (title: %s, url: %s)", titleBadURLTaskID, titleBadURLTaskTitle, titleBadURLTaskURL)
+
+	validateUI(t, baseURL, taskID, compactionTaskID, failedTaskID, completedTaskID, pendingTaskID, failureReason, editTaskID, titleUrlTaskID, titleUrlTaskTitle, titleUrlTaskURL, titleOnlyTaskID, titleOnlyTaskTitle, titleBadURLTaskID, titleBadURLTaskTitle, projectRoot)
 }
 
 func validateServerLogs(t *testing.T, srv *server.Server, taskID string, expectedEntries []testLogEntry) {
@@ -816,7 +856,7 @@ func validateServerLogs(t *testing.T, srv *server.Server, taskID string, expecte
 	}
 }
 
-func validateUI(t *testing.T, baseURL, taskID, compactionTaskID, failedTaskID, completedTaskID, pendingTaskID, failureReason, editTaskID, titleUrlTaskID, titleUrlTaskTitle, titleUrlTaskURL, titleOnlyTaskID, titleOnlyTaskTitle, projectRoot string) {
+func validateUI(t *testing.T, baseURL, taskID, compactionTaskID, failedTaskID, completedTaskID, pendingTaskID, failureReason, editTaskID, titleUrlTaskID, titleUrlTaskTitle, titleUrlTaskURL, titleOnlyTaskID, titleOnlyTaskTitle, titleBadUrlTaskID, titleBadUrlTaskTitle, projectRoot string) {
 	// Allow overriding the screenshot directory via env var for manual inspection.
 	// When set, screenshots survive t.TempDir() cleanup.
 	overrideDir := os.Getenv("SCREENSHOT_DIR")
@@ -860,6 +900,8 @@ const { chromium } = require('playwright');
   const titleUrlTaskUrl = '%s';
   const titleOnlyTaskId = '%s';
   const titleOnlyTaskTitle = '%s';
+  const titleBadUrlTaskId = '%s';
+  const titleBadUrlTaskTitle = '%s';
   const expectedLogDate = '%s';
   const path = require('path');
 
@@ -1120,10 +1162,11 @@ const { chromium } = require('playwright');
   const visibleTaskCount = await page.evaluate(() => {
     return document.querySelectorAll('.task-item').length;
   });
-  // With 8 tasks (1 RUNNING + 1 FAILED + 1 PENDING + 1 COMPLETED + 1 RUNNING with persona
-  // + 1 RUNNING with compaction + 1 RUNNING with title+URL + 1 RUNNING with title only)
-  // and PENDING/COMPLETED hidden, only 6 should be visible
-  if (visibleTaskCount !== 6) fail('Should show 6 tasks (PENDING and COMPLETED hidden by default), got ' + visibleTaskCount);
+  // With 9 tasks (1 RUNNING + 1 FAILED + 1 PENDING + 1 COMPLETED + 1 RUNNING with persona
+  // + 1 RUNNING with compaction + 1 RUNNING with title+URL + 1 RUNNING with title only
+  // + 1 RUNNING with title+non-http(s) URL)
+  // and PENDING/COMPLETED hidden, only 7 should be visible
+  if (visibleTaskCount !== 7) fail('Should show 7 tasks (PENDING and COMPLETED hidden by default), got ' + visibleTaskCount);
   console.log('PASS:', visibleTaskCount, 'task(s) visible with default filter (PENDING and COMPLETED hidden)');
 
   // Verify the "N pending" expand button is visible
@@ -1262,6 +1305,16 @@ const { chromium } = require('playwright');
         titleAttr: el ? el.getAttribute('title') : null,
       };
     } else { out.only = { found: false }; }
+    const badItem = itemFor(d.titleBadUrlTaskId);
+    if (badItem) {
+      const el = badItem.querySelector('.task-title');
+      out.bad = {
+        found: true,
+        text: el ? el.textContent : null,
+        hasAnchor: !!el && el.querySelector('a') !== null,
+        hasAnchorAnywhere: badItem.querySelector('a[href^="java"]') !== null,
+      };
+    } else { out.bad = { found: false }; }
     const plainItem = itemFor(d.plainTaskId);
     out.plain = {
       found: !!plainItem,
@@ -1269,7 +1322,7 @@ const { chromium } = require('playwright');
       startsWithId: !!plainItem && plainItem.querySelector('.task-id').textContent.trim().startsWith(d.plainTaskId),
     };
     return out;
-  }, { titleUrlTaskId, titleUrlTaskTitle, titleOnlyTaskId, plainTaskId: taskId });
+  }, { titleUrlTaskId, titleUrlTaskTitle, titleOnlyTaskId, titleBadUrlTaskId, plainTaskId: taskId });
 
   if (!titleListResult.url.found) fail('title+URL task row not found in task list');
   const tu = titleListResult.url;
@@ -1288,10 +1341,14 @@ const { chromium } = require('playwright');
   if (titleListResult.only.text !== titleOnlyTaskTitle) fail('title-only overview text mismatch, got: ' + titleListResult.only.text);
   if (titleListResult.only.hasAnchor) fail('title without a URL must render as plain text, not a link');
   if (titleListResult.only.titleAttr !== titleOnlyTaskTitle) fail('title-only element should expose the full title via the title attribute');
+  if (!titleListResult.bad.found) fail('title+bad-URL task row not found in task list');
+  if (titleListResult.bad.text !== titleBadUrlTaskTitle) fail('title+bad-URL overview text mismatch, got: ' + titleListResult.bad.text);
+  if (titleListResult.bad.hasAnchor) fail('non-http(s) URL must be downgraded to plain text, not rendered as a link');
+  if (titleListResult.bad.hasAnchorAnywhere) fail('no anchor with a javascript: href may appear in the task row');
   if (!titleListResult.plain.found) fail('untitled task row not found in task list');
   if (titleListResult.plain.hasTitleEl) fail('task with no title must not render a .task-title element');
   if (!titleListResult.plain.startsWithId) fail('untitled task row should lead with the ID exactly as before');
-  console.log('PASS: overview titles render ahead of the ID — link, plain text, and absent variants all correct');
+  console.log('PASS: overview titles render ahead of the ID — link, plain text, downgraded-scheme, and absent variants all correct');
 
   await takeScreenshot('01-front-page');
 
@@ -1300,13 +1357,13 @@ const { chromium } = require('playwright');
   // =====================================================================
   console.log('=== Phase 1d: Pending expand button ===');
 
-  // With 8 tasks (RUNNING + FAILED + PENDING + COMPLETED + RUNNING-with-persona
-  // + RUNNING-with-compaction + title+URL + title-only) and PENDING/COMPLETED
-  // hidden, only 6 should be visible
+  // With 9 tasks (RUNNING + FAILED + PENDING + COMPLETED + RUNNING-with-persona
+  // + RUNNING-with-compaction + title+URL + title-only + title+non-http(s)-URL)
+  // and PENDING/COMPLETED hidden, only 7 should be visible
   const visibleBefore = await page.evaluate(() => {
     return document.querySelectorAll('.task-item').length;
   });
-  if (visibleBefore !== 6) fail('Should show 6 tasks (PENDING and COMPLETED hidden by default), got ' + visibleBefore);
+  if (visibleBefore !== 7) fail('Should show 7 tasks (PENDING and COMPLETED hidden by default), got ' + visibleBefore);
   console.log('PASS:', visibleBefore, 'tasks visible (PENDING and COMPLETED hidden)');
 
   // Verify the pending task is NOT in the list
@@ -1326,11 +1383,11 @@ const { chromium } = require('playwright');
   // Wait for re-render
   await page.waitForTimeout(500);
 
-  // Now 7 tasks should be visible (everything except COMPLETED)
+  // Now 8 tasks should be visible (everything except COMPLETED)
   const visibleAfter = await page.evaluate(() => {
     return document.querySelectorAll('.task-item').length;
   });
-  if (visibleAfter !== 7) fail('Should show 7 tasks (PENDING now shown), got ' + visibleAfter);
+  if (visibleAfter !== 8) fail('Should show 8 tasks (PENDING now shown), got ' + visibleAfter);
   console.log('PASS:', visibleAfter, 'tasks visible (PENDING shown)');
 
   // Verify the pending task IS now in the list
@@ -1380,11 +1437,11 @@ const { chromium } = require('playwright');
   await clickEl('button[data-status="PENDING"]');
   await page.waitForTimeout(500);
 
-  // Back to 6 visible tasks, "N pending" button reappears
+  // Back to 7 visible tasks, "N pending" button reappears
   const visibleFinal = await page.evaluate(() => {
     return document.querySelectorAll('.task-item').length;
   });
-  if (visibleFinal !== 6) fail('Should show 6 tasks (PENDING hidden again), got ' + visibleFinal);
+  if (visibleFinal !== 7) fail('Should show 7 tasks (PENDING hidden again), got ' + visibleFinal);
   console.log('PASS:', visibleFinal, 'tasks visible (PENDING hidden again)');
 
   const pendingBtnReappeared = await page.evaluate(() => {
@@ -3516,7 +3573,7 @@ const { chromium } = require('playwright');
   console.log('All UI validation checks passed!');
   await browser.close();
 })().catch(e => { console.error('Test failed:', e); process.exit(1); });
-`, screenshotDir, baseURL, taskID, compactionTaskID, failedTaskID, completedTaskID, pendingTaskID, failureReason, editTaskID, titleUrlTaskID, titleUrlTaskTitle, titleUrlTaskURL, titleOnlyTaskID, titleOnlyTaskTitle, logDate)
+`, screenshotDir, baseURL, taskID, compactionTaskID, failedTaskID, completedTaskID, pendingTaskID, failureReason, editTaskID, titleUrlTaskID, titleUrlTaskTitle, titleUrlTaskURL, titleOnlyTaskID, titleOnlyTaskTitle, titleBadUrlTaskID, titleBadUrlTaskTitle, logDate)
 
 	tmpScript := t.TempDir() + "/validate_ui.js"
 	if err := os.WriteFile(tmpScript, []byte(script), 0o644); err != nil {
