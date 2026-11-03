@@ -306,6 +306,29 @@ func testLogEntriesCompaction(taskID string) []testLogEntry {
 	)
 }
 
+// testLogEntriesTitleURL returns log entries for a task that carries a
+// title and a reference URL (issue #229). The entries come from the same
+// real Pi RPC capture as the completed-task flow — only the task metadata
+// differs.
+func testLogEntriesTitleURL(taskID string) []testLogEntry {
+	return loadCaptureEntries(
+		"test/integration/pi_rpc_capture_completed_redacted.log",
+		taskID,
+		"Investigate flaky integration tests and raise a fix",
+	)
+}
+
+// testLogEntriesTitleOnly returns log entries for a task that carries a
+// title but no reference URL (issue #229), parsed from the same real Pi
+// RPC capture as the completed-task flow.
+func testLogEntriesTitleOnly(taskID string) []testLogEntry {
+	return loadCaptureEntries(
+		"test/integration/pi_rpc_capture_completed_redacted.log",
+		taskID,
+		"Summarise the weekly queue report",
+	)
+}
+
 // testLogEntriesEdit returns log entries for the edit-tool flow (issue #2),
 // parsed from a real Pi RPC capture of a run that read and then edited a
 // file. The capture contains a read tool call and an edit tool call whose
@@ -639,7 +662,56 @@ func TestValidateToolUI(t *testing.T) {
 	}
 	t.Logf("Edit task created: %s", editTaskID)
 
-	validateUI(t, baseURL, taskID, compactionTaskID, failedTaskID, completedTaskID, pendingTaskID, failureReason, editTaskID, projectRoot)
+	// Step 4h: Create two tasks that carry a title (issue #229): one with
+	// a title and a reference URL, one with a title only. Both stay RUNNING
+	// so they are visible under the default filter. Log entries come from a
+	// real Pi RPC capture and are delivered via the guest.log RPC, like
+	// every other task.
+	titleUrlTaskID := fmt.Sprintf("ui-test-title-url-task-%d", time.Now().UnixNano())
+	titleUrlTaskTitle := "Investigate <b>flaky</b> tests & raise a fix"
+	titleUrlTaskURL := "https://example.com/pulls/1"
+	titleUrlTask := &queue.Task{
+		ID:     titleUrlTaskID,
+		Prompt: "Investigate flaky integration tests and raise a fix",
+		Tags:   []string{"business-default"},
+		Title:  titleUrlTaskTitle,
+		URL:    titleUrlTaskURL,
+	}
+	if err := srv.TaskQueue().Add(titleUrlTask); err != nil {
+		t.Fatalf("add title+URL task: %v", err)
+	}
+	if err := srv.TaskQueue().Assign(titleUrlTaskID, "ui-test-guest"); err != nil {
+		t.Fatalf("assign title+URL task: %v", err)
+	}
+	if err := srv.TaskQueue().Start(titleUrlTaskID); err != nil {
+		t.Fatalf("start title+URL task: %v", err)
+	}
+	sendLogEntries(t, guestWS, titleUrlTaskID, testLogEntriesTitleURL(titleUrlTaskID))
+	flushAccumulator(t, srv)
+	t.Logf("Title+URL task created: %s (title: %s, url: %s)", titleUrlTaskID, titleUrlTaskTitle, titleUrlTaskURL)
+
+	titleOnlyTaskID := fmt.Sprintf("ui-test-title-only-task-%d", time.Now().UnixNano())
+	titleOnlyTaskTitle := "Plain title with no reference URL"
+	titleOnlyTask := &queue.Task{
+		ID:     titleOnlyTaskID,
+		Prompt: "Summarise the weekly queue report",
+		Tags:   []string{"business-default"},
+		Title:  titleOnlyTaskTitle,
+	}
+	if err := srv.TaskQueue().Add(titleOnlyTask); err != nil {
+		t.Fatalf("add title-only task: %v", err)
+	}
+	if err := srv.TaskQueue().Assign(titleOnlyTaskID, "ui-test-guest"); err != nil {
+		t.Fatalf("assign title-only task: %v", err)
+	}
+	if err := srv.TaskQueue().Start(titleOnlyTaskID); err != nil {
+		t.Fatalf("start title-only task: %v", err)
+	}
+	sendLogEntries(t, guestWS, titleOnlyTaskID, testLogEntriesTitleOnly(titleOnlyTaskID))
+	flushAccumulator(t, srv)
+	t.Logf("Title-only task created: %s (title: %s)", titleOnlyTaskID, titleOnlyTaskTitle)
+
+	validateUI(t, baseURL, taskID, compactionTaskID, failedTaskID, completedTaskID, pendingTaskID, failureReason, editTaskID, titleUrlTaskID, titleUrlTaskTitle, titleUrlTaskURL, titleOnlyTaskID, titleOnlyTaskTitle, projectRoot)
 }
 
 func validateServerLogs(t *testing.T, srv *server.Server, taskID string, expectedEntries []testLogEntry) {
@@ -744,7 +816,7 @@ func validateServerLogs(t *testing.T, srv *server.Server, taskID string, expecte
 	}
 }
 
-func validateUI(t *testing.T, baseURL, taskID, compactionTaskID, failedTaskID, completedTaskID, pendingTaskID, failureReason, editTaskID, projectRoot string) {
+func validateUI(t *testing.T, baseURL, taskID, compactionTaskID, failedTaskID, completedTaskID, pendingTaskID, failureReason, editTaskID, titleUrlTaskID, titleUrlTaskTitle, titleUrlTaskURL, titleOnlyTaskID, titleOnlyTaskTitle, projectRoot string) {
 	// Allow overriding the screenshot directory via env var for manual inspection.
 	// When set, screenshots survive t.TempDir() cleanup.
 	overrideDir := os.Getenv("SCREENSHOT_DIR")
@@ -783,6 +855,11 @@ const { chromium } = require('playwright');
   const pendingTaskId = '%s';
   const failureReason = '%s';
   const editTaskId = '%s';
+  const titleUrlTaskId = '%s';
+  const titleUrlTaskTitle = '%s';
+  const titleUrlTaskUrl = '%s';
+  const titleOnlyTaskId = '%s';
+  const titleOnlyTaskTitle = '%s';
   const expectedLogDate = '%s';
   const path = require('path');
 
@@ -1043,9 +1120,10 @@ const { chromium } = require('playwright');
   const visibleTaskCount = await page.evaluate(() => {
     return document.querySelectorAll('.task-item').length;
   });
-  // With 6 tasks (1 RUNNING + 1 FAILED + 1 PENDING + 1 COMPLETED + 1 RUNNING with persona
-  // + 1 RUNNING with compaction) and PENDING/COMPLETED hidden, only 4 should be visible
-  if (visibleTaskCount !== 4) fail('Should show 4 tasks (PENDING and COMPLETED hidden by default), got ' + visibleTaskCount);
+  // With 8 tasks (1 RUNNING + 1 FAILED + 1 PENDING + 1 COMPLETED + 1 RUNNING with persona
+  // + 1 RUNNING with compaction + 1 RUNNING with title+URL + 1 RUNNING with title only)
+  // and PENDING/COMPLETED hidden, only 6 should be visible
+  if (visibleTaskCount !== 6) fail('Should show 6 tasks (PENDING and COMPLETED hidden by default), got ' + visibleTaskCount);
   console.log('PASS:', visibleTaskCount, 'task(s) visible with default filter (PENDING and COMPLETED hidden)');
 
   // Verify the "N pending" expand button is visible
@@ -1145,6 +1223,76 @@ const { chromium } = require('playwright');
     console.log('PASS: Persona badge colour class for', p.id, ':', p.className);
   }
 
+  // =====================================================================
+  // Phase 1e: Task title rendering in the overview list (issue #229)
+  // =====================================================================
+  console.log('=== Phase 1e: Task titles in overview ===');
+
+  const titleListResult = await page.evaluate((d) => {
+    const itemFor = (tid) => document.querySelector('.task-item[onclick*="' + tid + '"]');
+    const out = {};
+    const urlItem = itemFor(d.titleUrlTaskId);
+    if (urlItem) {
+      const el = urlItem.querySelector('.task-title');
+      const a = el ? el.querySelector('a') : null;
+      const cs = el ? getComputedStyle(el) : null;
+      const idLine = urlItem.querySelector('.task-id');
+      out.url = {
+        found: true,
+        text: el ? el.textContent : null,
+        hasAnchor: !!a,
+        href: a ? a.getAttribute('href') : null,
+        target: a ? a.getAttribute('target') : null,
+        rel: a ? a.getAttribute('rel') : null,
+        titleAttr: el ? el.getAttribute('title') : null,
+        noRawHTML: el ? el.querySelector('b, script') === null : false,
+        beforeId: idLine ? idLine.textContent.indexOf(el.textContent) < idLine.textContent.indexOf(d.titleUrlTaskId) : false,
+        overflow: cs ? cs.overflow : null,
+        textOverflow: cs ? cs.textOverflow : null,
+        whiteSpace: cs ? cs.whiteSpace : null,
+      };
+    } else { out.url = { found: false }; }
+    const onlyItem = itemFor(d.titleOnlyTaskId);
+    if (onlyItem) {
+      const el = onlyItem.querySelector('.task-title');
+      out.only = {
+        found: true,
+        text: el ? el.textContent : null,
+        hasAnchor: !!el && el.querySelector('a') !== null,
+        titleAttr: el ? el.getAttribute('title') : null,
+      };
+    } else { out.only = { found: false }; }
+    const plainItem = itemFor(d.plainTaskId);
+    out.plain = {
+      found: !!plainItem,
+      hasTitleEl: !!plainItem && plainItem.querySelector('.task-title') !== null,
+      startsWithId: !!plainItem && plainItem.querySelector('.task-id').textContent.trim().startsWith(d.plainTaskId),
+    };
+    return out;
+  }, { titleUrlTaskId, titleUrlTaskTitle, titleOnlyTaskId, plainTaskId: taskId });
+
+  if (!titleListResult.url.found) fail('title+URL task row not found in task list');
+  const tu = titleListResult.url;
+  if (tu.text !== titleUrlTaskTitle) fail('overview title text should equal the raw title, got: ' + tu.text);
+  if (!tu.hasAnchor) fail('title with a URL should render as an anchor in the overview');
+  if (tu.href !== titleUrlTaskUrl) fail('title anchor href should be the task URL, got: ' + tu.href);
+  if (tu.target !== '_blank') fail('title anchor should open in a new tab (target=_blank), got: ' + tu.target);
+  if (!tu.rel || !tu.rel.includes('noopener')) fail('title anchor rel should include noopener, got: ' + tu.rel);
+  if (tu.titleAttr !== titleUrlTaskTitle) fail('title element should expose the full title via the title attribute, got: ' + tu.titleAttr);
+  if (!tu.noRawHTML) fail('title must be rendered as text, not raw HTML');
+  if (!tu.beforeId) fail('title should render in front of the task ID');
+  if (tu.overflow !== 'hidden' || tu.textOverflow !== 'ellipsis' || tu.whiteSpace !== 'nowrap') {
+    fail('overview title should truncate with an ellipsis (got ' + tu.overflow + '/' + tu.textOverflow + '/' + tu.whiteSpace + ')');
+  }
+  if (!titleListResult.only.found) fail('title-only task row not found in task list');
+  if (titleListResult.only.text !== titleOnlyTaskTitle) fail('title-only overview text mismatch, got: ' + titleListResult.only.text);
+  if (titleListResult.only.hasAnchor) fail('title without a URL must render as plain text, not a link');
+  if (titleListResult.only.titleAttr !== titleOnlyTaskTitle) fail('title-only element should expose the full title via the title attribute');
+  if (!titleListResult.plain.found) fail('untitled task row not found in task list');
+  if (titleListResult.plain.hasTitleEl) fail('task with no title must not render a .task-title element');
+  if (!titleListResult.plain.startsWithId) fail('untitled task row should lead with the ID exactly as before');
+  console.log('PASS: overview titles render ahead of the ID — link, plain text, and absent variants all correct');
+
   await takeScreenshot('01-front-page');
 
   // =====================================================================
@@ -1152,12 +1300,13 @@ const { chromium } = require('playwright');
   // =====================================================================
   console.log('=== Phase 1d: Pending expand button ===');
 
-  // With 6 tasks (RUNNING + FAILED + PENDING + COMPLETED + RUNNING-with-persona
-  // + RUNNING-with-compaction) and PENDING/COMPLETED hidden, only 4 should be visible
+  // With 8 tasks (RUNNING + FAILED + PENDING + COMPLETED + RUNNING-with-persona
+  // + RUNNING-with-compaction + title+URL + title-only) and PENDING/COMPLETED
+  // hidden, only 6 should be visible
   const visibleBefore = await page.evaluate(() => {
     return document.querySelectorAll('.task-item').length;
   });
-  if (visibleBefore !== 4) fail('Should show 4 tasks (PENDING and COMPLETED hidden by default), got ' + visibleBefore);
+  if (visibleBefore !== 6) fail('Should show 6 tasks (PENDING and COMPLETED hidden by default), got ' + visibleBefore);
   console.log('PASS:', visibleBefore, 'tasks visible (PENDING and COMPLETED hidden)');
 
   // Verify the pending task is NOT in the list
@@ -1177,11 +1326,11 @@ const { chromium } = require('playwright');
   // Wait for re-render
   await page.waitForTimeout(500);
 
-  // Now 4 tasks should be visible (RUNNING + FAILED + PENDING + RUNNING-with-persona)
+  // Now 7 tasks should be visible (everything except COMPLETED)
   const visibleAfter = await page.evaluate(() => {
     return document.querySelectorAll('.task-item').length;
   });
-  if (visibleAfter !== 5) fail('Should show 5 tasks (PENDING now shown), got ' + visibleAfter);
+  if (visibleAfter !== 7) fail('Should show 7 tasks (PENDING now shown), got ' + visibleAfter);
   console.log('PASS:', visibleAfter, 'tasks visible (PENDING shown)');
 
   // Verify the pending task IS now in the list
@@ -1231,11 +1380,11 @@ const { chromium } = require('playwright');
   await clickEl('button[data-status="PENDING"]');
   await page.waitForTimeout(500);
 
-  // Back to 4 visible tasks, "N pending" button reappears
+  // Back to 6 visible tasks, "N pending" button reappears
   const visibleFinal = await page.evaluate(() => {
     return document.querySelectorAll('.task-item').length;
   });
-  if (visibleFinal !== 4) fail('Should show 4 tasks (PENDING hidden again), got ' + visibleFinal);
+  if (visibleFinal !== 6) fail('Should show 6 tasks (PENDING hidden again), got ' + visibleFinal);
   console.log('PASS:', visibleFinal, 'tasks visible (PENDING hidden again)');
 
   const pendingBtnReappeared = await page.evaluate(() => {
@@ -2986,6 +3135,86 @@ const { chromium } = require('playwright');
   console.log('PASS: Compaction block rendered with reason, status, tokens and summary');
 
   // =====================================================================
+  // Phase 13c: Task title in the drill-down header (issue #229)
+  // =====================================================================
+  console.log('=== Phase 13c: Task titles in drill-down ===');
+
+  // Back to the Tasks tab, then follow the real user journey: click the
+  // title+URL task item, which drives selectTask() → refreshTaskDetail()
+  // → renderTaskDetail().
+  await page.locator('.tab').filter({ hasText: 'Tasks' }).click();
+  await page.waitForFunction(() => document.getElementById('tab-tasks').style.display === 'block', null, { timeout: 5000 });
+  await page.evaluate((tid) => {
+    const item = document.querySelector('.task-item[onclick*="' + tid + '"]');
+    if (!item) throw new Error('title+URL task item not found');
+    item.click();
+  }, titleUrlTaskId);
+  await page.waitForSelector('.task-detail-id .task-title a', { timeout: 10000 });
+  await page.waitForTimeout(500);
+
+  const detailUrlChecks = await page.evaluate((d) => {
+    const idLine = document.querySelector('.task-detail-id');
+    const el = idLine ? idLine.querySelector('.task-title') : null;
+    const a = el ? el.querySelector('a') : null;
+    const cs = el ? getComputedStyle(el) : null;
+    return {
+      found: !!el,
+      text: el ? el.textContent : null,
+      hasAnchor: !!a,
+      href: a ? a.getAttribute('href') : null,
+      target: a ? a.getAttribute('target') : null,
+      rel: a ? a.getAttribute('rel') : null,
+      noRawHTML: el ? el.querySelector('b, script') === null : false,
+      beforeId: idLine ? idLine.textContent.indexOf(el.textContent) < idLine.textContent.indexOf(d.taskId) : false,
+      notTruncated: cs ? (cs.overflow !== 'hidden' && cs.textOverflow !== 'ellipsis' && cs.whiteSpace !== 'nowrap') : false,
+    };
+  }, { taskId: titleUrlTaskId });
+
+  if (!detailUrlChecks.found) fail('detail header should show the task title');
+  if (detailUrlChecks.text !== titleUrlTaskTitle) fail('detail title text should equal the raw title, got: ' + detailUrlChecks.text);
+  if (!detailUrlChecks.hasAnchor) fail('detail title with a URL should render as an anchor');
+  if (detailUrlChecks.href !== titleUrlTaskUrl) fail('detail title anchor href should be the task URL, got: ' + detailUrlChecks.href);
+  if (detailUrlChecks.target !== '_blank') fail('detail title anchor should open in a new tab, got target: ' + detailUrlChecks.target);
+  if (!detailUrlChecks.rel || !detailUrlChecks.rel.includes('noopener')) fail('detail title anchor rel should include noopener, got: ' + detailUrlChecks.rel);
+  if (!detailUrlChecks.noRawHTML) fail('detail title must be rendered as text, not raw HTML');
+  if (!detailUrlChecks.beforeId) fail('detail title should render in front of the task ID');
+  if (!detailUrlChecks.notTruncated) fail('drill-down should show the title in full, not truncated');
+  console.log('PASS: drill-down shows the full linked title ahead of the ID');
+
+  await takeScreenshot('13c-task-title-detail');
+
+  // Now the title-only task: plain text in the drill-down, no anchor.
+  await page.locator('.tab').filter({ hasText: 'Tasks' }).click();
+  await page.waitForFunction(() => document.getElementById('tab-tasks').style.display === 'block', null, { timeout: 5000 });
+  await page.evaluate((tid) => {
+    const item = document.querySelector('.task-item[onclick*="' + tid + '"]');
+    if (!item) throw new Error('title-only task item not found');
+    item.click();
+  }, titleOnlyTaskId);
+  await page.waitForSelector('.task-detail-id .task-title', { timeout: 10000 });
+  await page.waitForTimeout(500);
+
+  const detailOnlyChecks = await page.evaluate(() => {
+    const idLine = document.querySelector('.task-detail-id');
+    const el = idLine ? idLine.querySelector('.task-title') : null;
+    return {
+      found: !!el,
+      text: el ? el.textContent : null,
+      hasAnchor: !!el && el.querySelector('a') !== null,
+    };
+  });
+  if (!detailOnlyChecks.found) fail('detail header should show the title-only task title');
+  if (detailOnlyChecks.text !== titleOnlyTaskTitle) fail('detail title-only text mismatch, got: ' + detailOnlyChecks.text);
+  if (detailOnlyChecks.hasAnchor) fail('detail title without a URL must render as plain text, not a link');
+  console.log('PASS: drill-down renders a URL-less title as plain text');
+
+  await takeScreenshot('13c-task-title-only-detail');
+
+  // Return to the Tasks tab so later phases start from the same state.
+  await page.locator('.tab').filter({ hasText: 'Tasks' }).click();
+  await page.waitForFunction(() => document.getElementById('tab-tasks').style.display === 'block', null, { timeout: 5000 });
+
+  // =====================================================================
   // Phase 14: Mobile viewport — mobile-friendly UI (issue #203)
   // =====================================================================
   // Re-drives the real user journey (navigate → task list → select task →
@@ -3287,7 +3516,7 @@ const { chromium } = require('playwright');
   console.log('All UI validation checks passed!');
   await browser.close();
 })().catch(e => { console.error('Test failed:', e); process.exit(1); });
-`, screenshotDir, baseURL, taskID, compactionTaskID, failedTaskID, completedTaskID, pendingTaskID, failureReason, editTaskID, logDate)
+`, screenshotDir, baseURL, taskID, compactionTaskID, failedTaskID, completedTaskID, pendingTaskID, failureReason, editTaskID, titleUrlTaskID, titleUrlTaskTitle, titleUrlTaskURL, titleOnlyTaskID, titleOnlyTaskTitle, logDate)
 
 	tmpScript := t.TempDir() + "/validate_ui.js"
 	if err := os.WriteFile(tmpScript, []byte(script), 0o644); err != nil {
