@@ -32,7 +32,7 @@ func TestMain(m *testing.M) {
 // and the pi command.
 func TestBuildJailCommand(t *testing.T) {
 	got := BuildJailCommand("/usr/local/bin/guest", "/jail/spec.json", "/usr/bin/pi",
-		[]string{"--mode", "rpc", "--no-session", "--provider", "anthropic"})
+		false, []string{"--mode", "rpc", "--no-session", "--provider", "anthropic"})
 	want := []string{
 		"unshare",
 		"--map-root-user", "--mount", "--pid", "--fork",
@@ -40,6 +40,33 @@ func TestBuildJailCommand(t *testing.T) {
 		"--", "/usr/local/bin/guest", "-jail-child", "/jail/spec.json",
 		"--", "/usr/bin/pi",
 		"--mode", "rpc", "--no-session", "--provider", "anthropic",
+	}
+	if len(got) != len(want) {
+		t.Fatalf("command length = %d, want %d:\n%v", len(got), len(want), got)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("command[%d] = %q, want %q\nfull: %v", i, got[i], want[i], got)
+			break
+		}
+	}
+}
+
+// TestBuildJailCommand_MapGuestRange verifies the range-mapped spawn
+// (issue #236): with mapGuestRange set, --map-auto joins
+// --map-root-user so the outer namespace also maps the guest user's
+// subuid/subgid block. Without the flag the command must stay
+// byte-identical to the default spawn (untagged tasks must not move).
+func TestBuildJailCommand_MapGuestRange(t *testing.T) {
+	got := BuildJailCommand("/usr/local/bin/guest", "/jail/spec.json", "/usr/bin/pi",
+		true, []string{"--mode", "rpc"})
+	want := []string{
+		"unshare",
+		"--map-root-user", "--map-auto", "--mount", "--pid", "--fork",
+		"--forward-signals", "--kill-child=SIGKILL",
+		"--", "/usr/local/bin/guest", "-jail-child", "/jail/spec.json",
+		"--", "/usr/bin/pi",
+		"--mode", "rpc",
 	}
 	if len(got) != len(want) {
 		t.Fatalf("command length = %d, want %d:\n%v", len(got), len(want), got)
@@ -76,7 +103,10 @@ func TestPiClient_Start_JailSpecMissing(t *testing.T) {
 // then blocks on stdin. It returns the spec path, the host task dir and
 // the fake pi's path (which is visible at the same absolute path inside
 // the jail, because its parent dir is bind-mounted read-only).
-func buildJailTestJail(t *testing.T) (specPath, taskDir, fakePi string) {
+//
+// mapGuestRange is written into the jail spec, so Start reads the mode
+// back from the file exactly as it does in production (issue #236).
+func buildJailTestJail(t *testing.T, mapGuestRange bool) (specPath, taskDir, fakePi string) {
 	t.Helper()
 	// The base dir must not be under /tmp: the jail mounts a fresh
 	// tmpfs at /tmp, which would hide the pi-root bind (a bind under
@@ -115,11 +145,49 @@ read -r _ || true
 	}
 
 	j := jail.NewJail(log.New(io.Discard, "", 0))
-	if err := j.Setup(taskDir, homeDir, fakePi, nil); err != nil {
+	if err := j.Setup(taskDir, homeDir, fakePi, nil, mapGuestRange); err != nil {
 		t.Fatalf("jail setup: %v", err)
 	}
 	t.Cleanup(func() { _ = j.Cleanup() })
 	return j.SpecPath(), taskDir, fakePi
+}
+
+// TestPiClient_Start_JailRangeMappedArgv pins the spec-to-flag wiring at
+// the Start boundary (issue #236): a jail spec written with
+// MapGuestRange set must make Start pass that flag to BuildJailCommand,
+// so --map-auto appears in the spawn argv. Without this assertion the
+// spec read in Start would only ever be exercised with false and a
+// literal false on that call would compile and stay green — the failure
+// mode being a tagged task that silently loses its range.
+//
+// The assertion is on the argv alone. Whether --map-auto can actually
+// map a range depends on the host having /etc/subuid, /etc/subgid and a
+// passwd entry for this uid (see README.md), which test hosts need not
+// have; the range-mapped end-to-end run lives in
+// TestJail_RunChild_RangeMapped (pkg/jail), probe-gated for exactly that
+// reason.
+func TestPiClient_Start_JailRangeMappedArgv(t *testing.T) {
+	if ok, reason := jail.CanJail(); !ok {
+		t.Skipf("unprivileged namespaces unavailable: %s", reason)
+	}
+
+	specPath, taskDir, fakePi := buildJailTestJail(t, true)
+
+	ctx := context.Background()
+	c := NewClient(PiClientConfig{
+		CWD:          taskDir,
+		Log:          log.New(io.Discard, "", 0),
+		ExecPath:     fakePi,
+		JailSpecPath: specPath,
+	})
+	if err := c.Start(ctx); err != nil {
+		t.Fatalf("start in range-mapped jail failed: %v", err)
+	}
+	defer c.Stop(ctx)
+
+	if args := strings.Join(c.cmd.Args, " "); !strings.Contains(args, "--map-auto") {
+		t.Errorf("range-mapped jail spawn does not carry --map-auto:\n%s", args)
+	}
 }
 
 // TestPiClient_Start_JailRunsInsideJail is the end-to-end test: the
@@ -133,7 +201,7 @@ func TestPiClient_Start_JailRunsInsideJail(t *testing.T) {
 		t.Skipf("unprivileged namespaces unavailable: %s", reason)
 	}
 
-	specPath, taskDir, fakePi := buildJailTestJail(t)
+	specPath, taskDir, fakePi := buildJailTestJail(t, false)
 
 	// A decoy pi resolvable via PATH: the spawn must use the pinned
 	// ExecPath, not this one.
@@ -169,6 +237,12 @@ func TestPiClient_Start_JailRunsInsideJail(t *testing.T) {
 	}
 	if strings.Contains(args, pathPi) {
 		t.Errorf("spawn command contains the PATH decoy pi %q:\n%s", pathPi, args)
+	}
+	// The spec was written without range mapping, so the spawn must not
+	// ask for it (issue #236): an untagged task's argv must stay the
+	// default one.
+	if strings.Contains(args, "--map-auto") {
+		t.Errorf("default (untagged) jail spawn carries --map-auto:\n%s", args)
 	}
 
 	// The marker must appear in the host task dir with the jail cwd.

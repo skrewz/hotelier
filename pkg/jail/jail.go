@@ -25,6 +25,11 @@
 //	unshare --map-root-user --mount --pid --fork --forward-signals \
 //	    --kill-child=SIGKILL -- <guest> -jail-child <spec.json> -- <pi> <args...>
 //
+// For tasks that need a nested container runtime (rootless podman, see
+// issue #236) the outer unshare additionally gets --map-auto, mapping
+// the guest user's subuid/subgid block into the outer namespace, and
+// the nested-namespace drop mirrors that whole mapping.
+//
 // The unshare(1) binary creates the namespaces and maps the guest's uid
 // to root inside them (no capabilities required). Its forked child —
 // this package's RunChild, reached via the guest binary's -jail-child
@@ -117,8 +122,17 @@ type Plan struct {
 	Symlinks  []Link   `json:"symlinks,omitempty"`
 	// DropToUID is the id the jail child maps itself to in the nested
 	// user namespace before exec (see DropID). Zero means the child
-	// falls back to DropID.
+	// falls back to DropID. Ignored when MapGuestRange is set: the
+	// mirrored map puts the command at uid 0 in the nested namespace.
 	DropToUID int `json:"dropToUID,omitempty"`
+	// MapGuestRange requests the range-mapped jail mode (issue #236):
+	// the outer user namespace additionally maps the guest user's
+	// subuid/subgid block (unshare --map-auto), and the nested-namespace
+	// drop mirrors that whole mapping instead of the single DropToUID
+	// entry, so a nested container runtime (rootless podman) can work
+	// inside the jail. False (the default) keeps today's single-UID
+	// mapping and identical isolation.
+	MapGuestRange bool `json:"mapGuestRange,omitempty"`
 }
 
 // SpecPath is the location of the spec file inside the jail root. The
@@ -139,8 +153,13 @@ type Spec struct {
 	// jail child (see Plan.DevNodes).
 	DevNodes []string `json:"devNodes,omitempty"`
 	// DropToUID is the id the jail child maps itself to in the nested
-	// user namespace before exec (see Plan.DropToUID).
+	// user namespace before exec (see Plan.DropToUID). Ignored when
+	// MapGuestRange is set (the mirrored map yields uid 0 there).
 	DropToUID int `json:"dropToUID,omitempty"`
+	// MapGuestRange selects the range-mapped drop (see Plan.MapGuestRange,
+	// issue #236): the child mirrors the outer namespace's uid/gid maps
+	// into a multi-entry nested map instead of the single DropToUID entry.
+	MapGuestRange bool `json:"mapGuestRange,omitempty"`
 }
 
 // ReadSpec reads and validates a spec file.
@@ -179,12 +198,17 @@ func NewJail(logger *log.Logger) *Jail {
 // and writes the spec. The jail root is a sibling of the task directory
 // (<taskDir>.jail), so the task-directory sweep covers it. homeCopies is
 // the configured set of home paths to copy (relative to homeDir); nil or
-// empty selects the built-in default set (issue #201).
-func (j *Jail) Setup(taskDir, homeDir, piPath string, homeCopies []string) error {
+// empty selects the built-in default set (issue #201). mapGuestRange
+// selects the range-mapped mode for nested container runtimes such as
+// rootless podman (issue #236); false keeps today's single-UID mapping.
+func (j *Jail) Setup(taskDir, homeDir, piPath string, homeCopies []string, mapGuestRange bool) error {
 	facts, err := Discover(taskDir, homeDir, piPath, homeCopies)
 	if err != nil {
 		return err
 	}
+	// Not a host fact: a per-task request (podman tag), carried like this
+	// so BuildPlan stays the single place the plan is composed.
+	facts.MapGuestRange = mapGuestRange
 	plan, err := BuildPlan(facts)
 	if err != nil {
 		return err

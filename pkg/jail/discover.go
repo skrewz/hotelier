@@ -50,6 +50,10 @@ type Facts struct {
 	// skill's config file) copied into the skeleton with resolved-copy
 	// semantics, like the /etc files. Names are relative to HomeDir.
 	HomeCopyFiles []string
+	// MapGuestRange requests the range-mapped jail mode for nested
+	// container runtimes (issue #236). It is not probed from the host:
+	// the caller (Jail.Setup) sets it from the task's tags.
+	MapGuestRange bool
 }
 
 // etcFiles are the /etc files copied into every jail (best effort —

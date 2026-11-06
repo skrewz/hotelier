@@ -22,14 +22,32 @@ package pi
 //
 // guestBin is the guest binary to re-exec (os.Executable()); specPath is
 // the jail spec file on the host; piBin and piArgs are the command to
-// exec inside the jail.
-func BuildJailCommand(guestBin, specPath, piBin string, piArgs []string) []string {
+// exec inside the jail. mapGuestRange selects the range-mapped mode
+// (issue #236): --map-auto then also maps the guest user's
+// subuid/subgid block into the outer namespace, matching the multi-entry
+// drop the jail child performs for such tasks. The functional floor is
+// util-linux 2.40 (the drop passes repeated --map-users/--map-groups
+// arguments and those only accumulate from 2.40; see unshare(1)); the
+// supported floor is 2.41.6 (2.42.3 on the 2.42 series) because the
+// spawn chain ends in an unshare exec and CVE-2026-78408 leaks
+// descriptors across it on earlier releases — see README.md. Without the
+// flag the command is byte-identical to the default spawn.
+func BuildJailCommand(guestBin, specPath, piBin string, mapGuestRange bool, piArgs []string) []string {
 	cmd := []string{
 		"unshare",
-		"--map-root-user", "--mount", "--pid", "--fork",
+		"--map-root-user",
+	}
+	if mapGuestRange {
+		// --map-root-user takes precedence for id 0; the --map-auto
+		// block is shifted to start at inner id 1 (unshare(1)), leaving
+		// the single-UID mapping intact and the range above it.
+		cmd = append(cmd, "--map-auto")
+	}
+	cmd = append(cmd,
+		"--mount", "--pid", "--fork",
 		"--forward-signals", "--kill-child=SIGKILL",
 		"--", guestBin, "-jail-child", specPath,
 		"--", piBin,
-	}
+	)
 	return append(cmd, piArgs...)
 }

@@ -355,6 +355,55 @@ read-write path, mounted at the fixed in-jail path `/task`; everything
 else is read-only or a private copy, so writes inside the jail never
 reach the host. The jail is removed when the task completes.
 
+Tasks that need a **nested container runtime** (podman) carry the
+`podman` tag (issue #236). Such a task's jail additionally maps the
+guest user's subuid/subgid block (`unshare --map-root-user --map-auto`,
+util-linux >= 2.41.6) and the nested-namespace drop writes a multi-entry
+map mirroring it instead of the single-UID entry, so image layers can be
+unpacked across the range. Two version floors are involved. The
+*functional* one is 2.40, and it is the drop's, not the flag's:
+`--map-auto` itself is older, but the drop passes the mirrored ranges as
+repeated `--map-users`/`--map-groups` arguments and
+[unshare(1)](https://man7.org/linux/man-pages/man1/unshare.1.html) only
+accumulates ranges across multiple occurrences from 2.40 — on earlier
+versions each occurrence overwrites the previous one and only the last
+range would be mapped. The *supported* floor is higher for security
+reasons (see below). In that mode the command is uid 0 inside the
+*nested* namespace but still holds no capabilities in the outer one —
+the issue #198 property is unchanged. Tasks without the tag keep the
+single-UID mapping unchanged.
+
+Range-mapped tasks need three host-side prerequisites, none of which the
+plain jail path requires (all are provisioned by config management):
+`/etc/subuid` and `/etc/subgid` entries for the guest user (without them
+`--map-auto` maps no range and podman will not work); the `uidmap`
+package, because from 2.40 `unshare` writes a range map through
+`newuidmap`/`newgidmap` unless it is already euid 0
+([unshare(1)](https://man7.org/linux/man-pages/man1/unshare.1.html));
+and a `/etc/passwd` entry for the guest user, which those helpers need
+to resolve its subuid ownership. A tagged task on a host missing any of
+them fails loudly at spawn rather than running mis-mapped. In range mode
+the command is uid 0 in the nested namespace, so podman there selects
+the rootful engine and wants a writable container store; where that
+store lives inside the jail is guest provisioning work, not jail code.
+
+The supported util-linux floor for range-mapped tasks is **>= 2.41.6**
+(**>= 2.42.3** on the 2.42 series). Nothing functional needs it — 2.40
+behaviour is enough for the map itself — but
+[CVE-2026-78408](https://lwn.net/Articles/1103311/), the missing
+`O_CLOEXEC` file-descriptor leak in `unshare(1)`/`nsenter(1)`, is fixed
+only in those releases: the 2.40 series stopped at 2.40.4 and never
+received it. (The advisory's other half — closing the `cgroup.procs` fd
+after `nsenter --join-cgroup` — needs 2.42.4 and never reached the 2.41
+branch; it does not apply here, because the jail runs `unshare` and
+never joins a cgroup.) The jail is an unusual `unshare` consumer in that the last
+`exec` before the task code runs is an `unshare` `exec` (the chain is
+`unshare` → `guest -jail-child` → `unshare` → task command, and
+`--kill-child` makes `unshare` hold a `pidfd`), so an fd leaking across
+that `exec` lands inside the jail. The pin is a host-provisioning
+matter like the three prerequisites above, and is tracked there; a guest
+host on 2.40.x does not satisfy it.
+
 Jail isolation is always enabled and cannot be disabled. No capabilities
 are required — the only prerequisite is kernel support for unprivileged
 user namespaces (`kernel.unprivileged_userns_clone=1` on Debian). The

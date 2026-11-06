@@ -27,6 +27,10 @@ func BuildPlan(f Facts) (Plan, error) {
 		// exec, so the command holds no capabilities in the outer
 		// namespace (issue #198).
 		DropToUID: DropID,
+		// Range mapping for nested container runtimes is a per-task
+		// request, not a host fact (issue #236); false keeps today's
+		// single-UID mapping.
+		MapGuestRange: f.MapGuestRange,
 	}
 
 	// A fresh /dev tmpfs. The mode must not be the tmpfs default 1777:

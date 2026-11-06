@@ -16,6 +16,8 @@ import (
 	"sync/atomic"
 	"syscall"
 	"time"
+
+	"hotelier/pkg/jail"
 )
 
 // Event represents a pi RPC event streamed to stdout.
@@ -186,9 +188,13 @@ func (c *PiClient) Start(ctx context.Context) error {
 	// resolving here.
 	if c.jailSpecPath != "" {
 		// Fail synchronously when the spec is missing, rather than letting
-		// the jail child die after the namespaces are created.
-		if _, err := os.Stat(c.jailSpecPath); err != nil {
-			return fmt.Errorf("jail spec %s: %w", c.jailSpecPath, err)
+		// the jail child die after the namespaces are created. The spec is
+		// also the source of the range-mapping mode (issue #236): the
+		// outer flags and the child's drop must agree, and they read it
+		// from the same file.
+		spec, err := jail.ReadSpec(c.jailSpecPath)
+		if err != nil {
+			return err
 		}
 		if !filepath.IsAbs(piBin) {
 			resolved, err := exec.LookPath("pi")
@@ -204,7 +210,7 @@ func (c *PiClient) Start(ctx context.Context) error {
 		if err != nil {
 			return fmt.Errorf("resolve guest binary for jail: %w", err)
 		}
-		full := BuildJailCommand(guestBin, c.jailSpecPath, piBin, args)
+		full := BuildJailCommand(guestBin, c.jailSpecPath, piBin, spec.MapGuestRange, args)
 		c.cmd = exec.CommandContext(ctx, full[0], full[1:]...)
 	} else {
 		c.cmd = exec.CommandContext(ctx, piBin, args...)
