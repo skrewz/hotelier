@@ -122,7 +122,8 @@ type Plan struct {
 	Symlinks  []Link   `json:"symlinks,omitempty"`
 	// DropToUID is the id the jail child maps itself to in the nested
 	// user namespace before exec (see DropID). Zero means the child
-	// falls back to DropID.
+	// falls back to DropID. Ignored when MapGuestRange is set: the
+	// mirrored map puts the command at uid 0 in the nested namespace.
 	DropToUID int `json:"dropToUID,omitempty"`
 	// MapGuestRange requests the range-mapped jail mode (issue #236):
 	// the outer user namespace additionally maps the guest user's
@@ -152,7 +153,8 @@ type Spec struct {
 	// jail child (see Plan.DevNodes).
 	DevNodes []string `json:"devNodes,omitempty"`
 	// DropToUID is the id the jail child maps itself to in the nested
-	// user namespace before exec (see Plan.DropToUID).
+	// user namespace before exec (see Plan.DropToUID). Ignored when
+	// MapGuestRange is set (the mirrored map yields uid 0 there).
 	DropToUID int `json:"dropToUID,omitempty"`
 	// MapGuestRange selects the range-mapped drop (see Plan.MapGuestRange,
 	// issue #236): the child mirrors the outer namespace's uid/gid maps

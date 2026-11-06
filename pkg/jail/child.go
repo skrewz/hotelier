@@ -142,6 +142,10 @@ func RunChild(specPath string, argv []string) error {
 // in B with the full range beneath it; capabilities in B grant nothing
 // over the objects of A (the jail's mounts belong to A), so the #198
 // property — no capabilities in A — is unchanged.
+//
+// innerID is ignored in range mode: mirroring puts the command at uid 0
+// in B by construction, so Plan.DropToUID / Spec.DropToUID carry no
+// meaning there even though the plan and spec still hold their default.
 func dropAndExec(innerID int, mapGuestRange bool, argv []string) error {
 	if innerID <= 0 {
 		innerID = DropID
