@@ -3430,6 +3430,13 @@ const { chromium } = require('playwright');
   await fsPage.waitForSelector('#log-view .task-detail-body', { timeout: 10000 });
   await fsPage.waitForTimeout(500);
 
+  // Since issue #234 the sidebar is collapsed behind a drawer toggle by
+  // default on a phone. Open the drawer here so this phase still sees the
+  // stacked split-screen view it was written against; the collapsed-by-
+  // default behaviour is phase 16's subject.
+  await fsPage.evaluate(() => document.querySelector('.sidebar-toggle').click());
+  await fsPage.waitForTimeout(300);
+
   const fsBefore = await fsPage.evaluate(() => {
     const btn = document.querySelector('.task-detail-fullscreen-btn');
     return {
@@ -3569,6 +3576,135 @@ const { chromium } = require('playwright');
   if (fsJsErrors.length > 0) fail('mobile full-screen: page JS errors: ' + fsJsErrors.join('; '));
   console.log('PASS: full-screen journey raised no JS errors');
   await fsPage.close();
+
+  // =====================================================================
+  // Phase 16: Sidebar drawer on mobile (issue #234)
+  // =====================================================================
+  // The Guests list and the Submit Task form are the least interesting part
+  // of the UI, so on a phone they are collapsed behind a draw-down toggle in
+  // the top bar (issue #234). By default only the top bar and the task area
+  // fill the screen; the panels drop in on demand. Nothing is removed — the
+  // drawer holds the very same markup the desktop sidebar shows.
+  console.log('=== Phase 16: Mobile sidebar drawer ===');
+
+  // 16a: Desktop is untouched — no toggle, sidebar always shown.
+  const desktopDrawer = await browser.newPage({ viewport: { width: 1280, height: 900 } });
+  await desktopDrawer.goto(baseURL);
+  await desktopDrawer.waitForSelector('.task-item', { timeout: 10000 });
+  const desktopDrawerState = await desktopDrawer.evaluate(() => {
+    const btn = document.querySelector('.sidebar-toggle');
+    const sidebar = document.querySelector('.sidebar');
+    return {
+      btnDisplay: btn ? getComputedStyle(btn).display : 'missing',
+      sidebarH: sidebar.offsetHeight,
+      panels: Array.from(sidebar.querySelectorAll('.panel h3')).map(h => h.textContent.trim()),
+      guests: sidebar.querySelectorAll('#guest-list .guest-item').length,
+    };
+  });
+  if (desktopDrawerState.btnDisplay !== 'none') {
+    fail('desktop: drawer toggle should be hidden (display=' + desktopDrawerState.btnDisplay + ')');
+  }
+  if (desktopDrawerState.sidebarH === 0) fail('desktop: sidebar must stay visible on a big screen');
+  console.log('PASS: drawer toggle hidden, sidebar always shown on a desktop viewport');
+  await desktopDrawer.close();
+
+  // 16b: Phone — collapsed by default. The toggle sits in the top bar, the
+  // sidebar is out of the flow, and the task area starts directly under the
+  // header instead of being pushed down by the panels.
+  const drawer = await browser.newPage({ viewport: { width: 390, height: 844 } });
+  const drawerJsErrors = [];
+  drawer.on('pageerror', err => drawerJsErrors.push(err.message));
+  await drawer.goto(baseURL);
+  await drawer.waitForLoadState('networkidle');
+  await drawer.waitForSelector('.task-item', { timeout: 10000 });
+  await drawer.waitForTimeout(500);
+  const drawerClosed = await drawer.evaluate(() => {
+    const btn = document.querySelector('.sidebar-toggle');
+    const sidebar = document.querySelector('.sidebar');
+    const header = document.querySelector('.header');
+    const main = document.querySelector('.main');
+    return {
+      on: document.body.classList.contains('sidebar-open'),
+      btnVisible: btn !== null && btn.offsetHeight > 0,
+      ariaExpanded: btn ? btn.getAttribute('aria-expanded') : null,
+      ariaControls: btn ? btn.getAttribute('aria-controls') : null,
+      sidebarH: sidebar.offsetHeight,
+      headerH: header.offsetHeight,
+      mainTop: Math.round(main.getBoundingClientRect().top),
+      headerBottom: Math.round(header.getBoundingClientRect().bottom),
+      taskItems: document.querySelectorAll('.task-item').length,
+    };
+  });
+  if (drawerClosed.headerH === 0) fail('mobile: top bar must be visible with the drawer closed');
+  if (drawerClosed.on) fail('mobile: drawer must start closed so only the top bar and the tasks are shown by default');
+  if (!drawerClosed.btnVisible) fail('mobile: drawer toggle must live in the top bar');
+  if (drawerClosed.ariaExpanded !== 'false') fail('mobile: toggle should report aria-expanded=false when closed, got ' + drawerClosed.ariaExpanded);
+  if (drawerClosed.ariaControls !== 'sidebar') fail('mobile: toggle should control the sidebar, got aria-controls=' + drawerClosed.ariaControls);
+  if (drawerClosed.sidebarH !== 0) fail('mobile: sidebar must be hidden by default (height ' + drawerClosed.sidebarH + 'px)');
+  if (drawerClosed.mainTop > drawerClosed.headerBottom + 1) {
+    fail('mobile: task area should sit directly under the top bar (main top ' + drawerClosed.mainTop + ', header bottom ' + drawerClosed.headerBottom + ')');
+  }
+  if (drawerClosed.taskItems === 0) fail('mobile: task list must be visible with the drawer closed');
+  await assertNoHorizontalOverflow(drawer, 'mobile drawer closed');
+  console.log('PASS: drawer starts closed, task area directly under the top bar');
+  await drawer.screenshot({ path: require('path').join(screenshotDir, '16a-mobile-drawer-closed.png'), fullPage: true });
+  console.log('Screenshot saved:', require('path').join(screenshotDir, '16a-mobile-drawer-closed.png'));
+
+  // 16c: Open the drawer — the same panels drop in. Compare the panel
+  // headings and the rendered guests against desktop so the issue's "we must
+  // not lose any UI information" rule is checked, not just assumed.
+  await drawer.evaluate(() => document.querySelector('.sidebar-toggle').click());
+  await drawer.waitForTimeout(300);
+  const drawerOpen = await drawer.evaluate(() => {
+    const btn = document.querySelector('.sidebar-toggle');
+    const sidebar = document.querySelector('.sidebar');
+    return {
+      on: document.body.classList.contains('sidebar-open'),
+      ariaExpanded: btn.getAttribute('aria-expanded'),
+      sidebarH: sidebar.offsetHeight,
+      sidebarW: Math.round(sidebar.getBoundingClientRect().width),
+      innerW: window.innerWidth,
+      panels: Array.from(sidebar.querySelectorAll('.panel h3')).map(h => h.textContent.trim()),
+      guests: sidebar.querySelectorAll('#guest-list .guest-item').length,
+      guestListH: sidebar.querySelector('#guest-list').offsetHeight,
+      submitBtnH: sidebar.querySelector('.submit-form .btn').offsetHeight,
+      promptH: sidebar.querySelector('#task-prompt').offsetHeight,
+      priorityInputs: sidebar.querySelectorAll('input[name="task-priority"]').length,
+    };
+  });
+  if (!drawerOpen.on) fail('mobile: toggling should open the drawer');
+  if (drawerOpen.ariaExpanded !== 'true') fail('mobile: toggle should report aria-expanded=true when open, got ' + drawerOpen.ariaExpanded);
+  if (drawerOpen.sidebarH === 0) fail('mobile: opening the drawer must reveal the sidebar');
+  if (drawerOpen.sidebarW > drawerOpen.innerW + 1) fail('mobile: drawer must fit the viewport (' + drawerOpen.sidebarW + ' > ' + drawerOpen.innerW + ')');
+  if (drawerOpen.guestListH === 0) fail('mobile: guests list must be visible in the drawer');
+  if (drawerOpen.submitBtnH === 0 || drawerOpen.promptH === 0) fail('mobile: submit form must be usable from the drawer');
+  if (drawerOpen.priorityInputs !== 3) fail('mobile: priority choice should offer three options, got ' + drawerOpen.priorityInputs);
+  if (JSON.stringify(drawerOpen.panels) !== JSON.stringify(desktopDrawerState.panels)) {
+    fail('mobile: drawer must carry the same panels as the desktop sidebar — desktop ' + JSON.stringify(desktopDrawerState.panels) + ' vs mobile ' + JSON.stringify(drawerOpen.panels));
+  }
+  if (drawerOpen.guests !== desktopDrawerState.guests) fail('mobile: drawer shows ' + drawerOpen.guests + ' guests, desktop shows ' + desktopDrawerState.guests);
+  await assertNoHorizontalOverflow(drawer, 'mobile drawer open');
+  console.log('PASS: drawer drops in with the guests list and submit form intact (' + drawerOpen.panels.join(', ') + ')');
+  await drawer.screenshot({ path: require('path').join(screenshotDir, '16b-mobile-drawer-open.png'), fullPage: true });
+  console.log('Screenshot saved:', require('path').join(screenshotDir, '16b-mobile-drawer-open.png'));
+
+  // 16d: The same button collapses it again — one control, both directions,
+  // as with the full-screen toggle (issue #205).
+  await drawer.evaluate(() => document.querySelector('.sidebar-toggle').click());
+  await drawer.waitForTimeout(300);
+  const drawerReclosed = await drawer.evaluate(() => ({
+    on: document.body.classList.contains('sidebar-open'),
+    ariaExpanded: document.querySelector('.sidebar-toggle').getAttribute('aria-expanded'),
+    sidebarH: document.querySelector('.sidebar').offsetHeight,
+  }));
+  if (drawerReclosed.on) fail('mobile: toggling again should close the drawer');
+  if (drawerReclosed.ariaExpanded !== 'false') fail('mobile: toggle should report aria-expanded=false after closing');
+  if (drawerReclosed.sidebarH !== 0) fail('mobile: sidebar must be hidden again after closing the drawer');
+  console.log('PASS: the same toggle closes the drawer again');
+
+  if (drawerJsErrors.length > 0) fail('mobile drawer: page JS errors: ' + drawerJsErrors.join('; '));
+  console.log('PASS: mobile drawer journey raised no JS errors');
+  await drawer.close();
 
   console.log('All UI validation checks passed!');
   await browser.close();
