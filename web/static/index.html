@@ -335,6 +335,11 @@
            narrow-viewport media query below. */
         .task-detail-fullscreen-btn { display: none; }
 
+        /* The sidebar drawer (issue #234) is a narrow-viewport affordance for
+           the same reason: on a big screen the sidebar is always shown, so the
+           button would have nothing to do. Hidden by default, revealed below. */
+        .sidebar-toggle { display: none; }
+
         /* Mobile-friendly layout (issue #203) — big screens are untouched; */
         /* everything below only applies at narrow viewports.           */
         @media (max-width: 768px) {
@@ -344,7 +349,18 @@
             .stats { gap: 1rem; }
             .stat-value { font-size: 1.15rem; }
             .container { height: auto; flex: 1; min-height: 0; flex-direction: column; }
-            .sidebar { width: 100%; max-height: 45vh; border-right: none; border-bottom: 1px solid #334155; }
+            /* The sidebar panels are the least interesting part of the UI, so
+               on a phone they are collapsed behind the toggle in the top bar
+               (issue #234): by default the top bar and the task area get the
+               screen, and the sidebar drops in below the header on demand.
+               The markup is unchanged, so nothing is lost — the drawer holds
+               the same panels the desktop layout shows side by side. The open
+               state lives on <body> (see setSidebarOpen) so a re-render cannot
+               lose it, and this rule stays before the logs-fullscreen rules
+               below so full screen keeps hiding the sidebar. */
+            .sidebar-toggle { display: inline-block; margin-left: auto; }
+            .sidebar { display: none; width: 100%; max-height: 45vh; border-right: none; border-bottom: 1px solid #334155; }
+            body.sidebar-open .sidebar { display: block; }
             .main { padding: 0.75rem; }
             .tab { padding: 0.5rem 0.75rem; }
             /* Keep long task IDs/meta from forcing a min-width wider than the screen */
@@ -398,10 +414,13 @@
                 <div class="stat-label">Running</div>
             </div>
         </div>
+        <!-- Draw-down control for the sidebar panels (issue #234). Shown only
+             at narrow viewports, where the sidebar is collapsed by default. -->
+        <button class="btn btn-sm btn-ghost sidebar-toggle" onclick="toggleSidebar()" aria-expanded="false" aria-controls="sidebar" title="Show the guests list and the submit form">&#x2630; Panels</button>
     </div>
 
     <div class="container">
-        <div class="sidebar">
+        <div class="sidebar" id="sidebar">
             <div class="panel">
                 <h3>🤖 Guests</h3>
                 <div id="guest-list"></div>
@@ -1387,6 +1406,31 @@
         narrowViewport.addEventListener('change', () => {
             if (!narrowViewport.matches) setLogsFullscreen(false);
         });
+
+        // =====================================================================
+        // Sidebar drawer on narrow viewports (issue #234)
+        // =====================================================================
+        // The Guests list and the Submit Task form are the least interesting
+        // part of the dashboard, so on a phone they are collapsed behind a
+        // draw-down button in the top bar and the task area takes the screen.
+        // As with full-screen logs (issue #205) the state lives on <body>, so
+        // polling and WebSocket re-renders cannot lose it, and the one button
+        // is both the open and the close affordance. Wider viewports ignore
+        // the class: there the CSS shows the sidebar unconditionally and hides
+        // the toggle, so crossing the breakpoint needs no clean-up here.
+        function setSidebarOpen(on) {
+            document.body.classList.toggle('sidebar-open', on);
+            const btn = document.querySelector('.sidebar-toggle');
+            if (btn) {
+                btn.textContent = on ? '\u2715 Close panels' : '\u2630 Panels';
+                btn.title = on ? 'Hide the guests list and the submit form' : 'Show the guests list and the submit form';
+                btn.setAttribute('aria-expanded', on ? 'true' : 'false');
+            }
+        }
+
+        function toggleSidebar() {
+            setSidebarOpen(!document.body.classList.contains('sidebar-open'));
+        }
 
         async function refreshTaskDetail(taskId) {
             try {
