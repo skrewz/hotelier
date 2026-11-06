@@ -393,7 +393,10 @@ behaviour is enough for the map itself — but
 [CVE-2026-78408](https://lwn.net/Articles/1103311/), the missing
 `O_CLOEXEC` file-descriptor leak in `unshare(1)`/`nsenter(1)`, is fixed
 only in those releases: the 2.40 series stopped at 2.40.4 and never
-received it. The jail is an unusual `unshare` consumer in that the last
+received it. (The advisory's other half — closing the `cgroup.procs` fd
+after `nsenter --join-cgroup` — needs 2.42.4 and never reached the 2.41
+branch; it does not apply here, because the jail runs `unshare` and
+never joins a cgroup.) The jail is an unusual `unshare` consumer in that the last
 `exec` before the task code runs is an `unshare` `exec` (the chain is
 `unshare` → `guest -jail-child` → `unshare` → task command, and
 `--kill-child` makes `unshare` hold a `pidfd`), so an fd leaking across
