@@ -377,8 +377,10 @@ func TestMirroredMapArgs_BadInput(t *testing.T) {
 
 // canMapGuestRange reports whether this host's unshare(1) supports
 // --map-auto with the current user's subuid/subgid block resolvable
-// (util-linux >= 2.38 and a provisioned /etc/subuid entry, issue
-// #236). It gates the true range-mapped end-to-end test.
+// (util-linux >= 2.40, the uidmap package, and a provisioned
+// /etc/subuid entry and passwd record for this user — see the README
+// jail section, issue #236). It gates the true range-mapped end-to-end
+// test.
 func canMapGuestRange() bool {
 	return exec.Command("unshare", "--map-root-user", "--map-auto", "--", "true").Run() == nil
 }
@@ -413,7 +415,7 @@ func TestJail_RunChild_RangeMapped(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			if tc.needRange && !canMapGuestRange() {
-				t.Skip("--map-auto unavailable (util-linux < 2.38 or no /etc/subuid entry for this user)")
+				t.Skip("--map-auto unavailable (util-linux < 2.40, no newuidmap/newgidmap, or no subuid/passwd entry for this user)")
 			}
 			base := t.TempDir()
 			taskDir := filepath.Join(base, "task")

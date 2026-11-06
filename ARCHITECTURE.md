@@ -107,6 +107,7 @@ to route tasks.
 |-------------------|----------------------------------------------------------|
 | `business-default`| Standard business-application development (default tag). |
 | `android`         | Guest is equipped for Android development tasks.         |
+| `podman`          | Task needs a nested container runtime, so its jail runs in range-mapped mode (host-side prerequisites apply — see the README jail section). |
 | *(custom)*        | Any additional capability tag the guest supports.        |
 
 Tags are flexible — new ones can be added as guests gain new capabilities.

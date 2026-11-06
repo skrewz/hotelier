@@ -24,9 +24,12 @@ package pi
 // the jail spec file on the host; piBin and piArgs are the command to
 // exec inside the jail. mapGuestRange selects the range-mapped mode
 // (issue #236): --map-auto then also maps the guest user's
-// subuid/subgid block into the outer namespace (util-linux >= 2.38),
-// matching the multi-entry drop the jail child performs for such
-// tasks. Without it the command is byte-identical to the default spawn.
+// subuid/subgid block into the outer namespace (util-linux >= 2.40 — the
+// floor of the multi-range drop this flag pairs with, which passes
+// repeated --map-users/--map-groups arguments and those only accumulate
+// from 2.40; see unshare(1)), matching the multi-entry drop the jail
+// child performs for such tasks. Without it the command is byte-identical
+// to the default spawn.
 func BuildJailCommand(guestBin, specPath, piBin string, mapGuestRange bool, piArgs []string) []string {
 	cmd := []string{
 		"unshare",

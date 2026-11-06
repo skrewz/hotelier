@@ -355,18 +355,36 @@ read-write path, mounted at the fixed in-jail path `/task`; everything
 else is read-only or a private copy, so writes inside the jail never
 reach the host. The jail is removed when the task completes.
 
-Tasks that need a **nested container runtime** (rootless podman) carry
-the `podman` tag (issue #236). Such a task's jail additionally maps the
+Tasks that need a **nested container runtime** (podman) carry the
+`podman` tag (issue #236). Such a task's jail additionally maps the
 guest user's subuid/subgid block (`unshare --map-root-user --map-auto`,
-util-linux >= 2.38) and the nested-namespace drop writes a multi-entry
+util-linux >= 2.40) and the nested-namespace drop writes a multi-entry
 map mirroring it instead of the single-UID entry, so image layers can be
-unpacked across the range. In that mode the command is uid 0 inside the
+unpacked across the range. The 2.40 floor is the *drop's*, not the
+flag's: `--map-auto` itself is older, but the drop passes the mirrored
+ranges as repeated `--map-users`/`--map-groups` arguments and
+[unshare(1)](https://man7.org/linux/man-pages/man1/unshare.1.html) only
+accumulates ranges across multiple occurrences from 2.40 — on earlier
+versions each occurrence overwrites the previous one and only the last
+range would be mapped. In that mode the command is uid 0 inside the
 *nested* namespace but still holds no capabilities in the outer one —
 the issue #198 property is unchanged. Tasks without the tag keep the
-single-UID mapping unchanged. Range-mapped tasks require the guest user
-to have `/etc/subuid`/`/etc/subgid` entries (provisioned by config
-management); without them `unshare --map-auto` maps no range and
-podman will not work.
+single-UID mapping unchanged.
+
+Range-mapped tasks need three host-side prerequisites, none of which the
+plain jail path requires (all are provisioned by config management):
+`/etc/subuid` and `/etc/subgid` entries for the guest user (without them
+`--map-auto` maps no range and podman will not work); the `uidmap`
+package, because from 2.40 `unshare` writes a range map through
+`newuidmap`/`newgidmap` unless it is already euid 0
+([unshare(1)](https://man7.org/linux/man-pages/man1/unshare.1.html));
+and a `/etc/passwd` entry for the guest user, which those helpers need
+to resolve its subuid ownership. A tagged task on a host missing any of
+them fails loudly at spawn rather than running mis-mapped. Note also
+that the command is uid 0 in the nested namespace, so podman there
+selects the rootful engine and wants a writable container store; where
+that store lives inside the jail is guest provisioning work, not jail
+code.
 
 Jail isolation is always enabled and cannot be disabled. No capabilities
 are required — the only prerequisite is kernel support for unprivileged
