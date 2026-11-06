@@ -1904,7 +1904,7 @@ func TestPIHandler_SetupJail(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	j, err := h.setupJail(taskDir, "task-jail", func(LogEntry) error { return nil })
+	j, err := h.setupJail(taskDir, "task-jail", false, func(LogEntry) error { return nil })
 	if err != nil {
 		t.Fatalf("setupJail failed: %v", err)
 	}
@@ -1923,6 +1923,10 @@ func TestPIHandler_SetupJail(t *testing.T) {
 	plan := j.Plan()
 	if plan.Cwd != "/task" {
 		t.Errorf("plan cwd = %q, want /task", plan.Cwd)
+	}
+	// The default jail keeps today's single-UID mapping (issue #236).
+	if plan.MapGuestRange {
+		t.Error("plan MapGuestRange = true, want false without the range request")
 	}
 	mounts := make(map[string]jail.Mount, len(plan.Mounts))
 	for _, m := range plan.Mounts {
@@ -1944,6 +1948,77 @@ func TestPIHandler_SetupJail(t *testing.T) {
 		if _, err := os.Stat(filepath.Join(j.Path(), home, ".pi")); err != nil {
 			t.Errorf("~/.pi not copied into the skeleton: %v", err)
 		}
+	}
+}
+
+// TestPIHandler_TaskNeedsRangeMap verifies the tag gate for the
+// range-mapped jail mode (issue #236): only a task carrying the podman
+// tag gets the subuid/subgid-range mapping; everything else keeps
+// today's single-UID jail.
+func TestPIHandler_TaskNeedsRangeMap(t *testing.T) {
+	cases := []struct {
+		tags []string
+		want bool
+	}{
+		{nil, false},
+		{[]string{}, false},
+		{[]string{"gpu", "fast"}, false},
+		{[]string{"podman"}, true},
+		{[]string{"gpu", "podman"}, true},
+		{[]string{"Podman"}, false}, // tags are matched exactly
+	}
+	for _, tc := range cases {
+		if got := taskNeedsRangeMap(tc.tags); got != tc.want {
+			t.Errorf("taskNeedsRangeMap(%v) = %v, want %v", tc.tags, got, tc.want)
+		}
+	}
+}
+
+// TestPIHandler_SetupJail_RangeMapped verifies that setupJail carries
+// the range-mapping request (issue #236) into the plan and the spec
+// the jail child reads.
+func TestPIHandler_SetupJail_RangeMapped(t *testing.T) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	baseDir, err := os.MkdirTemp(home, "hotelier-setupjail-range-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(baseDir)
+	fakeBinDir := filepath.Join(baseDir, "fakebin")
+	if err := os.MkdirAll(fakeBinDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(fakeBinDir, "pi"), []byte("#!/bin/sh\nread -r _ || true\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	origPath := os.Getenv("PATH")
+	t.Cleanup(func() { os.Setenv("PATH", origPath) })
+	os.Setenv("PATH", fakeBinDir+string(os.PathListSeparator)+origPath)
+
+	h := NewPIHandler(baseDir, "", "", "")
+	taskDir := filepath.Join(baseDir, "tasks", "task-range", "abc123")
+	if err := os.MkdirAll(taskDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	j, err := h.setupJail(taskDir, "task-range", true, func(LogEntry) error { return nil })
+	if err != nil {
+		t.Fatalf("setupJail (range) failed: %v", err)
+	}
+	defer j.Cleanup()
+
+	if !j.Plan().MapGuestRange {
+		t.Error("plan MapGuestRange = false, want true for a podman-tagged task")
+	}
+	spec, err := jail.ReadSpec(j.SpecPath())
+	if err != nil {
+		t.Fatalf("ReadSpec: %v", err)
+	}
+	if !spec.MapGuestRange {
+		t.Error("spec MapGuestRange = false, want true for a podman-tagged task")
 	}
 }
 
@@ -1998,7 +2073,7 @@ func TestPIHandler_SetupJail_HomeCopiesConfigured(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	j, err := h.setupJail(taskDir, "task-hc", func(LogEntry) error { return nil })
+	j, err := h.setupJail(taskDir, "task-hc", false, func(LogEntry) error { return nil })
 	if err != nil {
 		t.Fatalf("setupJail failed: %v", err)
 	}
@@ -2040,7 +2115,7 @@ func TestPIHandler_SetupJail_PiUnresolvable(t *testing.T) {
 	if err := os.MkdirAll(taskDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := h.setupJail(taskDir, "task-unresolvable", func(LogEntry) error { return nil }); err == nil {
+	if _, err := h.setupJail(taskDir, "task-unresolvable", false, func(LogEntry) error { return nil }); err == nil {
 		t.Fatal("setupJail should fail when pi cannot be resolved")
 	}
 	if _, err := os.Stat(taskDir + ".jail"); !os.IsNotExist(err) {

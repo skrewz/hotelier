@@ -7,6 +7,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -141,7 +142,9 @@ umount /tmp 2>/dev/null && echo UMMOUNT_HOLE || echo UMMOUNT_CLOSED
 // path of the task directory (used for the child's coverage dir). The
 // spec path is passed via the environment (the testing package has no
 // -test.args flag); command is the in-jail path of the command to run.
-func runJailChild(t *testing.T, plan Plan, taskDirHost, command string) (string, error) {
+// extraUnshareFlags are appended to the outer unshare invocation (e.g.
+// --map-auto for the range-mapped mode, issue #236).
+func runJailChild(t *testing.T, plan Plan, taskDirHost, command string, extraUnshareFlags ...string) (string, error) {
 	t.Helper()
 	testBin, err := os.Executable()
 	if err != nil {
@@ -182,8 +185,9 @@ func runJailChild(t *testing.T, plan Plan, taskDirHost, command string) (string,
 		})
 	}
 	childArgs = append(childArgs, command)
+	flags := append([]string{"--map-root-user", "--mount", "--pid", "--fork"}, extraUnshareFlags...)
 	cmd := exec.Command("unshare", append(
-		[]string{"--map-root-user", "--mount", "--pid", "--fork", "--", testBin},
+		append(flags, "--", testBin),
 		childArgs...,
 	)...,
 	)
@@ -309,6 +313,177 @@ func TestJail_RunChild_DevFailure(t *testing.T) {
 	}
 }
 
+// TestMirroredMapArgs verifies the range-mode drop mappings (issue
+// #236): each entry of the outer namespace's uid/gid maps is mirrored
+// into a nested-namespace range "inner:inner:count" (the outer field
+// of the parent's map names ids in the PARENT of the parent, which the
+// child must not reference — only the parent's own inner ids are
+// mappable downward). Entries with count 0 (the unmapped-id filler
+// lines of uid_map) are skipped.
+func TestMirroredMapArgs(t *testing.T) {
+	dir := t.TempDir()
+	uidPath := filepath.Join(dir, "uid_map")
+	gidPath := filepath.Join(dir, "gid_map")
+	if err := os.WriteFile(uidPath, []byte(
+		"         0       1000          1\n         1     100000      65534\n4294967295 4294967295          0\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(gidPath, []byte(
+		"         0       1000          1\n         1     100000      65534\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	uidArgs, gidArgs, err := mirroredMapArgs(uidPath, gidPath)
+	if err != nil {
+		t.Fatalf("mirroredMapArgs: %v", err)
+	}
+	wantUID := []string{"--map-users=0:0:1", "--map-users=1:1:65534"}
+	wantGID := []string{"--map-groups=0:0:1", "--map-groups=1:1:65534"}
+	if !reflect.DeepEqual(uidArgs, wantUID) {
+		t.Errorf("uid args = %v, want %v", uidArgs, wantUID)
+	}
+	if !reflect.DeepEqual(gidArgs, wantGID) {
+		t.Errorf("gid args = %v, want %v", gidArgs, wantGID)
+	}
+}
+
+// TestMirroredMapArgs_BadInput verifies the range-mode drop fails
+// closed: an unreadable, empty or malformed map file must produce an
+// error rather than a silently weaker (single-entry or unmapped) drop.
+func TestMirroredMapArgs_BadInput(t *testing.T) {
+	dir := t.TempDir()
+	cases := map[string]string{
+		"empty":     "",
+		"only-zero": "4294967295 4294967295          0\n",
+		"malformed": "not a map line\n",
+		"short":     "0 0\n",
+	}
+	for name, content := range cases {
+		t.Run(name, func(t *testing.T) {
+			p := filepath.Join(dir, "map-"+name)
+			if err := os.WriteFile(p, []byte(content), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			if _, _, err := mirroredMapArgs(p, p); err == nil {
+				t.Errorf("mirroredMapArgs on %q should fail", content)
+			}
+		})
+	}
+	t.Run("missing file", func(t *testing.T) {
+		if _, _, err := mirroredMapArgs(filepath.Join(dir, "nope"), filepath.Join(dir, "nope")); err == nil {
+			t.Error("mirroredMapArgs on a missing file should fail")
+		}
+	})
+}
+
+// canMapGuestRange reports whether this host's unshare(1) supports
+// --map-auto with the current user's subuid/subgid block resolvable
+// (util-linux >= 2.38 and a provisioned /etc/subuid entry, issue
+// #236). It gates the true range-mapped end-to-end test.
+func canMapGuestRange() bool {
+	return exec.Command("unshare", "--map-root-user", "--map-auto", "--", "true").Run() == nil
+}
+
+// TestJail_RunChild_RangeMapped is the probe-gated end-to-end test for
+// the range-mapped drop (issue #236): with spec.MapGuestRange set the
+// jail child must write a multi-entry map for the nested namespace
+// that mirrors everything the outer namespace maps, instead of the
+// single "<innerID>:0:1" entry. The command then runs as uid 0 in the
+// nested namespace (root there, mapping its whole outer range) but
+// still holds no capabilities in the outer namespace A: the #198
+// umount/rebind hole must stay closed.
+//
+// The "mirror only" sub-case runs wherever unprivileged namespaces do
+// (the outer map is the plain single-UID one; the child mirrors it —
+// exercising the multi-entry drop code path). The "--map-auto" sub-case
+// additionally needs a provisioned subuid range and skips without it.
+func TestJail_RunChild_RangeMapped(t *testing.T) {
+	if ok, reason := CanJail(); !ok {
+		t.Skipf("unprivileged namespaces unavailable: %s", reason)
+	}
+
+	tests := []struct {
+		name         string
+		flags        []string
+		needRange    bool // skip unless canMapGuestRange
+		wantMinLines int
+	}{
+		{"mirror single-entry outer map", nil, false, 1},
+		{"with --map-auto", []string{"--map-auto"}, true, 2},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if tc.needRange && !canMapGuestRange() {
+				t.Skip("--map-auto unavailable (util-linux < 2.38 or no /etc/subuid entry for this user)")
+			}
+			base := t.TempDir()
+			taskDir := filepath.Join(base, "task")
+			if err := os.MkdirAll(filepath.Join(taskDir, "bin"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			probe := filepath.Join(taskDir, "bin", "probe-range")
+			script := `#!/bin/sh
+echo "UID=$(id -u)"
+echo "UIDMAP_LINES=$(grep -c '[0-9]' /proc/self/uid_map)"
+# The #198 hole must stay closed even in range mode: the command is
+# root in the nested namespace B, but the jail's mounts belong to A,
+# so the umount must fail.
+umount /tmp 2>/dev/null && echo UMMOUNT_HOLE || echo UMMOUNT_CLOSED
+`
+			if err := os.WriteFile(probe, []byte(script), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			plan := Plan{
+				JailRoot: filepath.Join(base, "task.jail"),
+				Cwd:      "/task",
+				Mounts: []Mount{
+					{Kind: MountTmpfs, Path: "/dev", Opts: "mode=755", Flags: int(unix.MS_NODEV)},
+					{Kind: MountBindRO, Path: "/usr", Src: "/usr"},
+					{Kind: MountBindRW, Path: "/task", Src: taskDir},
+					{Kind: MountTmpfs, Path: "/tmp"},
+					{Kind: MountProc, Path: "/proc"},
+				},
+				DevNodes: []string{"null", "zero", "urandom", "tty"},
+				// usrmerge shims: the drop's unshare and the probe
+				// resolve their ELF interpreter through these.
+				Symlinks: []Link{
+					{Old: "usr/bin", New: "bin"},
+					{Old: "usr/sbin", New: "sbin"},
+					{Old: "usr/lib", New: "lib"},
+					{Old: "usr/lib64", New: "lib64"},
+				},
+				MapGuestRange: true,
+			}
+			if err := CreateSkeleton(plan); err != nil {
+				t.Fatalf("CreateSkeleton: %v", err)
+			}
+			if err := WriteSpec(plan); err != nil {
+				t.Fatalf("WriteSpec: %v", err)
+			}
+			t.Cleanup(func() { _ = Cleanup(plan.JailRoot) })
+
+			s, err := runJailChild(t, plan, taskDir, "/task/bin/probe-range", tc.flags...)
+			if err != nil {
+				t.Fatalf("jail child failed: %v\noutput:\n%s", err, s)
+			}
+			// The multi-entry drop maps A:0 to 0 in B, so the command
+			// is uid 0 there (unlike the single-entry drop's 1000).
+			if !strings.Contains(s, "UID=0") {
+				t.Errorf("probe output missing UID=0 (range-mode drop):\n%s", s)
+			}
+			lines, err := strconv.Atoi(strings.TrimSpace(extractLine(s, "UIDMAP_LINES=")))
+			if err != nil {
+				t.Fatalf("cannot parse UIDMAP_LINES from:\n%s", s)
+			}
+			if lines < tc.wantMinLines {
+				t.Errorf("nested uid_map has %d entries, want >= %d (multi-entry map)\n%s", lines, tc.wantMinLines, s)
+			}
+			if !strings.Contains(s, "UMMOUNT_CLOSED") {
+				t.Errorf("the umount/rebind hole opened in range mode:\n%s", s)
+			}
+		})
+	}
+}
+
 // TestRunChildMain_EmptyCommand verifies RunChildMain returns non-zero
 // when there is no command (flag.Args() is empty in a normal test run).
 func TestRunChildMain_EmptyCommand(t *testing.T) {
@@ -377,7 +552,7 @@ func TestDropAndExec_Argv(t *testing.T) {
 			captured = argv
 			return nil
 		}
-		if err := dropAndExec(innerID, []string{"/bin/true"}); err != nil {
+		if err := dropAndExec(innerID, false, []string{"/bin/true"}); err != nil {
 			t.Fatalf("dropAndExec(%d): %v", innerID, err)
 		}
 		want := []string{
@@ -394,6 +569,49 @@ func TestDropAndExec_Argv(t *testing.T) {
 	run(4242, "4242:0:1") // an explicit inner id is used as-is
 }
 
+// TestDropAndExec_Argv_RangeMap pins the range-mapped drop argv (issue
+// #236): instead of the single "<innerID>:0:1" entry, unshare gets one
+// --map-users/--map-groups range per entry the outer namespace maps
+// (this process's uid/gid maps). The single-entry mapping must not
+// appear.
+func TestDropAndExec_Argv_RangeMap(t *testing.T) {
+	unsharePath, err := exec.LookPath("unshare")
+	if err != nil {
+		t.Skipf("unshare(1) not on PATH: %v", err)
+	}
+
+	origExecve := execve
+	defer func() { execve = origExecve }()
+	var captured []string
+	execve = func(argv []string) error {
+		captured = argv
+		return nil
+	}
+	if err := dropAndExec(0, true, []string{"/bin/true"}); err != nil {
+		t.Fatalf("dropAndExec(range): %v", err)
+	}
+	if len(captured) < 5 || captured[0] != unsharePath || captured[1] != "--user" {
+		t.Fatalf("unexpected drop argv: %v", captured)
+	}
+	if tail := captured[len(captured)-2:]; len(tail) != 2 || tail[0] != "--" || tail[1] != "/bin/true" {
+		t.Errorf("drop argv tail = %v, want [-- /bin/true]", tail)
+	}
+	var users, groups int
+	for _, a := range captured[2:] {
+		switch {
+		case a == "--map-users=1000:0:1" || a == "--map-groups=1000:0:1":
+			t.Errorf("range drop must not carry the single-entry mapping: %v", captured)
+		case strings.HasPrefix(a, "--map-users="):
+			users++
+		case strings.HasPrefix(a, "--map-groups="):
+			groups++
+		}
+	}
+	if users == 0 || groups == 0 {
+		t.Errorf("range drop carries no id ranges (users=%d groups=%d): %v", users, groups, captured)
+	}
+}
+
 // TestDropAndExec_UnshareMissing verifies the drop fails closed when
 // unshare(1) cannot be located: the error is returned and the command is
 // not exec'd.
@@ -406,7 +624,7 @@ func TestDropAndExec_UnshareMissing(t *testing.T) {
 		return nil
 	}
 	t.Setenv("PATH", filepath.Join(t.TempDir(), "no-such-dir"))
-	if err := dropAndExec(0, []string{"/bin/true"}); err == nil {
+	if err := dropAndExec(0, false, []string{"/bin/true"}); err == nil {
 		t.Fatal("dropAndExec should fail when unshare is not on PATH")
 	}
 	if executed {

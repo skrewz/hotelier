@@ -7,6 +7,25 @@ import (
 	"golang.org/x/sys/unix"
 )
 
+// TestBuildPlan_MapGuestRange verifies the range-mapping request (issue
+// #236) is carried from the facts into the plan (and hence into the
+// spec the child reads).
+func TestBuildPlan_MapGuestRange(t *testing.T) {
+	f := Facts{
+		TaskDir:       "/home/guest/tasks/task-1",
+		PiRoot:        "/usr/local/lib/node_modules",
+		USRDirs:       []string{"/usr"},
+		MapGuestRange: true,
+	}
+	p, err := BuildPlan(f)
+	if err != nil {
+		t.Fatalf("BuildPlan: %v", err)
+	}
+	if !p.MapGuestRange {
+		t.Error("MapGuestRange = false, want true when the facts request it")
+	}
+}
+
 // TestBuildPlan_USRmerged verifies the plan for a usr-merged host (the
 // devvm layout): /usr is bind-mounted read-only, the pi install root is
 // bind-mounted read-only, the task dir is the single read-write bind,
@@ -39,6 +58,11 @@ func TestBuildPlan_USRmerged(t *testing.T) {
 	// The nested-userns drop id is explicit in the plan (issue #198).
 	if p.DropToUID != DropID {
 		t.Errorf("DropToUID = %d, want %d", p.DropToUID, DropID)
+	}
+	// Range mapping is off unless the caller asks for it (issue #236):
+	// untagged tasks must keep today's single-UID mapping.
+	if p.MapGuestRange {
+		t.Error("MapGuestRange = true, want false for the default plan")
 	}
 
 	mounts := make(map[string]Mount, len(p.Mounts))

@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 
 	"golang.org/x/sys/unix"
@@ -100,8 +101,12 @@ func RunChild(specPath string, argv []string) error {
 	// everything the mounter execs would otherwise inherit root-in-A
 	// and with it CAP_SYS_ADMIN in A, which can umount the jail's ro
 	// mounts and rebind them read-write. After the drop the command
-	// holds no capabilities in A (or in B) and cannot.
-	return dropAndExec(spec.DropToUID, argv)
+	// holds no capabilities in A (or in B) and cannot. In range mode
+	// (issue #236) the drop maps the command to uid 0 in B with the
+	// outer namespace's whole id range mirrored in, so a nested
+	// container runtime can create child namespaces; it still holds no
+	// capabilities in A, so the hole stays closed either way.
+	return dropAndExec(spec.DropToUID, spec.MapGuestRange, argv)
 }
 
 // dropAndExec drops into a nested (child) user namespace B and execs the
@@ -123,14 +128,39 @@ func RunChild(specPath string, argv []string) error {
 // mounted in A (showing this pid namespace) — RunChild mounts it (the
 // MountProc spec entry) before this runs, so the requirement is met.
 //
-// The mapping is "<innerID>:0:1": A:0 (the guest user on the host) becomes
-// innerID in B, so the command's host identity is unchanged while it is
-// non-root in B and holds no capabilities in A.
-func dropAndExec(innerID int, argv []string) error {
+// The default mapping is "<innerID>:0:1": A:0 (the guest user on the
+// host) becomes innerID in B, so the command's host identity is unchanged
+// while it is non-root in B and holds no capabilities in A.
+//
+// In range mode (mapGuestRange, issue #236) the drop instead mirrors
+// A's own uid/gid maps: every id range A maps becomes an identically
+// numbered range in B ("inner:inner:count" per entry, repeated
+// --map-users/--map-groups). A child namespace may only map ids the
+// parent namespace itself maps (user_namespaces(7)), so mirroring is
+// what lets a nested container runtime (rootless podman) chown files
+// across the subuid range two levels down. The command ends up uid 0
+// in B with the full range beneath it; capabilities in B grant nothing
+// over the objects of A (the jail's mounts belong to A), so the #198
+// property — no capabilities in A — is unchanged.
+func dropAndExec(innerID int, mapGuestRange bool, argv []string) error {
 	if innerID <= 0 {
 		innerID = DropID
 	}
-	mapping := idMapping(innerID)
+	var mapArgs []string
+	if mapGuestRange {
+		// Fail closed: without the outer maps there is no sound nested
+		// map, and silently falling back to the single-entry drop would
+		// hand a range-requesting task an environment where podman
+		// cannot work.
+		uidArgs, gidArgs, err := mirroredMapArgs("/proc/self/uid_map", "/proc/self/gid_map")
+		if err != nil {
+			return fmt.Errorf("jailchild: range-mapped drop: %w", err)
+		}
+		mapArgs = append(uidArgs, gidArgs...)
+	} else {
+		mapping := idMapping(innerID)
+		mapArgs = []string{"--map-users=" + mapping, "--map-groups=" + mapping}
+	}
 	// execve(2) does not search PATH, so the drop helper must be
 	// referenced by absolute path. unshare is located via the inherited
 	// PATH; its directory (/usr, or /bin on non-usr-merged hosts) is
@@ -139,11 +169,9 @@ func dropAndExec(innerID int, argv []string) error {
 	if err != nil {
 		return fmt.Errorf("jailchild: locate unshare: %w", err)
 	}
-	cmd := append([]string{
-		unsharePath, "--user",
-		"--map-users=" + mapping, "--map-groups=" + mapping,
-		"--",
-	}, argv...)
+	cmd := append([]string{unsharePath, "--user"}, mapArgs...)
+	cmd = append(cmd, "--")
+	cmd = append(cmd, argv...)
 	// Replace the process with the command (via the drop). The
 	// environment is inherited from the guest (persona vars, TMPDIR,
 	// PATH, ...).
@@ -155,6 +183,59 @@ func dropAndExec(innerID int, argv []string) error {
 // (inside:outside:count).
 func idMapping(innerID int) string {
 	return fmt.Sprintf("%d:0:1", innerID)
+}
+
+// mirroredMapArgs reads the current user namespace's id map files
+// (uidMapPath, gidMapPath — /proc/self/uid_map and /proc/self/gid_map
+// in the child, both inside A) and builds the unshare(1) --map-users /
+// --map-groups arguments for the nested namespace B that mirror them:
+// each entry "innerOuterCount" of A's map becomes "inner:inner:count"
+// in B's (B's outer ids are A's inner ids; A's own outer ids live in
+// the namespace above A and must not be referenced). Entries with
+// count 0 (the unmapped-id filler the kernel prints) are skipped; an
+// entry-less or malformed map is an error (fail closed, issue #236).
+func mirroredMapArgs(uidMapPath, gidMapPath string) ([]string, []string, error) {
+	uidArgs, err := mirrorIDMap(uidMapPath, "--map-users")
+	if err != nil {
+		return nil, nil, err
+	}
+	gidArgs, err := mirrorIDMap(gidMapPath, "--map-groups")
+	if err != nil {
+		return nil, nil, err
+	}
+	return uidArgs, gidArgs, nil
+}
+
+func mirrorIDMap(path, flag string) ([]string, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("read %s: %w", path, err)
+	}
+	var args []string
+	for _, line := range strings.Split(string(data), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) == 0 {
+			continue
+		}
+		if len(fields) != 3 {
+			return nil, fmt.Errorf("parse %s: expected 'inner outer count', got %q", path, line)
+		}
+		var inner, count uint64
+		if inner, err = strconv.ParseUint(fields[0], 10, 64); err != nil {
+			return nil, fmt.Errorf("parse %s: %w", path, err)
+		}
+		if count, err = strconv.ParseUint(fields[2], 10, 64); err != nil {
+			return nil, fmt.Errorf("parse %s: %w", path, err)
+		}
+		if count == 0 {
+			continue
+		}
+		args = append(args, fmt.Sprintf("%s=%d:%d:%d", flag, inner, inner, count))
+	}
+	if len(args) == 0 {
+		return nil, fmt.Errorf("%s maps no ids", path)
+	}
+	return args, nil
 }
 
 // execve is the final exec. It is a variable so the in-namespace test

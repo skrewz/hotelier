@@ -131,6 +131,9 @@ func TestCreateSkeleton(t *testing.T) {
 func TestWriteSpec_RoundTrip(t *testing.T) {
 	base := t.TempDir()
 	plan := buildTestPlan(t, base)
+	// The range-mapping request must survive the plan -> spec round
+	// trip (issue #236).
+	plan.MapGuestRange = true
 	if err := CreateSkeleton(plan); err != nil {
 		t.Fatalf("CreateSkeleton: %v", err)
 	}
@@ -152,6 +155,9 @@ func TestWriteSpec_RoundTrip(t *testing.T) {
 	// The nested-userns drop id round-trips (issue #198).
 	if spec.DropToUID != plan.DropToUID {
 		t.Errorf("spec DropToUID = %d, want %d", spec.DropToUID, plan.DropToUID)
+	}
+	if spec.MapGuestRange != plan.MapGuestRange {
+		t.Errorf("spec MapGuestRange = %v, want %v", spec.MapGuestRange, plan.MapGuestRange)
 	}
 	if len(spec.Mounts) != len(plan.Mounts) {
 		t.Fatalf("spec mounts = %d, want %d", len(spec.Mounts), len(plan.Mounts))
@@ -191,7 +197,7 @@ func TestJail_Facade(t *testing.T) {
 	}
 
 	j := NewJail(log.New(io.Discard, "", 0))
-	if err := j.Setup(taskDir, home, pi, []string{".pi", ".report-on-signal.yaml", "does-not-exist"}); err != nil {
+	if err := j.Setup(taskDir, home, pi, []string{".pi", ".report-on-signal.yaml", "does-not-exist"}, false); err != nil {
 		t.Fatalf("Setup: %v", err)
 	}
 	if j.Path() != taskDir+".jail" {
@@ -211,6 +217,11 @@ func TestJail_Facade(t *testing.T) {
 	}
 	wantPiRoot := filepath.Join(base, "install", "node_modules")
 	found := false
+	// The default facade does not request range mapping (issue #236):
+	// untagged tasks keep today's single-UID jail.
+	if spec.MapGuestRange {
+		t.Error("spec MapGuestRange = true, want false for the default setup")
+	}
 	for _, m := range spec.Mounts {
 		if m.Src == wantPiRoot && m.Kind == MountBindRO {
 			found = true
@@ -259,7 +270,7 @@ func TestCleanup_Missing(t *testing.T) {
 // task directory is missing (the Discover error branch).
 func TestJail_Setup_RequiresTaskDir(t *testing.T) {
 	j := NewJail(log.New(io.Discard, "", 0))
-	if err := j.Setup("", t.TempDir(), t.TempDir()+"/pi", nil); err == nil {
+	if err := j.Setup("", t.TempDir(), t.TempDir()+"/pi", nil, false); err == nil {
 		t.Fatal("Setup should fail without a task dir")
 	}
 }

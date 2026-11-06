@@ -282,7 +282,7 @@ func (h *PIHandler) ExecuteTask(ctx context.Context, task TaskAssignment, sendLo
 	// path /task.
 	if h.jailEnabled {
 		var err error
-		jail, err = h.setupJail(workDir, task.TaskID, sendLog)
+		jail, err = h.setupJail(workDir, task.TaskID, taskNeedsRangeMap(task.Tags), sendLog)
 		if err != nil {
 			return nil, fmt.Errorf("set up jail: %w", err)
 		}
@@ -972,6 +972,24 @@ func (h *PIHandler) resetClientWithEnv(ctx context.Context, workDir string, task
 	return fmt.Errorf("pi client spawn failed after %d attempts: %w", maxRetries, lastErr)
 }
 
+// PodmanTag is the task tag that opts a task into the range-mapped
+// jail mode (issue #236): the jail then maps the guest's subuid/subgid
+// range, letting a nested container runtime (rootless podman) work
+// inside the jail. Tasks without the tag keep today's single-UID
+// mapping unchanged.
+const PodmanTag = "podman"
+
+// taskNeedsRangeMap reports whether a task's tags request the
+// range-mapped jail mode (issue #236). Tags are matched exactly.
+func taskNeedsRangeMap(tags []string) bool {
+	for _, t := range tags {
+		if t == PodmanTag {
+			return true
+		}
+	}
+	return false
+}
+
 // setupJail builds the namespace jail for the task whose working
 // directory is taskDir. The jail root is a sibling of the task directory
 // (<taskDir>.jail); the task directory itself is bind-mounted read-write
@@ -983,7 +1001,7 @@ func (h *PIHandler) resetClientWithEnv(ctx context.Context, workDir string, task
 //
 // The caller owns the returned jail and must call Cleanup on it
 // (ExecuteTask does this via defer).
-func (h *PIHandler) setupJail(taskDir, taskID string, sendLog func(LogEntry) error) (*jail.Jail, error) {
+func (h *PIHandler) setupJail(taskDir, taskID string, mapGuestRange bool, sendLog func(LogEntry) error) (*jail.Jail, error) {
 	// The pi executable. Fatal — a guest without pi cannot run tasks. The
 	// pinned execPath (issue #33) is used verbatim so the jail always
 	// contains the exact binary the client spawns; only a handler that
@@ -1003,8 +1021,11 @@ func (h *PIHandler) setupJail(taskDir, taskID string, sendLog func(LogEntry) err
 
 	j := jail.NewJail(h.log)
 	h.log.Printf("[JAIL] setting up jail for task %s", taskID)
+	if mapGuestRange {
+		h.log.Printf("[JAIL] task %s carries the %q tag: range-mapped mode (issue #236)", taskID, PodmanTag)
+	}
 	_ = sendLog(LogEntry{TaskID: taskID, Line: "Setting up namespace jail", Level: "system"})
-	if err := j.Setup(taskDir, homeDir, piPath, h.homeCopies); err != nil {
+	if err := j.Setup(taskDir, homeDir, piPath, h.homeCopies, mapGuestRange); err != nil {
 		_ = j.Cleanup()
 		return nil, fmt.Errorf("set up jail: %w", err)
 	}

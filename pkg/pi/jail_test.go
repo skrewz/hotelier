@@ -32,7 +32,7 @@ func TestMain(m *testing.M) {
 // and the pi command.
 func TestBuildJailCommand(t *testing.T) {
 	got := BuildJailCommand("/usr/local/bin/guest", "/jail/spec.json", "/usr/bin/pi",
-		[]string{"--mode", "rpc", "--no-session", "--provider", "anthropic"})
+		false, []string{"--mode", "rpc", "--no-session", "--provider", "anthropic"})
 	want := []string{
 		"unshare",
 		"--map-root-user", "--mount", "--pid", "--fork",
@@ -40,6 +40,33 @@ func TestBuildJailCommand(t *testing.T) {
 		"--", "/usr/local/bin/guest", "-jail-child", "/jail/spec.json",
 		"--", "/usr/bin/pi",
 		"--mode", "rpc", "--no-session", "--provider", "anthropic",
+	}
+	if len(got) != len(want) {
+		t.Fatalf("command length = %d, want %d:\n%v", len(got), len(want), got)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("command[%d] = %q, want %q\nfull: %v", i, got[i], want[i], got)
+			break
+		}
+	}
+}
+
+// TestBuildJailCommand_MapGuestRange verifies the range-mapped spawn
+// (issue #236): with mapGuestRange set, --map-auto joins
+// --map-root-user so the outer namespace also maps the guest user's
+// subuid/subgid block. Without the flag the command must stay
+// byte-identical to the default spawn (untagged tasks must not move).
+func TestBuildJailCommand_MapGuestRange(t *testing.T) {
+	got := BuildJailCommand("/usr/local/bin/guest", "/jail/spec.json", "/usr/bin/pi",
+		true, []string{"--mode", "rpc"})
+	want := []string{
+		"unshare",
+		"--map-root-user", "--map-auto", "--mount", "--pid", "--fork",
+		"--forward-signals", "--kill-child=SIGKILL",
+		"--", "/usr/local/bin/guest", "-jail-child", "/jail/spec.json",
+		"--", "/usr/bin/pi",
+		"--mode", "rpc",
 	}
 	if len(got) != len(want) {
 		t.Fatalf("command length = %d, want %d:\n%v", len(got), len(want), got)
@@ -115,7 +142,7 @@ read -r _ || true
 	}
 
 	j := jail.NewJail(log.New(io.Discard, "", 0))
-	if err := j.Setup(taskDir, homeDir, fakePi, nil); err != nil {
+	if err := j.Setup(taskDir, homeDir, fakePi, nil, false); err != nil {
 		t.Fatalf("jail setup: %v", err)
 	}
 	t.Cleanup(func() { _ = j.Cleanup() })

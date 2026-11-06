@@ -355,6 +355,19 @@ read-write path, mounted at the fixed in-jail path `/task`; everything
 else is read-only or a private copy, so writes inside the jail never
 reach the host. The jail is removed when the task completes.
 
+Tasks that need a **nested container runtime** (rootless podman) carry
+the `podman` tag (issue #236). Such a task's jail additionally maps the
+guest user's subuid/subgid block (`unshare --map-root-user --map-auto`,
+util-linux >= 2.38) and the nested-namespace drop writes a multi-entry
+map mirroring it instead of the single-UID entry, so image layers can be
+unpacked across the range. In that mode the command is uid 0 inside the
+*nested* namespace but still holds no capabilities in the outer one —
+the issue #198 property is unchanged. Tasks without the tag keep the
+single-UID mapping unchanged. Range-mapped tasks require the guest user
+to have `/etc/subuid`/`/etc/subgid` entries (provisioned by config
+management); without them `unshare --map-auto` maps no range and
+podman will not work.
+
 Jail isolation is always enabled and cannot be disabled. No capabilities
 are required — the only prerequisite is kernel support for unprivileged
 user namespaces (`kernel.unprivileged_userns_clone=1` on Debian). The
