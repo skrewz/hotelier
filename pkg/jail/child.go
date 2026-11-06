@@ -228,6 +228,14 @@ func mirrorIDMap(path, flag string) ([]string, error) {
 		if inner, err = strconv.ParseUint(fields[0], 10, 64); err != nil {
 			return nil, fmt.Errorf("parse %s: %w", path, err)
 		}
+		// The drop mirrors inner ids onto themselves, so the outer column
+		// is never used — but it is validated, so a corrupted or
+		// unexpected map fails closed here like every other anomaly
+		// (upstream's read_kernel_map() for --map-users=all likewise
+		// parses all three columns).
+		if _, err = strconv.ParseUint(fields[1], 10, 64); err != nil {
+			return nil, fmt.Errorf("parse %s: %w", path, err)
+		}
 		if count, err = strconv.ParseUint(fields[2], 10, 64); err != nil {
 			return nil, fmt.Errorf("parse %s: %w", path, err)
 		}

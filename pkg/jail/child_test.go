@@ -356,6 +356,8 @@ func TestMirroredMapArgs_BadInput(t *testing.T) {
 		"only-zero": "4294967295 4294967295          0\n",
 		"malformed": "not a map line\n",
 		"short":     "0 0\n",
+		// The outer column is unused by the mirror but must still parse.
+		"bad-outer": "0 nope 1\n",
 	}
 	for name, content := range cases {
 		t.Run(name, func(t *testing.T) {
