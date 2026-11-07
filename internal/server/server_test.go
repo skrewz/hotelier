@@ -1423,6 +1423,94 @@ func TestHandleGuestRegister_ReRegistration(t *testing.T) {
 	}
 }
 
+// TestHandleGuestRegister_RecordsHost covers issue #238: the dashboard names
+// the machine a task is running on, so the host a guest reports at
+// registration has to land in the registry.
+func TestHandleGuestRegister_RecordsHost(t *testing.T) {
+	srv := newTestServer(t)
+	hub := srv.Hub()
+	go hub.Run()
+
+	params, _ := json.Marshal(map[string]interface{}{
+		"id":   "hosted-guest",
+		"name": "Hosted Guest",
+		"tags": []string{"tag1"},
+		"host": "build-box-1",
+	})
+	if _, err := hub.Dispatch("guest.register", params); err != nil {
+		t.Fatalf("guest.register: %v", err)
+	}
+
+	guest, ok := srv.Registry().GetGuest("hosted-guest")
+	if !ok {
+		t.Fatal("guest not found in registry")
+	}
+	if guest.Host != "build-box-1" {
+		t.Errorf("expected host build-box-1, got %q", guest.Host)
+	}
+
+	// A guest that reports no host (an older guest binary) leaves the field
+	// empty rather than failing registration — the UI falls back to the UID.
+	noHost, _ := json.Marshal(map[string]interface{}{
+		"id":   "no-host-guest",
+		"name": "No Host Guest",
+		"tags": []string{"tag1"},
+	})
+	if _, err := hub.Dispatch("guest.register", noHost); err != nil {
+		t.Fatalf("guest.register without host: %v", err)
+	}
+	noHostGuest, ok := srv.Registry().GetGuest("no-host-guest")
+	if !ok {
+		t.Fatal("guest not found in registry")
+	}
+	if noHostGuest.Host != "" {
+		t.Errorf("expected empty host, got %q", noHostGuest.Host)
+	}
+}
+
+// TestHandleGuestRegister_ReRegistrationUpdatesHost covers the case a guest
+// reconnects from a different machine (issue #238): the host must follow the
+// guest. A reconnect that carries no host at all keeps the last one known.
+func TestHandleGuestRegister_ReRegistrationUpdatesHost(t *testing.T) {
+	srv := newTestServer(t)
+	hub := srv.Hub()
+	go hub.Run()
+
+	first, _ := json.Marshal(map[string]interface{}{
+		"id": "moving-guest", "name": "Moving Guest", "tags": []string{"tag1"},
+		"host": "build-box-1",
+	})
+	if _, err := hub.Dispatch("guest.register", first); err != nil {
+		t.Fatalf("first register: %v", err)
+	}
+
+	second, _ := json.Marshal(map[string]interface{}{
+		"id": "moving-guest", "name": "Moving Guest", "tags": []string{"tag1"},
+		"host": "build-box-2",
+	})
+	if _, err := hub.Dispatch("guest.register", second); err != nil {
+		t.Fatalf("second register: %v", err)
+	}
+
+	guest, ok := srv.Registry().GetGuest("moving-guest")
+	if !ok {
+		t.Fatal("guest not found in registry")
+	}
+	if guest.Host != "build-box-2" {
+		t.Errorf("expected host build-box-2 after reconnect, got %q", guest.Host)
+	}
+
+	third, _ := json.Marshal(map[string]interface{}{
+		"id": "moving-guest", "name": "Moving Guest", "tags": []string{"tag1"},
+	})
+	if _, err := hub.Dispatch("guest.register", third); err != nil {
+		t.Fatalf("third register: %v", err)
+	}
+	if guest.Host != "build-box-2" {
+		t.Errorf("expected host build-box-2 to survive a host-less re-registration, got %q", guest.Host)
+	}
+}
+
 func TestHandleGuestRegister_PreservesRunningState(t *testing.T) {
 	srv := newTestServer(t)
 	hub := srv.Hub()

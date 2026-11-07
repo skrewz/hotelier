@@ -26,6 +26,8 @@
         .guest-item:hover { background: #1e293b; }
         .guest-name { font-weight: 600; font-size: 0.875rem; }
         .guest-tags { font-size: 0.75rem; color: #64748b; margin-top: 0.25rem; }
+        .guest-uid { font-size: 0.7rem; color: #64748b; margin-top: 0.25rem; font-family: 'SF Mono', 'Fira Code', monospace; }
+        .guest-host { font-size: 0.7rem; color: #64748b; margin-top: 0.125rem; }
         .guest-status { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 0.5rem; }
         .status-idle { background: #22c55e; }
         .status-running { background: #f59e0b; }
@@ -488,6 +490,9 @@
         let ws;
         let activeTaskId = null;
         let taskLogs = {};  // Accumulates logs per task: { taskId: [entries] }
+        // Guest UID -> hostname, refreshed from /api/guests on every poll so
+        // the task views can say which machine a task is running on (issue #238).
+        const guestHosts = {};
 
         // Task status filter state.  Keys are status strings (e.g. "COMPLETED").
         // true = shown, false = hidden.  Defaults: COMPLETED hidden, all others shown.
@@ -600,6 +605,7 @@
                 ]);
                 const guests = await guestsRes.json();
                 const tasks = await tasksRes.json();
+                indexGuestHosts(guests.guests || []);
                 renderGuests(guests);
                 renderTasks(tasks);
                 updateStats(guests, tasks);
@@ -628,6 +634,25 @@
             document.getElementById('running-count').textContent = (guests.guests || []).filter(a => a.state === 'RUNNING').length;
         }
 
+        // indexGuestHosts records the host each guest reported at registration
+        // so task views can name the machine a task runs on (issue #238). A
+        // guest that reports no host (an older guest binary) simply has no
+        // entry, and guestLabel falls back to the bare UID.
+        function indexGuestHosts(guests) {
+            Object.keys(guestHosts).forEach(id => delete guestHosts[id]);
+            (guests || []).forEach(g => {
+                if (g && g.id && g.host) guestHosts[g.id] = g.host;
+            });
+        }
+
+        // guestLabel renders a task's assignee as "uid @ host" once the host is
+        // known, and as the bare UID otherwise (issue #238).
+        function guestLabel(guestID) {
+            if (!guestID) return 'Unassigned';
+            const host = guestHosts[guestID];
+            return host ? escapeHtml(guestID) + ' @ ' + escapeHtml(host) : escapeHtml(guestID);
+        }
+
         function renderGuests(data) {
             const list = document.getElementById('guest-list');
             const guests = data.guests || [];
@@ -637,8 +662,14 @@
             }
             list.innerHTML = guests.map(a => {
                 const statusClass = `status-${a.state.toLowerCase()}`;
+                // The UID is always shown: it is what a task is assigned to, so
+                // hiding it behind a display name leaves the two views
+                // unrelatable (issue #238). When the guest has no name the
+                // heading already is the UID, so do not repeat it.
                 return `<div class="guest-item">
                     <div class="guest-name"><span class="guest-status ${statusClass}"></span>${a.name || a.id}</div>
+                    ${a.name && a.name !== a.id ? `<div class="guest-uid" title="Guest UID">${escapeHtml(a.id)}</div>` : ''}
+                    ${a.host ? `<div class="guest-host" title="Machine this guest runs on">&#128421; ${escapeHtml(a.host)}</div>` : ''}
                     <div class="guest-tags">${(a.tags || []).join(', ')}</div>
                 </div>`;
             }).join('');
@@ -738,7 +769,7 @@
                 const personaBadge = t.persona ? ` <span class="persona-badge ${personaColourClass(t.persona)}" title="Persona: ${escapeHtml(t.persona)}">🧑 ${escapeHtml(t.persona)}</span>` : '';
                 return `<div class="task-item ${itemClass}${isActive}" onclick="selectTask('${t.id}')">
                     <div class="task-id">${taskTitleHTML(t)}${t.id} <span class="badge ${badgeClass}">${t.status}</span>${priorityLabel}${personaBadge}</div>
-                    <div class="task-meta">${t.assigned_to ? '→ ' + t.assigned_to : 'unassigned'} · ${new Date(t.created_at).toLocaleString()}${logCount}</div>
+                    <div class="task-meta">${t.assigned_to ? '→ ' + guestLabel(t.assigned_to) : 'unassigned'} · ${new Date(t.created_at).toLocaleString()}${logCount}</div>
                     <div class="task-prompt">${escapeHtml(t.prompt.substring(0, 120))}${t.prompt.length > 120 ? '...' : ''}</div>
                     ${errorHtml}
                     ${btnRow}
@@ -1511,7 +1542,7 @@
                 const metaEl = document.querySelector('.task-detail-meta');
                 if (metaEl) {
                     const guestPart = task.assigned_to
-                        ? 'Guest: ' + escapeHtml(task.assigned_to)
+                        ? 'Guest: ' + guestLabel(task.assigned_to)
                         : 'Unassigned';
                     const logCount = data.log_count || 0;
                     // innerHTML (not textContent) so the spinner span is
@@ -1790,7 +1821,7 @@
                 <div class="task-detail-header">
                     <div>
                         <div class="task-detail-id">${taskTitleHTML(task)}${escapeHtml(task.id)} <span class="badge ${badgeClass}">${task.status}</span>${personaBadge}</div>
-                        <div class="task-detail-meta">${task.assigned_to ? 'Guest: ' + escapeHtml(task.assigned_to) : 'Unassigned'} · <span class="meta-log-count">${logs.length} log entries</span>${spinnerHTML(logs.length, isTaskRunning(task))}</div>
+                        <div class="task-detail-meta">${task.assigned_to ? 'Guest: ' + guestLabel(task.assigned_to) : 'Unassigned'} · <span class="meta-log-count">${logs.length} log entries</span>${spinnerHTML(logs.length, isTaskRunning(task))}</div>
                     </div>
                     <div style="display:flex;gap:0.5rem;align-items:center;">
                         ${task.status === 'PENDING' && task.priority ? `<span class="badge badge-priority" title="Priority">🔜${priorityToEmoji(task.priority)}</span>` : ''}

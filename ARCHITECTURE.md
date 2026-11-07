@@ -193,7 +193,7 @@ The Check-In Host exposes JSON-RPC methods for guest communication.
 
 | Method              | Direction   | Description                              |
 |---------------------|-------------|------------------------------------------|
-| `guest.register`    | Guest→Host  | Check in with tags and metadata.         |
+| `guest.register`    | Guest→Host  | Check in with tags, name and host.       |
 | `guest.unregister`  | Guest→Host  | Disconnect / deregister.                 |
 | `guest.heartbeat`   | Guest→Host  | Liveness ping.                           |
 | `guest.log`         | Guest→Host  | Push a log entry (chunk).                |

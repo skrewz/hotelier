@@ -2066,3 +2066,26 @@ func TestGuestExecuteTask_ReportsErrorWhenNotStopping(t *testing.T) {
 		t.Errorf("unexpected reported result: %+v", got)
 	}
 }
+
+// TestGuestRegister_ReportsHost covers issue #238: the dashboard names the
+// machine a task is running on, and only the guest knows that — so
+// registration has to carry the guest's hostname.
+func TestGuestRegister_ReportsHost(t *testing.T) {
+	want, err := os.Hostname()
+	if err != nil {
+		t.Skipf("hostname unavailable in this environment: %v", err)
+	}
+
+	srv, wsURL, _ := startTestServerWithCapture(t)
+	g := newConnectedGuest(t, wsURL, func(context.Context, TaskAssignment, LogCallback) (*TaskResult, error) {
+		return &TaskResult{Success: true}, nil
+	})
+
+	guest, ok := srv.Registry().GetGuest(g.id)
+	if !ok {
+		t.Fatal("guest not found in the server registry")
+	}
+	if guest.Host != want {
+		t.Errorf("expected host %q, got %q", want, guest.Host)
+	}
+}

@@ -101,6 +101,7 @@ type Handler func(ctx context.Context, task TaskAssignment, sendLog LogCallback)
 type Guest struct {
 	id      string
 	name    string
+	host    string
 	tags    []string
 	config  config.GuestConfig
 	client  *rpc.Client
@@ -151,6 +152,10 @@ func New(cfg config.GuestConfig, handler Handler) *Guest {
 		connLost: make(chan struct{}),
 		callResp: make(chan *rpc.JSONRPCMessage, 1),
 		taskCh:   make(chan TaskAssignment, 16),
+		// The machine this guest runs on, reported at registration so the
+		// dashboard can say where a task is executing (issue #238). A failure
+		// here just leaves the host unknown, which the UI renders as no host.
+		host: hostOrEmpty(),
 	}
 
 	// Register the notification handlers at construction time, before any
@@ -164,6 +169,17 @@ func New(cfg config.GuestConfig, handler Handler) *Guest {
 	g.registerNotificationHandlers()
 
 	return g
+}
+
+// hostOrEmpty returns the machine's hostname, or an empty string when the
+// kernel will not say (issue #238 treats an unknown host as "no host" rather
+// than a fatal error — a guest with no hostname still runs tasks fine).
+func hostOrEmpty() string {
+	host, err := os.Hostname()
+	if err != nil {
+		return ""
+	}
+	return host
 }
 
 // registerNotificationHandlers registers the handlers for server-initiated
@@ -392,6 +408,7 @@ func (g *Guest) Register() error {
 		"id":   g.id,
 		"name": g.name,
 		"tags": g.tags,
+		"host": g.host,
 	}
 
 	c := g.rpcClient()

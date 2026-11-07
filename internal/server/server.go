@@ -506,6 +506,9 @@ func (s *Server) handleGuestRegister(ctx context.Context, params json.RawMessage
 		ID   string   `json:"id"`
 		Name string   `json:"name"`
 		Tags []string `json:"tags"`
+		// Host is the machine the guest process runs on (issue #238). Optional:
+		// a guest that does not report one leaves the last known host untouched.
+		Host string `json:"host"`
 	}
 
 	if err := json.Unmarshal(params, &req); err != nil {
@@ -533,6 +536,8 @@ func (s *Server) handleGuestRegister(ctx context.Context, params json.RawMessage
 			// Update name and tags on re-registration
 			existing.Name = req.Name
 			existing.Tags = req.Tags
+			// The guest may have reconnected from a different machine.
+			s.setGuestHost(req.ID, req.Host)
 		}
 
 		reconState := s.orchestrator.ReconcileGuest(req.ID)
@@ -564,6 +569,7 @@ func (s *Server) handleGuestRegister(ctx context.Context, params json.RawMessage
 	}
 
 	s.log.Printf("guest registered: %s (tags: %v)", guest.ID, guest.Tags)
+	s.setGuestHost(guest.ID, req.Host)
 
 	// Try to assign a pending task
 	s.tryAssignTask(guest.ID)
@@ -576,6 +582,18 @@ func (s *Server) handleGuestRegister(ctx context.Context, params json.RawMessage
 			"tags": guest.Tags,
 		},
 	}, nil
+}
+
+// setGuestHost records the machine a guest reported at registration (issue
+// #238). A guest binary that predates the field sends no host, so the last
+// known host for that guest ID survives rather than being blanked out.
+func (s *Server) setGuestHost(guestID, host string) {
+	if host == "" {
+		return
+	}
+	if err := s.orchestrator.Registry().SetGuestHost(guestID, host); err != nil {
+		s.log.Printf("could not record host for guest %s: %v", guestID, err)
+	}
 }
 
 // handleGuestUnregister handles guest unregistration.
