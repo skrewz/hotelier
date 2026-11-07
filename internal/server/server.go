@@ -248,6 +248,75 @@ func (a *LogAccumulator) emitNow(taskID, line, level string, emit func(TaskLogEn
 	emit(entry)
 }
 
+// Claim revocation. A task that leaves ASSIGNED/RUNNING for PENDING has to
+// take its claim with it: until the holder is told, the assignment stays
+// queued in that guest and runs later — work the host believes it is not
+// doing, with side effects on the outside world (issue #252).
+const (
+	// cancelIntentRevoke tells a guest to give the claim up; the task itself
+	// survives and is (re-)assigned elsewhere. cancelIntentCancel — the
+	// default when the field is absent — ends the task.
+	cancelIntentRevoke = "revoke"
+	cancelIntentCancel = "cancel"
+
+	// Why the claim went away, carried to the guest for its log.
+	claimReasonRequeued       = "re-queued"
+	claimReasonConnectionLost = "connection lost"
+)
+
+// What a guest reported having done with a task.cancel. They match the
+// guest's cancelAction* values; the server counts them so a recurrence of
+// issue #252 is one number rather than a forensic exercise.
+const (
+	cancelActionRunning     = "cancelled_while_running"
+	cancelActionBeforeStart = "cancelled_before_start"
+	cancelActionNotHeld     = "not_held"
+)
+
+// claimStats is the host's view of claim revocations: how many claims were
+// given up while a task was running, how many before it started, and how many
+// acknowledgements the host refused. It is served on /api/guests.
+type claimStats struct {
+	CancelledWhileRunning int `json:"cancelled_while_running"`
+	CancelledBeforeStart  int `json:"cancelled_before_start"`
+	AckRefusals           int `json:"ack_refusals"`
+}
+
+// claimCounters tallies those events. The zero value is ready to use.
+type claimCounters struct {
+	mu                    sync.Mutex
+	cancelledWhileRunning int
+	cancelledBeforeStart  int
+	ackRefusals           int
+}
+
+func (c *claimCounters) record(action string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	switch action {
+	case cancelActionRunning:
+		c.cancelledWhileRunning++
+	case cancelActionBeforeStart:
+		c.cancelledBeforeStart++
+	}
+}
+
+func (c *claimCounters) recordAckRefusal() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.ackRefusals++
+}
+
+func (c *claimCounters) stats() claimStats {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return claimStats{
+		CancelledWhileRunning: c.cancelledWhileRunning,
+		CancelledBeforeStart:  c.cancelledBeforeStart,
+		AckRefusals:           c.ackRefusals,
+	}
+}
+
 // Server is the Check-In Host that orchestrates guests and tasks.
 type Server struct {
 	cfg            config.ServerConfig
@@ -260,8 +329,33 @@ type Server struct {
 	log            *log.Logger
 	upgrader       *rpc.Upgrader
 	mu             sync.RWMutex
+	claims         claimCounters
 	webDir         string
 	templateDir    string
+}
+
+// claimStats returns the counters behind /api/guests.
+func (s *Server) claimStats() claimStats {
+	return s.claims.stats()
+}
+
+// revokeClaim tells the holder of a task that its claim is taken back, before
+// the host re-queues the task. The notification is a no-op on a guest that
+// does not hold the task, so it is safe to send on every path and safe to
+// retry; a guest that cannot be reached is logged and left alone — the
+// revocation is an optimisation over the guest's own ack refusal.
+func (s *Server) revokeClaim(taskID, guestID, reason string) {
+	if guestID == "" {
+		return
+	}
+	s.log.Printf("revoking claim on task %s from guest %s: %s", taskID, guestID, reason)
+	if err := s.hub.SendToGuest(guestID, "task.cancel", map[string]interface{}{
+		"task_id": taskID,
+		"reason":  reason,
+		"intent":  cancelIntentRevoke,
+	}); err != nil {
+		s.log.Printf("failed to send task.cancel to guest %s: %v (guest may be disconnected)", guestID, err)
+	}
 }
 
 // Reload updates the server's runtime configuration from a new ServerConfig.
@@ -1132,6 +1226,13 @@ func (s *Server) handleGuestCancelled(ctx context.Context, params json.RawMessag
 		TaskID  string `json:"task_id"`
 		GuestID string `json:"guest_id"`
 		Reason  string `json:"reason,omitempty"`
+		// Action is what the guest did with the cancel: it names the task the
+		// confirmation is about, so a cancel for a task the guest never held
+		// no longer looks like a cancellation (issue #252).
+		Action string `json:"action,omitempty"`
+		// Intent echoes the intent the host sent: "revoke" means the host is
+		// re-queuing the task and only wanted the claim back.
+		Intent string `json:"intent,omitempty"`
 	}
 
 	if err := json.Unmarshal(params, &req); err != nil {
@@ -1140,6 +1241,31 @@ func (s *Server) handleGuestCancelled(ctx context.Context, params json.RawMessag
 
 	if req.TaskID == "" {
 		return nil, rpc.InvalidParamsError("task_id is required")
+	}
+
+	if req.Action == "" {
+		// A guest that predates the action field confirms every cancel it
+		// receives; treat the confirmation as one about a task it held.
+		req.Action = cancelActionRunning
+	}
+	s.claims.record(req.Action)
+	s.log.Printf("task %s cancel reported by guest %s (%s): %s", req.TaskID, req.GuestID, req.Action, req.Reason)
+
+	if req.Action == cancelActionNotHeld {
+		// The guest does not hold the task, so it stopped nothing and has no
+		// say in the task's fate. Ending the task here is what cancelled work
+		// another guest was legitimately running (issue #252).
+		return map[string]interface{}{"status": "accepted", "action": req.Action}, nil
+	}
+
+	if req.Intent == cancelIntentRevoke {
+		// The host already moved the task back to PENDING; the confirmation
+		// only says the guest will not run it. Cancelling it now would end a
+		// task that is queued, possibly on another guest.
+		if task, ok := s.orchestrator.GetTask(req.TaskID); ok {
+			s.broadcastTaskUpdated(req.TaskID, task.Status.String())
+		}
+		return map[string]interface{}{"status": "accepted", "action": req.Action}, nil
 	}
 
 	s.log.Printf("task %s cancelled by guest %s: %s", req.TaskID, req.GuestID, req.Reason)
@@ -1202,9 +1328,23 @@ func (s *Server) handleTaskAcknowledge(ctx context.Context, params json.RawMessa
 		return nil, rpc.InvalidParamsError("guest_id is required")
 	}
 
+	// A task the host has no record of says nothing about the claim: it is
+	// the shape of a restarted host or a stale test harness, and the guest
+	// must not read it as a refusal. Anything else the orchestrator rejects
+	// is a statement about the claim — completed, failed, re-queued, or
+	// assigned to somebody else (issue #252).
+	if _, ok := s.orchestrator.GetTask(req.TaskID); !ok {
+		s.log.Printf("task %s ack failed from guest %s: task not found", req.TaskID, guestID)
+		return nil, rpc.InternalError(fmt.Sprintf("task %s not found", req.TaskID))
+	}
+
 	if err := s.orchestrator.AcknowledgeTask(req.TaskID, guestID); err != nil {
-		s.log.Printf("task %s ack failed from guest %s: %v", req.TaskID, guestID, err)
-		return nil, rpc.InternalError(err.Error())
+		// Every refused ack is counted, not just logged: these are the
+		// "is not assigned (status: COMPLETED)" and "is assigned to guest-X,
+		// not guest-Y" refusals issue #252 was written from.
+		s.claims.recordAckRefusal()
+		s.log.Printf("task %s ack refused for guest %s: %v", req.TaskID, guestID, err)
+		return nil, rpc.ClaimRefusedError(err.Error())
 	}
 
 	s.log.Printf("task %s acknowledged by guest %s (ASSIGNED→RUNNING)", req.TaskID, guestID)
@@ -1247,6 +1387,11 @@ func (s *Server) handleGuestDisconnect(connectionID string) {
 
 	s.log.Printf("connection lost for guest %s: re-queuing task %s (%s)",
 		guestID, guest.TaskID, task.Status)
+
+	// Revoke the claim before the task goes back to the queue. The connection
+	// is dying, so this usually goes nowhere — the guest will find the claim
+	// refused when it tries to acknowledge it after reconnecting (issue #252).
+	s.revokeClaim(guest.TaskID, guestID, claimReasonConnectionLost)
 
 	// Re-queue the task atomically: task→PENDING, guest→IDLE.
 	// This allows the task to be picked up by another guest (or the same
@@ -1326,6 +1471,7 @@ func (s *Server) tryAssignTaskToEligible(taskID, skipGuestID string) {
 			p, err := s.personaStore.Get(task.Persona)
 			if err != nil {
 				s.log.Printf("failed to get persona %q for task %s: %v", task.Persona, task.ID, err)
+				s.revokeClaim(task.ID, guest.ID, claimReasonRequeued)
 				_ = s.orchestrator.RequeueTask(task.ID)
 				continue
 			}
@@ -1337,6 +1483,8 @@ func (s *Server) tryAssignTaskToEligible(taskID, skipGuestID string) {
 		}
 
 		if err := s.hub.SendToGuest(guest.ID, "task.assign", taskData); err != nil {
+			// No revoke here: the assignment never reached this guest, so it
+			// holds nothing to give back.
 			s.log.Printf("failed to push task to guest %s: %v", guest.ID, err)
 			// Rollback: re-queue the task
 			_ = s.orchestrator.RequeueTask(task.ID)
@@ -1407,6 +1555,7 @@ func (s *Server) tryAssignTask(guestID string) {
 		p, err := s.personaStore.Get(matchedTask.Persona)
 		if err != nil {
 			s.log.Printf("failed to get persona %q for task %s: %v", matchedTask.Persona, matchedTask.ID, err)
+			s.revokeClaim(matchedTask.ID, guestID, claimReasonRequeued)
 			_ = s.orchestrator.RequeueTask(matchedTask.ID)
 			return
 		}
@@ -1503,6 +1652,7 @@ func (s *Server) checkSilentGuests() {
 		cancelParams := map[string]interface{}{
 			"task_id": sg.TaskID,
 			"reason":  "guest silence timeout",
+			"intent":  cancelIntentCancel,
 		}
 		if err := s.hub.SendToGuest(sg.GuestID, "task.cancel", cancelParams); err != nil {
 			s.log.Printf("failed to send task.cancel to guest %s: %v (guest may be disconnected)", sg.GuestID, err)
@@ -1525,6 +1675,11 @@ func (s *Server) checkStuckTasks() {
 	for _, st := range stuck {
 		s.log.Printf("task %s stuck on guest %s for > %v, re-queuing",
 			st.TaskID, st.GuestID, timeout)
+
+		// The probe moved the task back to PENDING; the guest may still hold
+		// the assignment in its queue and run it later. Revoke that claim
+		// (issue #252).
+		s.revokeClaim(st.TaskID, st.GuestID, claimReasonRequeued)
 
 		// Notify the UI
 		s.broadcastTaskUpdated(st.TaskID, "PENDING")
@@ -1882,6 +2037,7 @@ func (s *Server) handleTaskCancelHTTP(w http.ResponseWriter, r *http.Request, ta
 		if err := s.hub.SendToGuest(task.AssignedTo, "task.cancel", map[string]interface{}{
 			"task_id": taskID,
 			"reason":  "user requested cancellation",
+			"intent":  cancelIntentCancel,
 		}); err != nil {
 			s.log.Printf("failed to send task.cancel to guest %s: %v", task.AssignedTo, err)
 			http.Error(w, fmt.Sprintf("failed to notify guest: %v", err), http.StatusServiceUnavailable)
@@ -1933,6 +2089,7 @@ func (s *Server) HandleGuests(w http.ResponseWriter, r *http.Request) {
 			"count":              len(listed),
 			"heartbeat_interval": s.effectiveHeartbeatInterval(),
 			"silence_timeout":    s.cfg.SilenceTimeout,
+			"stats":              s.claimStats(),
 		})
 	default:
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)

@@ -236,10 +236,15 @@ curl -X POST http://localhost:8080/api/tasks \
 | `POST` | `/api/tasks` | Submit a new task |
 | `GET` | `/api/tasks/:id` | Get task details |
 | `GET` | `/api/tasks/:id/download` | Download the task's whole log trace as JSONL |
-| `GET` | `/api/guests` | List connected guests (UID, host, state, tags) |
+| `GET` | `/api/guests` | List connected guests (UID, host, state, tags) and the claim counters |
 | `GET` | `/api/guests/:id` | Get guest details |
 | `GET` | `/api/health` | Health check |
 | `WS` | `/ws` | WebSocket (JSON-RPC) |
+
+`/api/guests` also carries a `stats` object counting claim revocations —
+`cancelled_while_running`, `cancelled_before_start` and `ack_refusals` — so a
+guest running work the host has already closed is one number rather than a log
+trawl.
 
 ## Tags
 
