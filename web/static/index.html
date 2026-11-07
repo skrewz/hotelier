@@ -28,6 +28,9 @@
         .guest-tags { font-size: 0.75rem; color: #64748b; margin-top: 0.25rem; }
         .guest-uid { font-size: 0.7rem; color: #64748b; margin-top: 0.25rem; font-family: 'SF Mono', 'Fira Code', monospace; }
         .guest-host { font-size: 0.7rem; color: #64748b; margin-top: 0.125rem; }
+        .guest-latency { font-size: 0.7rem; color: #64748b; margin-top: 0.125rem; }
+        .guest-latency.latency-warn { color: #f59e0b; }
+        .guest-latency.latency-crit { color: #ef4444; }
         .guest-status { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 0.5rem; }
         .status-idle { background: #22c55e; }
         .status-running { background: #f59e0b; }
@@ -606,6 +609,7 @@
                 const guests = await guestsRes.json();
                 const tasks = await tasksRes.json();
                 indexGuestHosts(guests.guests || []);
+                updateGuestLatencyThresholds(guests);
                 renderGuests(guests);
                 renderTasks(tasks);
                 updateStats(guests, tasks);
@@ -653,6 +657,39 @@
             return host ? escapeHtml(guestID) + ' @ ' + escapeHtml(host) : escapeHtml(guestID);
         }
 
+        // Check-in latency colour thresholds, in seconds (issue #240).
+        // Refreshed from the server's live config on every /api/guests poll so
+        // a config hot-reload is reflected without a page reload.
+        //   warn (orange) — two heartbeat intervals: at least one heartbeat was
+        //                   missed, which is unexpected.
+        //   crit (red)    — half the silence timeout: halfway towards the guest
+        //                   being declared stale. 0 (or a disabled timeout)
+        //                   means no red tier.
+        let latencyWarnSeconds = 60;
+        let latencyCritSeconds = 0;
+
+        function updateGuestLatencyThresholds(data) {
+            const interval = data.heartbeat_interval > 0 ? data.heartbeat_interval : 30;
+            latencyWarnSeconds = 2 * interval;
+            latencyCritSeconds = data.silence_timeout > 0 ? data.silence_timeout / 2 : 0;
+        }
+
+        // latencyTier maps a heartbeat age in seconds to its colour class.
+        // The critical tier is checked first so it wins when the thresholds
+        // are configured close together.
+        function latencyTier(seconds) {
+            if (latencyCritSeconds > 0 && seconds >= latencyCritSeconds) return 'latency-crit';
+            if (seconds >= latencyWarnSeconds) return 'latency-warn';
+            return '';
+        }
+
+        function formatAge(seconds) {
+            const s = Math.max(0, Math.round(seconds));
+            if (s < 60) return s + 's';
+            if (s < 3600) return Math.floor(s / 60) + 'm ' + (s % 60) + 's';
+            return Math.floor(s / 3600) + 'h ' + Math.floor((s % 3600) / 60) + 'm';
+        }
+
         function renderGuests(data) {
             const list = document.getElementById('guest-list');
             const guests = data.guests || [];
@@ -662,6 +699,12 @@
             }
             list.innerHTML = guests.map(a => {
                 const statusClass = `status-${a.state.toLowerCase()}`;
+                // Seconds since the last heartbeat, measured on the server to
+                // avoid client/server clock skew. Absent from an older server,
+                // in which case the row is simply not rendered (issue #240).
+                const latency = typeof a.heartbeat_age_seconds === 'number'
+                    ? `<div class="guest-latency ${latencyTier(a.heartbeat_age_seconds)}" title="Time since last heartbeat">&#9201; ${formatAge(a.heartbeat_age_seconds)} ago</div>`
+                    : '';
                 // The UID is always shown: it is what a task is assigned to, so
                 // hiding it behind a display name leaves the two views
                 // unrelatable (issue #238). When the guest has no name the
@@ -670,6 +713,7 @@
                     <div class="guest-name"><span class="guest-status ${statusClass}"></span>${a.name || a.id}</div>
                     ${a.name && a.name !== a.id ? `<div class="guest-uid" title="Guest UID">${escapeHtml(a.id)}</div>` : ''}
                     ${a.host ? `<div class="guest-host" title="Machine this guest runs on">&#128421; ${escapeHtml(a.host)}</div>` : ''}
+                    ${latency}
                     <div class="guest-tags">${(a.tags || []).join(', ')}</div>
                 </div>`;
             }).join('');
