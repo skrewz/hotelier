@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"log"
 	"strings"
 	"sync"
@@ -505,4 +506,179 @@ func TestGuest_CancelNamesTheRunningTask_AbortsItAndConfirms(t *testing.T) {
 	if !logs.contains("cancelled while running") {
 		t.Errorf("expected the abort to be logged as 'cancelled while running', got:\n%s", logs.String())
 	}
+}
+
+// TestGuest_QueuedClaimIsHeldTheMomentAssignIsHandled closes the window the
+// claim record exists to close: the record must exist before the channel
+// send, because the send is the moment the dispatcher can take the
+// assignment. A cancel handled immediately after task.assign returns must
+// find the claim and answer cancelled_before_start, never not_held (issue
+// #252 review).
+func TestGuest_QueuedClaimIsHeldTheMomentAssignIsHandled(t *testing.T) {
+	srv, wsURL := startTestServer(t)
+	cap := &cancelCapture{}
+	captureCancels(srv.Hub(), cap)
+
+	release1 := make(chan struct{})
+	var started sync.Map
+	g := newConnectedGuest(t, wsURL, func(_ context.Context, task TaskAssignment, _ LogCallback) (*TaskResult, error) {
+		started.Store(task.TaskID, true)
+		if task.TaskID == "task-1" {
+			<-release1
+		}
+		return &TaskResult{TaskID: task.TaskID, Success: true}, nil
+	})
+	go g.taskDispatcher(context.Background())
+
+	if !g.hub.InvokeNotificationHandler("task.assign", assignParams(t, TaskAssignment{TaskID: "task-1", Prompt: "long task"})) {
+		t.Fatal("no task.assign handler registered")
+	}
+	waitForTaskRunning(t, g, "task-1")
+
+	if !g.hub.InvokeNotificationHandler("task.assign", assignParams(t, TaskAssignment{TaskID: "task-2", Prompt: "queued task"})) {
+		t.Fatal("no task.assign handler registered")
+	}
+	// No sleep: the cancel is handled immediately after the assign
+	// returns, the earliest it could possibly arrive.
+	if !g.hub.InvokeNotificationHandler("task.cancel", cancelParams(t, TaskCancel{TaskID: "task-2", Reason: "re-queued"})) {
+		t.Fatal("no task.cancel handler registered")
+	}
+
+	calls := cap.all()
+	if len(calls) != 1 {
+		t.Fatalf("expected one guest.cancelled confirmation, got %d", len(calls))
+	}
+	if got := calls[0]["action"]; got != cancelActionBeforeStart {
+		t.Errorf("a cancel immediately after the assign must find the claim, got action %v", got)
+	}
+
+	close(release1)
+	time.Sleep(200 * time.Millisecond)
+	if _, ok := started.Load("task-2"); ok {
+		t.Error("the revoked task-2 was executed despite the cancelled_before_start confirmation")
+	}
+}
+
+// TestGuest_QueueFullAssignmentLeavesNoClaim asserts the undo half of the
+// same handler: an assignment the guest could not queue is not held, so a
+// later cancel must not find a phantom claim for it.
+func TestGuest_QueueFullAssignmentLeavesNoClaim(t *testing.T) {
+	_, wsURL := startTestServer(t)
+
+	release1 := make(chan struct{})
+	g := newConnectedGuest(t, wsURL, func(_ context.Context, task TaskAssignment, _ LogCallback) (*TaskResult, error) {
+		if task.TaskID == "task-1" {
+			<-release1
+		}
+		return &TaskResult{TaskID: task.TaskID, Success: true}, nil
+	})
+	go g.taskDispatcher(context.Background())
+
+	if !g.hub.InvokeNotificationHandler("task.assign", assignParams(t, TaskAssignment{TaskID: "task-1", Prompt: "long task"})) {
+		t.Fatal("no task.assign handler registered")
+	}
+	waitForTaskRunning(t, g, "task-1")
+
+	// The dispatcher stays inside ExecuteTask(task-1), so nothing drains
+	// the 16-slot buffer: task-2..task-17 fill it and task-overflow does
+	// not fit.
+	for i := 2; i <= 17; i++ {
+		id := fmt.Sprintf("task-%d", i)
+		if !g.hub.InvokeNotificationHandler("task.assign", assignParams(t, TaskAssignment{TaskID: id, Prompt: "p"})) {
+			t.Fatal("no task.assign handler registered")
+		}
+	}
+	if !g.hub.InvokeNotificationHandler("task.assign", assignParams(t, TaskAssignment{TaskID: "task-overflow", Prompt: "p"})) {
+		t.Fatal("no task.assign handler registered")
+	}
+
+	if g.holdsClaim("task-overflow") {
+		t.Error("a dropped assignment must leave no claim behind")
+	}
+	if !g.holdsClaim("task-17") {
+		t.Error("an assignment that fit the queue must be held")
+	}
+	close(release1)
+}
+
+// TestGuest_DispatcherExitPrunesQueuedClaims covers the pruning half of the
+// issue #252 review: when the dispatcher exits — connection lost or the
+// guest stopping — the claims for tasks still waiting on it must not
+// survive it, or a later cancel answers cancelled_before_start for work the
+// guest no longer has anywhere to run.
+func TestGuest_DispatcherExitPrunesQueuedClaims(t *testing.T) {
+	_, wsURL := startTestServer(t)
+
+	var started sync.Map
+	g := newConnectedGuest(t, wsURL, func(_ context.Context, task TaskAssignment, _ LogCallback) (*TaskResult, error) {
+		started.Store(task.TaskID, true)
+		return &TaskResult{TaskID: task.TaskID, Success: true}, nil
+	})
+
+	// Simulate the guest being busy on another connection so the
+	// dispatcher parks in waitForIdle, however it picks up the assignment.
+	g.mu.Lock()
+	g.running = true
+	g.mu.Unlock()
+
+	dispatcherCtx, cancelDispatcher := context.WithCancel(context.Background())
+	go g.taskDispatcher(dispatcherCtx)
+
+	if !g.hub.InvokeNotificationHandler("task.assign", assignParams(t, TaskAssignment{TaskID: "task-pending", Prompt: "p"})) {
+		t.Fatal("no task.assign handler registered")
+	}
+	if !g.holdsClaim("task-pending") {
+		t.Fatal("expected the assignment to be claimed")
+	}
+
+	cancelDispatcher()
+	time.Sleep(200 * time.Millisecond)
+
+	g.mu.Lock()
+	g.running = false
+	g.mu.Unlock()
+	time.Sleep(100 * time.Millisecond)
+
+	if g.holdsClaim("task-pending") {
+		t.Error("the claim survived the dispatcher's exit")
+	}
+	if _, ok := started.Load("task-pending"); ok {
+		t.Error("the dropped task ran anyway after the dispatcher exited")
+	}
+}
+
+// TestGuest_AlreadyRunningDeclinePrunesClaims is the second pruning hole:
+// ExecuteTask returns "already running" before its own claim record is
+// touched, and the decline that follows hands the task back to the host —
+// so the claim must go with it.
+func TestGuest_AlreadyRunningDeclinePrunesClaims(t *testing.T) {
+	_, wsURL := startTestServer(t)
+	g := newConnectedGuest(t, wsURL, func(_ context.Context, task TaskAssignment, _ LogCallback) (*TaskResult, error) {
+		return &TaskResult{TaskID: task.TaskID, Success: true}, nil
+	})
+
+	g.mu.Lock()
+	g.running = true
+	g.currentTaskID = "task-running"
+	g.claims["task-declined"] = struct{}{}
+	g.revoked["task-declined"] = struct{}{}
+	g.mu.Unlock()
+
+	_, err := g.ExecuteTask(TaskAssignment{TaskID: "task-declined", Prompt: "p"})
+	if err == nil || !strings.Contains(err.Error(), "already running") {
+		t.Fatalf("expected an 'already running' error, got %v", err)
+	}
+
+	g.mu.Lock()
+	_, heldClaims := g.claims["task-declined"]
+	_, heldRevoked := g.revoked["task-declined"]
+	g.mu.Unlock()
+	if heldClaims || heldRevoked {
+		t.Error("the declined task's claim records survived the 'already running' return")
+	}
+
+	g.mu.Lock()
+	g.running = false
+	g.currentTaskID = ""
+	g.mu.Unlock()
 }

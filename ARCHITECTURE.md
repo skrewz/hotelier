@@ -320,6 +320,16 @@ task it acted on and echoes the intent, so a revocation never cancels a task
 that is already back in the queue, and a confirmation from a guest that holds
 nothing never ends another guest's task.
 
+The intent is resolved host-side even when the guest cannot echo it: a guest
+that predates the field sends neither `action` nor `intent`, so the host
+remembers the intent of the last `task.cancel` it sent for a task and
+resolves an intent-less confirmation against that record rather than
+defaulting it to a cancel. Only two revocation reasons exist — `re-queued`
+and `connection lost` — because every re-queue revokes the claim from its
+holder at the moment it re-queues: a revocation is never still in flight
+when the task lands elsewhere, so a `reassigned` reason would have no path
+able to send it.
+
 The guest's reply stays the authority on whether it stopped; the host's
 acknowledgement is the authority on whether the work is still its own. A
 refused `task.acknowledge` is a decision, not a transport hiccup: the guest

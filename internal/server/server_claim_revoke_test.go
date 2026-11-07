@@ -317,3 +317,123 @@ func TestHandleGuests_ExposesClaimStats(t *testing.T) {
 		t.Errorf("expected cancelled_before_start 1, got %d", body.Stats.CancelledBeforeStart)
 	}
 }
+
+// TestHandleGuestCancelled_NotHeldWithCancelIntent_EndsTask covers the user
+// cancel that arrives as a not_held confirmation: the host believes the task
+// is RUNNING, but the guest no longer holds it (it restarted, or dropped the
+// claim after a refused acknowledgement). The cancel was requested by the
+// HTTP caller, not by this guest, so the confirmation must end the task —
+// returning early would leave it RUNNING with no holder until the stuck-task
+// probe re-queued it, running work the user had explicitly cancelled.
+func TestHandleGuestCancelled_NotHeldWithCancelIntent_EndsTask(t *testing.T) {
+	srv := newTestServer(t)
+	go srv.Hub().Run()
+	if _, err := srv.Registry().Register("guest-1", "Test Guest", []string{"default"}); err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	addAssignedTask(t, srv, "cancel-1", "guest-1")
+	if err := srv.Orchestrator().Queue().Start("cancel-1"); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	srv.Registry().SetGuestTask("guest-1", "cancel-1")
+
+	params, _ := json.Marshal(map[string]interface{}{
+		"task_id":  "cancel-1",
+		"guest_id": "guest-1",
+		"reason":   "user requested cancellation",
+		"action":   cancelActionNotHeld,
+		"intent":   cancelIntentCancel,
+	})
+	if _, rpcErr := srv.handleGuestCancelled(nil, params); rpcErr != nil {
+		t.Fatalf("unexpected rpc error: %v", rpcErr)
+	}
+
+	task, ok := srv.TaskQueue().Get("cancel-1")
+	if !ok {
+		t.Fatal("task not found")
+	}
+	if task.Status != queue.TaskStatusCancelled {
+		t.Errorf("a host-requested cancel must end the task even when the guest no longer holds it, got %s", task.Status)
+	}
+}
+
+// TestHandleGuestCancelled_OldGuestRevocationLeavesRequeuedTaskPending is the
+// rolling-upgrade half of issue #252: a guest that predates the action and
+// intent fields echoes neither, so a revocation confirmation must be resolved
+// against the intent the host remembers sending — not against the "cancel"
+// the absent fields used to default to, which would end a re-queued task
+// another guest may already be running.
+func TestHandleGuestCancelled_OldGuestRevocationLeavesRequeuedTaskPending(t *testing.T) {
+	srv := newTestServer(t)
+	conn := connectTestGuest(t, srv, "guest-1")
+
+	addAssignedTask(t, srv, "revoke-1", "guest-1")
+	if err := srv.Orchestrator().RequeueTask("revoke-1"); err != nil {
+		t.Fatalf("requeue: %v", err)
+	}
+	conn.Drain()
+	srv.revokeClaim("revoke-1", "guest-1", claimReasonRequeued)
+	recvCancel(t, conn)
+
+	// A pre-intent guest: no action, no intent in the confirmation.
+	params, _ := json.Marshal(map[string]interface{}{
+		"task_id":  "revoke-1",
+		"guest_id": "guest-1",
+		"reason":   "re-queued",
+	})
+	if _, rpcErr := srv.handleGuestCancelled(nil, params); rpcErr != nil {
+		t.Fatalf("unexpected rpc error: %v", rpcErr)
+	}
+
+	task, ok := srv.TaskQueue().Get("revoke-1")
+	if !ok {
+		t.Fatal("task not found")
+	}
+	if task.Status == queue.TaskStatusCancelled {
+		t.Error("an old guest's revocation confirmation cancelled a re-queued task — the host must resolve the intent-less confirmation against what it sent")
+	}
+	if task.Status != queue.TaskStatusPending {
+		t.Errorf("expected the re-queued task to stay PENDING, got %s", task.Status)
+	}
+}
+
+// TestHandleGuestCancelled_OldGuestUserCancelEndsTask checks the other arm of
+// the same remembering: a user cancel of a RUNNING task sends intent cancel
+// (or nothing at all), so an intent-less confirmation from an old guest must
+// still end the task rather than be mistaken for a revocation.
+func TestHandleGuestCancelled_OldGuestUserCancelEndsTask(t *testing.T) {
+	srv := newTestServer(t)
+	conn := connectTestGuest(t, srv, "guest-1")
+
+	addAssignedTask(t, srv, "usercancel-1", "guest-1")
+	if err := srv.Orchestrator().Queue().Start("usercancel-1"); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	srv.Registry().SetGuestTask("guest-1", "usercancel-1")
+	conn.Drain()
+
+	w := httptest.NewRecorder()
+	r := httptest.NewRequest(http.MethodPost, "/api/tasks/usercancel-1/cancel", nil)
+	srv.handleTaskCancelHTTP(w, r, "usercancel-1")
+	if w.Code != http.StatusOK {
+		t.Fatalf("cancel endpoint: %d %s", w.Code, w.Body.String())
+	}
+	recvCancel(t, conn)
+
+	params, _ := json.Marshal(map[string]interface{}{
+		"task_id":  "usercancel-1",
+		"guest_id": "guest-1",
+		"reason":   "user requested cancellation",
+	})
+	if _, rpcErr := srv.handleGuestCancelled(nil, params); rpcErr != nil {
+		t.Fatalf("unexpected rpc error: %v", rpcErr)
+	}
+
+	task, ok := srv.TaskQueue().Get("usercancel-1")
+	if !ok {
+		t.Fatal("task not found")
+	}
+	if task.Status != queue.TaskStatusCancelled {
+		t.Errorf("an old guest's cancel confirmation must still end the task, got %s", task.Status)
+	}
+}

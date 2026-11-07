@@ -263,31 +263,41 @@ func (g *Guest) registerNotificationHandlers() {
 			return
 		}
 
-		// Deduplicate: if the guest is already running this exact task,
-		// ignore the duplicate assignment. This can happen when the guest
-		// reconnects and the server re-sends an assignment it already has.
+		// Record the claim before the dispatcher can pick it up: a cancel
+		// that arrives while the assignment sits in the buffer must find it
+		// (issue #252). A fresh assignment also clears any earlier
+		// revocation of the same task, so a re-queue back to this guest
+		// runs instead of being dropped on a stale marker. The record must
+		// exist before the channel send below, because the send is the
+		// moment the dispatcher can take the assignment: recording
+		// afterwards left a window in which a cancel answered not_held for
+		// a task the guest did hold.
 		g.mu.Lock()
 		if g.currentTaskID == task.TaskID {
+			// Deduplicate: the guest is already running this exact task.
+			// This can happen when the guest reconnects and the server
+			// re-sends an assignment it already has.
 			g.mu.Unlock()
 			g.log.Printf("[RPC] ignoring duplicate task.assign for %s (already running)", task.TaskID)
 			return
 		}
+		g.claims[task.TaskID] = struct{}{}
+		delete(g.revoked, task.TaskID)
 		g.mu.Unlock()
 
 		g.log.Printf("[RPC] dispatching task %s to execution", task.TaskID)
 		select {
 		case g.taskCh <- task:
-			// Record the claim before the dispatcher can pick it up: a cancel
-			// that arrives while the assignment sits in the buffer must find it
-			// (issue #252). A fresh assignment also clears any earlier
-			// revocation of the same task, so a re-queue back to this guest
-			// runs instead of being dropped on a stale marker.
-			g.mu.Lock()
-			g.claims[task.TaskID] = struct{}{}
-			delete(g.revoked, task.TaskID)
-			g.mu.Unlock()
 			g.log.Printf("[RPC] task %s queued on guest for execution", task.TaskID)
 		default:
+			// The queue is full, so the task is not held here after all:
+			// undo the claim record, including any revocation a cancel may
+			// have attached to it inside the send window, so neither map
+			// keeps a task this guest never took.
+			g.mu.Lock()
+			delete(g.claims, task.TaskID)
+			delete(g.revoked, task.TaskID)
+			g.mu.Unlock()
 			g.log.Printf("[RPC] task queue full, dropping task %s", task.TaskID)
 		}
 	})
@@ -604,8 +614,10 @@ func (g *Guest) taskDispatcher(ctx context.Context) {
 	for {
 		select {
 		case <-ctx.Done():
+			g.dropBufferedClaims("connection lost")
 			return
 		case <-g.stopCh:
+			g.dropBufferedClaims("guest stopping")
 			return
 		case task := <-g.taskCh:
 			g.log.Printf("[DISPATCH] starting task %s", task.TaskID)
@@ -619,6 +631,10 @@ func (g *Guest) taskDispatcher(ctx context.Context) {
 			// after the current one completes is safe: the server's liveness
 			// probe keys off the guest's heartbeat, not the exact task ID.
 			if !g.waitForIdle(ctx) {
+				// Exiting with this task in hand and possibly more queued:
+				// prune their claim records so they do not outlive the
+				// dispatcher (issue #252 review).
+				g.dropBufferedClaims("dispatcher exiting", task.TaskID)
 				return
 			}
 			result, err := g.ExecuteTask(task)
@@ -663,6 +679,36 @@ func (g *Guest) waitForIdle(ctx context.Context) bool {
 		case <-g.stopCh:
 			return false
 		case <-time.After(50 * time.Millisecond):
+		}
+	}
+}
+
+// dropBufferedClaims prunes the claim bookkeeping for the named tasks and
+// for assignments still sitting in the queue when the dispatcher exits, and
+// removes the queued ones from the queue with it. The host re-queues a
+// disconnected guest's tasks when the connection drops (and revokes their
+// claims), so a buffered assignment is a stale copy of a task the host has
+// already dealt with; leaving its claim recorded would tell a later cancel
+// that this guest still has something to drop, and leaving it queued hands
+// it to the next dispatcher — which is how revoked claims outlived their
+// assignments in issue #252.
+func (g *Guest) dropBufferedClaims(why string, ids ...string) {
+	g.mu.Lock()
+	for _, id := range ids {
+		delete(g.claims, id)
+		delete(g.revoked, id)
+	}
+	g.mu.Unlock()
+	for {
+		select {
+		case task := <-g.taskCh:
+			g.mu.Lock()
+			delete(g.claims, task.TaskID)
+			delete(g.revoked, task.TaskID)
+			g.mu.Unlock()
+			g.log.Printf("[DISPATCH] dropped queued task %s (%s)", task.TaskID, why)
+		default:
+			return
 		}
 	}
 }
@@ -1005,6 +1051,12 @@ func (g *Guest) heartbeatLoop(ctx context.Context) {
 func (g *Guest) ExecuteTask(task TaskAssignment) (*TaskResult, error) {
 	g.mu.Lock()
 	if g.running {
+		// The decline that follows this error hands the task back to the
+		// host, so this guest holds nothing: drop the claim record with it,
+		// or a later cancel would answer cancelled_before_start for a task
+		// that was never in the queue.
+		delete(g.claims, task.TaskID)
+		delete(g.revoked, task.TaskID)
 		g.mu.Unlock()
 		return nil, fmt.Errorf("guest is already running a task")
 	}

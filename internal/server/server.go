@@ -330,8 +330,15 @@ type Server struct {
 	upgrader       *rpc.Upgrader
 	mu             sync.RWMutex
 	claims         claimCounters
-	webDir         string
-	templateDir    string
+	// cancelIntentMu guards cancelIntentByTask, which remembers the intent
+	// of the last task.cancel sent for each task. A guest that predates the
+	// intent field cannot echo it back, so its confirmation is resolved
+	// against what the host sent rather than against a default (issue #252
+	// review). Entries are consumed when the confirmation arrives.
+	cancelIntentMu     sync.Mutex
+	cancelIntentByTask map[string]string
+	webDir             string
+	templateDir        string
 }
 
 // claimStats returns the counters behind /api/guests.
@@ -355,7 +362,48 @@ func (s *Server) revokeClaim(taskID, guestID, reason string) {
 		"intent":  cancelIntentRevoke,
 	}); err != nil {
 		s.log.Printf("failed to send task.cancel to guest %s: %v (guest may be disconnected)", guestID, err)
+		return
 	}
+	// Remember what we asked for: the confirmation this send provokes may
+	// not carry the intent (an old guest cannot echo it).
+	s.rememberCancelIntent(taskID, cancelIntentRevoke)
+}
+
+// rememberCancelIntent records the intent of a task.cancel that was
+// successfully sent for a task, so an old guest's intent-less confirmation
+// is resolved against what the host actually asked for.
+func (s *Server) rememberCancelIntent(taskID, intent string) {
+	s.cancelIntentMu.Lock()
+	defer s.cancelIntentMu.Unlock()
+	if s.cancelIntentByTask == nil {
+		s.cancelIntentByTask = make(map[string]string)
+	}
+	s.cancelIntentByTask[taskID] = intent
+}
+
+// resolveCancelIntent decides what a guest.cancelled confirmation means:
+// a guest that can echo the intent does so and consumes the remembered
+// entry; a guest that cannot has its confirmation resolved against the last
+// intent sent for that task, defaulting to cancel — the meaning task.cancel
+// carried before the field existed.
+//
+// The entry is consumed here and nowhere else. Per-connection FIFO means a
+// guest sends the confirmation for a task.cancel before it even reads an
+// assignment sent after it, so clearing the entry on (re-)assignment could
+// only ever lose it before the confirmation it is meant to resolve arrives.
+func (s *Server) resolveCancelIntent(taskID, echoed string) string {
+	s.cancelIntentMu.Lock()
+	defer s.cancelIntentMu.Unlock()
+	if echoed != "" {
+		delete(s.cancelIntentByTask, taskID)
+		return echoed
+	}
+	intent, ok := s.cancelIntentByTask[taskID]
+	if !ok {
+		return cancelIntentCancel
+	}
+	delete(s.cancelIntentByTask, taskID)
+	return intent
 }
 
 // Reload updates the server's runtime configuration from a new ServerConfig.
@@ -1243,6 +1291,11 @@ func (s *Server) handleGuestCancelled(ctx context.Context, params json.RawMessag
 		return nil, rpc.InvalidParamsError("task_id is required")
 	}
 
+	// Resolve the intent before anything else: it — not the guest's action —
+	// decides who owns the task's fate. An echoed intent wins; a missing one
+	// (an old guest) falls back to what the host last sent for this task.
+	intent := s.resolveCancelIntent(req.TaskID, req.Intent)
+
 	if req.Action == "" {
 		// A guest that predates the action field confirms every cancel it
 		// receives; treat the confirmation as one about a task it held.
@@ -1251,21 +1304,27 @@ func (s *Server) handleGuestCancelled(ctx context.Context, params json.RawMessag
 	s.claims.record(req.Action)
 	s.log.Printf("task %s cancel reported by guest %s (%s): %s", req.TaskID, req.GuestID, req.Action, req.Reason)
 
-	if req.Action == cancelActionNotHeld {
-		// The guest does not hold the task, so it stopped nothing and has no
-		// say in the task's fate. Ending the task here is what cancelled work
-		// another guest was legitimately running (issue #252).
-		return map[string]interface{}{"status": "accepted", "action": req.Action}, nil
-	}
-
-	if req.Intent == cancelIntentRevoke {
-		// The host already moved the task back to PENDING; the confirmation
-		// only says the guest will not run it. Cancelling it now would end a
-		// task that is queued, possibly on another guest.
+	if intent == cancelIntentRevoke {
+		// The host re-queued the task and kept its fate in its own hands.
+		// Whether the guest dropped a queued claim or no longer held the
+		// task at all, the confirmation only says this guest will not run
+		// it. Cancelling here would end a task that is queued, possibly on
+		// another guest (issue #252) — the guest has no say in the fate of
+		// a task it was only asked to give back.
 		if task, ok := s.orchestrator.GetTask(req.TaskID); ok {
 			s.broadcastTaskUpdated(req.TaskID, task.Status.String())
 		}
 		return map[string]interface{}{"status": "accepted", "action": req.Action}, nil
+	}
+
+	// The cancel was requested by the host — the user's cancel endpoint or
+	// silence detection — not by this guest, so the task ends whether or not
+	// this guest still holds it. A not_held confirmation used to return
+	// early, which left a task the user had cancelled sitting RUNNING with
+	// no holder until the stuck-task probe re-queued it — running work the
+	// user had explicitly cancelled.
+	if req.Action == cancelActionNotHeld {
+		s.log.Printf("task %s not held by guest %s; ending it because the cancel was requested by the host", req.TaskID, req.GuestID)
 	}
 
 	s.log.Printf("task %s cancelled by guest %s: %s", req.TaskID, req.GuestID, req.Reason)
@@ -1567,6 +1626,9 @@ func (s *Server) tryAssignTask(guestID string) {
 	}
 
 	if err := s.hub.SendToGuest(guestID, "task.assign", taskData); err != nil {
+		// No revoke here: the assignment never reached this guest, so it
+		// holds nothing to give back (same reasoning as the push-failure
+		// rollback in tryAssignTaskToEligible).
 		s.log.Printf("failed to push task to guest %s: %v", guestID, err)
 		// Rollback: re-queue the task atomically
 		_ = s.orchestrator.RequeueTask(matchedTask.ID)
@@ -1656,6 +1718,8 @@ func (s *Server) checkSilentGuests() {
 		}
 		if err := s.hub.SendToGuest(sg.GuestID, "task.cancel", cancelParams); err != nil {
 			s.log.Printf("failed to send task.cancel to guest %s: %v (guest may be disconnected)", sg.GuestID, err)
+		} else {
+			s.rememberCancelIntent(sg.TaskID, cancelIntentCancel)
 		}
 	}
 }
@@ -2043,6 +2107,7 @@ func (s *Server) handleTaskCancelHTTP(w http.ResponseWriter, r *http.Request, ta
 			http.Error(w, fmt.Sprintf("failed to notify guest: %v", err), http.StatusServiceUnavailable)
 			return
 		}
+		s.rememberCancelIntent(taskID, cancelIntentCancel)
 	}
 
 	// Broadcast task.updated to browsers
