@@ -84,6 +84,7 @@ log_level: "info"
 | Field | Description | Default |
 |-------|-------------|--------|
 | `url` | Full WebSocket URL of the Check-In Host (`ws://` or `wss://`). Scheme defaults to `ws://` or `wss://` based on mTLS config if omitted. | — |
+| `id` | Identity the guest registers under. Set it to something stable per machine (typically the hostname) and a process restart keeps the same identity in the registry; deployments template it. See [Guest identity](#guest-identity). | generated: `guest-<8 random hex>` |
 | `working_dir` | Base directory for task execution | `"/tmp/hotelier"` |
 | `log_level` | Logging level (`debug`, `info`, `warn`, `error`) | `"info"` |
 | `home_copies` | Home paths copied into every task's namespace jail (issue #201). Entries are relative to the guest's home directory: directories are copied recursively, files (e.g. a skill's dot-file config) are copied with their content and mode; entries that do not exist on this guest are skipped. Absolute paths and `..` components are rejected. | built-in set: `.pi`, `.certs`, `.forgejo-gitconfigs`, `.tokens` |
@@ -101,6 +102,37 @@ Example without mTLS:
 ```yaml
 url: "ws://localhost:8080"
 ```
+
+### Guest identity
+
+The `id` is the guest's identity in the registry, and the registry keys every
+assignment off it. When it is unset the guest generates one at process start
+(`guest-<8 random hex>`), which keeps a reconnection from colliding with the
+registration a dead process left behind — at the cost of a new identity on
+every restart.
+
+Setting a stable `id` (issue #253) keeps that identity across restarts, so
+work assigned to the machine stays associated with it. A stable id is only
+correct because the guest also says, on every registration, whether this is a
+reconnection or a fresh process:
+
+- **Reconnection** (same process, socket dropped and re-established): the
+  server reconciles the guest against the task queue, so a guest still running
+  a task keeps it.
+- **Fresh process** registering an id the registry already holds: the guest
+  holds nothing, so the server drops the stale reference and leaves the guest
+  IDLE. It does not hand back a task the previous process was given, and the
+  stuck-task probe re-queues that task within `task_assignment_timeout`.
+
+Two live processes sharing one configured id are last-writer-wins: the second
+registration takes the identity, and the first guest's task is re-queued once
+its heartbeat goes silent. Give one id to one machine.
+
+**Retiring a stale registration.** A registration left behind by a dead
+process is retired automatically once the guest has been silent for
+`silence_timeout` (stale-guest cleanup fails its task and removes the entry),
+by the guest unregistering on a graceful shutdown, or by the next fresh
+registration under the same id — which clears the task reference immediately.
 
 ## Task Submission
 

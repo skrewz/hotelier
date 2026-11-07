@@ -513,6 +513,13 @@ func (s *Server) handleGuestRegister(ctx context.Context, params json.RawMessage
 		// Host is the machine the guest process runs on (issue #238). Optional:
 		// a guest that does not report one leaves the last known host untouched.
 		Host string `json:"host"`
+		// Resumed says whether the process registering has done so before —
+		// i.e. whether "id already in the registry" is a reconnection or a
+		// brand-new process reusing a stable id (issue #253). A pointer
+		// because the field is optional: a guest binary that predates it
+		// cannot know its id survives a restart, and for such a binary a
+		// known id always *is* the same process, since it generated it.
+		Resumed *bool `json:"resumed"`
 	}
 
 	if err := json.Unmarshal(params, &req); err != nil {
@@ -544,7 +551,16 @@ func (s *Server) handleGuestRegister(ctx context.Context, params json.RawMessage
 			s.setGuestHost(req.ID, req.Host)
 		}
 
-		reconState := s.orchestrator.ReconcileGuest(req.ID)
+		// A returning process still holds whatever it was given, so its
+		// registration is reconciled against the task queue. A fresh one
+		// holds nothing, and reconciling it would hand it a task it is not
+		// running (issue #253).
+		var reconState orchestrator.ReconcileState
+		if resumed(req.Resumed) {
+			reconState = s.orchestrator.ReconcileGuest(req.ID)
+		} else {
+			reconState = s.orchestrator.ReconcileFreshGuest(req.ID)
+		}
 
 		if exists {
 			s.log.Printf("guest re-registered: %s (reconciled to %s, task: %s)",
@@ -586,6 +602,14 @@ func (s *Server) handleGuestRegister(ctx context.Context, params json.RawMessage
 			"tags": guest.Tags,
 		},
 	}, nil
+}
+
+// resumed interprets the optional resumed flag of a guest.register payload.
+// Absent means a guest binary that predates the field, whose id is generated
+// per process — for it, an id the registry already holds is always the same
+// process coming back, so the pre-issue-#253 behaviour is preserved.
+func resumed(flag *bool) bool {
+	return flag == nil || *flag
 }
 
 // setGuestHost records the machine a guest reported at registration (issue

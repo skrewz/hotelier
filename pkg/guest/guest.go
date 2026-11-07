@@ -123,6 +123,13 @@ type Guest struct {
 	callResp      chan *rpc.JSONRPCMessage
 	taskCh        chan TaskAssignment // incoming task assignments
 	currentTaskID string              // task currently being worked on (for task-aware heartbeat)
+	// registeredOnce reports whether this process has completed a
+	// guest.register round-trip. It is the answer to "is this a reconnect?"
+	// and travels with the registration so the server does not have to infer
+	// it from the id alone — with a configured id (issue #253) an id the
+	// registry already knows can equally be a brand-new process.
+	// Guarded by mu.
+	registeredOnce bool
 
 	// heartbeatForTest allows tests to stub the Heartbeat method.
 	// When nil, heartbeatLoop calls g.Heartbeat() directly.
@@ -131,8 +138,16 @@ type Guest struct {
 
 // New creates a new Guest instance.
 func New(cfg config.GuestConfig, handler Handler) *Guest {
-	// Generate an ephemeral ID so reconnects after crash don't conflict.
-	id := "guest-" + uuid.New().String()[:8]
+	// The configured id wins: it is the guest's identity in the registry, and
+	// a deployment that templates it (typically from the hostname) expects a
+	// process restart to keep the same identity (issue #253).
+	id := cfg.ID
+	if id == "" {
+		// No configured identity: fall back to an ephemeral one so a
+		// crash-reconnect cannot be mistaken for the registration the
+		// previous process left behind.
+		id = "guest-" + uuid.New().String()[:8]
+	}
 
 	logPrefix := fmt.Sprintf("[guest:%s]", id)
 	logger := log.New(os.Stdout, logPrefix+" ", log.LstdFlags)
@@ -400,17 +415,51 @@ func (g *Guest) resetConn() chan struct{} {
 	return g.connLost
 }
 
+// ID returns the guest's identity as it is reported to the registry. It is
+// fixed for the lifetime of the process: cfg.ID when configured, otherwise a
+// generated one (issue #253). Reload never changes it — renaming a running
+// guest would orphan whatever the registry has assigned to it.
+func (g *Guest) ID() string {
+	return g.id
+}
+
+// hasRegistered reports whether this process has registered before.
+func (g *Guest) hasRegistered() bool {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return g.registeredOnce
+}
+
+// markRegistered records that a registration round-trip completed, so the
+// next one is reported as a reconnect rather than a fresh start.
+func (g *Guest) markRegistered() {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.registeredOnce = true
+}
+
+// registerParams builds the guest.register payload.
+func (g *Guest) registerParams() map[string]interface{} {
+	return map[string]interface{}{
+		"id":   g.id,
+		"name": g.name,
+		"tags": g.tags,
+		"host": g.host,
+		// `resumed` distinguishes a reconnection (the same process after
+		// a lost connection) from a fresh process reusing an identity the
+		// registry still holds. Only the process knows which it is, and
+		// the server must not reconcile a fresh one against a task it was
+		// never given. Issue #253.
+		"resumed": g.hasRegistered(),
+	}
+}
+
 // Register registers the guest with the Check-In Host. The notification
 // handlers (task.assign, task.cancel) are already registered in New() — see
 // registerNotificationHandlers — so that a task.assign pushed while this
 // call is in flight is not dropped. See issue #168.
 func (g *Guest) Register() error {
-	params := map[string]interface{}{
-		"id":   g.id,
-		"name": g.name,
-		"tags": g.tags,
-		"host": g.host,
-	}
+	params := g.registerParams()
 
 	c := g.rpcClient()
 	if c == nil {
@@ -421,6 +470,12 @@ func (g *Guest) Register() error {
 	if err != nil {
 		return fmt.Errorf("register: %w", err)
 	}
+
+	// Only a completed round-trip counts: a registration that died in
+	// transport leaves the next one reported as fresh, which is the safe
+	// direction — the server then drops rather than resurrects a task
+	// reference.
+	g.markRegistered()
 
 	g.log.Printf("registered with tags: %v", g.tags)
 	return nil
