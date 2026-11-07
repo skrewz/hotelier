@@ -184,6 +184,41 @@ func TestGetGuest(t *testing.T) {
 	}
 }
 
+// TestGetAllGuestsSortedBy verifies the list order is deterministic (issue
+// #240): map iteration in Go is randomised per call, so an unsorted GetAllGuests
+// made the UI's guest list flicker up and down between polls. Registering
+// out of order and repeating the call defeats the randomisation.
+func TestGetAllGuestsSortedBy(t *testing.T) {
+	reg := newTestRegistry(t)
+
+	for _, id := range []string{"charlie", "alice", "bob"} {
+		if _, err := reg.Register(id, id, nil); err != nil {
+			t.Fatalf("register %s: %v", id, err)
+		}
+	}
+
+	for i := 0; i < 50; i++ {
+		guests := reg.GetAllGuests()
+		if len(guests) != 3 {
+			t.Fatalf("expected 3 guests, got %d", len(guests))
+		}
+		want := []string{"alice", "bob", "charlie"}
+		for j, g := range guests {
+			if g.ID != want[j] {
+				t.Fatalf("call %d: expected order %v, got %v", i, want, idsOf(guests))
+			}
+		}
+	}
+}
+
+func idsOf(guests []*Guest) []string {
+	ids := make([]string, len(guests))
+	for i, g := range guests {
+		ids[i] = g.ID
+	}
+	return ids
+}
+
 func TestGetGuestsByState(t *testing.T) {
 	reg := newTestRegistry(t)
 

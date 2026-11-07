@@ -1241,10 +1241,7 @@ func (s *Server) tryAssignTask(guestID string) {
 // the server marks any running task as failed and removes the guest from the
 // registry.
 func (s *Server) staleGuestCleanup() {
-	interval := time.Duration(s.cfg.HeartbeatInterval) * time.Second
-	if interval == 0 {
-		interval = 30 * time.Second
-	}
+	interval := time.Duration(s.effectiveHeartbeatInterval()) * time.Second
 
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
@@ -1697,19 +1694,56 @@ func (s *Server) handleTaskCancelHTTP(w http.ResponseWriter, r *http.Request, ta
 
 // handleGuests handles the /api/guests endpoint.
 // HandleGuests handles the /api/guests endpoint.
+//
+// Alongside the registry entries the response carries, per guest, the
+// server-measured seconds since its last heartbeat (so the UI can render
+// check-in latency without comparing its own clock to the server's) and, for
+// the whole list, the effective heartbeat_interval / silence_timeout the UI
+// derives its "unexpected" and "halfway to timeout" colour thresholds from
+// (issue #240).
 func (s *Server) HandleGuests(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 
 	switch r.Method {
 	case http.MethodGet:
 		guests := s.orchestrator.GetAllGuests()
+		now := time.Now()
+		listed := make([]guestWithAge, len(guests))
+		for i, g := range guests {
+			listed[i] = guestWithAge{
+				Guest:               g,
+				HeartbeatAgeSeconds: now.Sub(g.LastHeartbeat).Seconds(),
+			}
+		}
 		json.NewEncoder(w).Encode(map[string]interface{}{
-			"guests": guests,
-			"count":  len(guests),
+			"guests":             listed,
+			"count":              len(listed),
+			"heartbeat_interval": s.effectiveHeartbeatInterval(),
+			"silence_timeout":    s.cfg.SilenceTimeout,
 		})
 	default:
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 	}
+}
+
+// guestWithAge flattens a registry entry for /api/guests and adds the
+// derived heartbeat age (issue #240).
+type guestWithAge struct {
+	*registry.Guest
+	HeartbeatAgeSeconds float64 `json:"heartbeat_age_seconds"`
+}
+
+// defaultHeartbeatIntervalSeconds is the heartbeat interval assumed when the
+// config leaves it unset, matching the fallback in staleGuestCleanup.
+const defaultHeartbeatIntervalSeconds = 30
+
+// effectiveHeartbeatInterval returns the heartbeat interval guests are held
+// to, falling back to the default when the config leaves it zero.
+func (s *Server) effectiveHeartbeatInterval() int {
+	if s.cfg.HeartbeatInterval > 0 {
+		return s.cfg.HeartbeatInterval
+	}
+	return defaultHeartbeatIntervalSeconds
 }
 
 // handleGuestDetail handles the /api/guests/:id endpoint.
