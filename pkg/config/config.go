@@ -198,7 +198,7 @@ func LoadServerConfig(path string) (ServerConfig, error) {
 	if err := yaml.Unmarshal(data, &cfg); err != nil {
 		return cfg, err
 	}
-	if err := validateConcurrency(cfg); err != nil {
+	if err := cfg.ValidateConcurrency(); err != nil {
 		return cfg, err
 	}
 	return cfg, nil
@@ -207,20 +207,24 @@ func LoadServerConfig(path string) (ServerConfig, error) {
 // atRe matches a strict 24-hour "HH:MM" wall-clock time (zero-padded).
 var atRe = regexp.MustCompile(`^([01][0-9]|2[0-3]):([0-5][0-9])$`)
 
-// validateConcurrency checks the concurrency schedule keys (issue #248):
+// ValidateConcurrency checks the concurrency schedule keys (issue #248):
 // an unparseable zone, a malformed or duplicate "at", or a negative
 // concurrency is a configuration error, never silently ignored.
-func validateConcurrency(cfg ServerConfig) error {
-	if cfg.MaxConcurrentTasks < 0 {
-		return fmt.Errorf("max_concurrent_tasks must not be negative (got %d)", cfg.MaxConcurrentTasks)
+//
+// LoadServerConfig calls it, and so does every path that installs a config
+// into a running server (Server.New / Server.Reload), because a config
+// assembled in code never passes through the loader.
+func (c ServerConfig) ValidateConcurrency() error {
+	if c.MaxConcurrentTasks < 0 {
+		return fmt.Errorf("max_concurrent_tasks must not be negative (got %d)", c.MaxConcurrentTasks)
 	}
-	if cfg.ScheduleTimezone != "" {
-		if _, err := time.LoadLocation(cfg.ScheduleTimezone); err != nil {
-			return fmt.Errorf("schedule_timezone %q is not a valid IANA zone: %w", cfg.ScheduleTimezone, err)
+	if c.ScheduleTimezone != "" {
+		if _, err := loadLocation(c.ScheduleTimezone); err != nil {
+			return fmt.Errorf("schedule_timezone %q is not a valid IANA zone: %w", c.ScheduleTimezone, err)
 		}
 	}
-	seen := make(map[int]string, len(cfg.ConcurrencySchedule))
-	for _, e := range cfg.ConcurrencySchedule {
+	seen := make(map[int]string, len(c.ConcurrencySchedule))
+	for _, e := range c.ConcurrencySchedule {
 		minutes, err := parseScheduleAt(e.At)
 		if err != nil {
 			return fmt.Errorf("concurrency_schedule: %w", err)
@@ -257,8 +261,12 @@ func parseScheduleAt(at string) (int, error) {
 // last schedule entry whose "at" is at or before now in schedule_timezone,
 // wrapping to the previous day's last entry before the first one; or
 // MaxConcurrentTasks when no schedule is configured. Entries need not be
-// sorted. If the zone cannot be loaded (it would have been rejected at
-// config load time), the comparison falls back to UTC.
+// sorted.
+//
+// A schedule this function cannot trust (an unparsable "at", an unloadable
+// zone) resolves to MaxConcurrentTasks rather than to a guess. ValidateConcurrency
+// rejects such a config at load and reload time, so reaching those branches
+// means the config was built in code without ever being validated.
 func (c ServerConfig) EffectiveConcurrency(now time.Time) int {
 	if len(c.ConcurrencySchedule) == 0 {
 		return c.MaxConcurrentTasks
@@ -272,7 +280,9 @@ func (c ServerConfig) EffectiveConcurrency(now time.Time) int {
 	for _, e := range c.ConcurrencySchedule {
 		m, err := parseScheduleAt(e.At)
 		if err != nil {
-			continue // rejected by validateConcurrency at load time
+			// Dropping the entry would silently hand its window to a
+			// neighbouring cap, so fall back to the static cap instead.
+			return c.MaxConcurrentTasks
 		}
 		entries = append(entries, entry{minutes: m, value: e.Concurrency})
 	}
@@ -281,9 +291,11 @@ func (c ServerConfig) EffectiveConcurrency(now time.Time) int {
 	}
 	sort.Slice(entries, func(i, j int) bool { return entries[i].minutes < entries[j].minutes })
 
-	loc, err := time.LoadLocation(c.ScheduleTimezone)
+	loc, err := loadLocation(c.ScheduleTimezone)
 	if err != nil {
-		loc = time.UTC
+		// Evaluating the schedule in UTC would shift every boundary by the
+		// zone's offset; the static cap is the honest answer.
+		return c.MaxConcurrentTasks
 	}
 	local := now.In(loc)
 	cur := local.Hour()*60 + local.Minute()
@@ -297,6 +309,27 @@ func (c ServerConfig) EffectiveConcurrency(now time.Time) int {
 		}
 	}
 	return chosen.value
+}
+
+// zoneLocations memoises resolved *time.Location values by zone name.
+// time.LoadLocation has no cache of its own and re-reads the zone file on
+// every call; the enforcement member calls EffectiveConcurrency on every
+// assignment decision, so without this the resolver would do disk I/O per
+// decision.
+var zoneLocations sync.Map
+
+// loadLocation returns the named zone, caching successful lookups. It keeps
+// the semantics of time.LoadLocation ("" and "Local" included).
+func loadLocation(name string) (*time.Location, error) {
+	if loc, ok := zoneLocations.Load(name); ok {
+		return loc.(*time.Location), nil
+	}
+	loc, err := time.LoadLocation(name)
+	if err != nil {
+		return nil, err
+	}
+	zoneLocations.Store(name, loc)
+	return loc, nil
 }
 
 // LoadGuestConfig reads and parses a guest config file.

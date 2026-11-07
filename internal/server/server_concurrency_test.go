@@ -88,6 +88,106 @@ func TestServerReload_ConcurrencySchedule_Watcher(t *testing.T) {
 	}
 }
 
+// TestServerReload_ConcurrencyInvalidKeepsOldKeys proves a concurrency config
+// assembled in code cannot install an invalid schedule: Reload keeps the
+// previous concurrency keys, the way an invalid persona keeps the old store
+// (issue #248).
+func TestServerReload_ConcurrencyInvalidKeepsOldKeys(t *testing.T) {
+	srv := New(config.ServerConfig{
+		Host:               "127.0.0.1",
+		Port:               0,
+		MaxConcurrentTasks: 5,
+		ScheduleTimezone:   "UTC",
+		ConcurrencySchedule: []config.ConcurrencyScheduleEntry{
+			{At: "07:00", Concurrency: 2},
+			{At: "23:00", Concurrency: 4},
+		},
+	})
+
+	noon := time.Date(2026, 6, 15, 12, 0, 0, 0, time.UTC)
+	if got := srv.EffectiveConcurrency(noon); got != 2 {
+		t.Fatalf("expected schedule cap 2 before the reload, got %d", got)
+	}
+
+	// A schedule with a zone that cannot be loaded must not be installed.
+	srv.Reload(config.ServerConfig{
+		Host:               "127.0.0.1",
+		Port:               0,
+		MaxConcurrentTasks: 7,
+		ScheduleTimezone:   "Not/AZone",
+		ConcurrencySchedule: []config.ConcurrencyScheduleEntry{
+			{At: "03:00", Concurrency: 9},
+		},
+	})
+	if got := srv.EffectiveConcurrency(noon); got != 2 {
+		t.Errorf("expected the previous schedule (cap 2) to survive an invalid reload, got %d", got)
+	}
+
+	// Nor may one with a malformed "at".
+	srv.Reload(config.ServerConfig{
+		Host:               "127.0.0.1",
+		Port:               0,
+		MaxConcurrentTasks: 7,
+		ScheduleTimezone:   "UTC",
+		ConcurrencySchedule: []config.ConcurrencyScheduleEntry{
+			{At: "3:00", Concurrency: 9},
+		},
+	})
+	if got := srv.EffectiveConcurrency(noon); got != 2 {
+		t.Errorf("expected the previous schedule (cap 2) to survive a malformed at, got %d", got)
+	}
+	if got := srv.EffectiveConcurrency(time.Date(2026, 6, 15, 3, 0, 0, 0, time.UTC)); got != 4 {
+		t.Errorf("expected the previous schedule's midnight wrap (cap 4) to survive, got %d", got)
+	}
+}
+
+// TestServerReload_ConcurrencyInvalid_WatcherKeepsLastGoodConfig backs the
+// README claim that a bad edit is rejected and the running server keeps the
+// last good configuration (issue #248).
+func TestServerReload_ConcurrencyInvalid_WatcherKeepsLastGoodConfig(t *testing.T) {
+	configPath := filepath.Join(t.TempDir(), "server.yaml")
+	initial := "host: \"127.0.0.1\"\nport: 0\nmax_concurrent_tasks: 3\n"
+	if err := os.WriteFile(configPath, []byte(initial), 0o644); err != nil {
+		t.Fatalf("write initial config: %v", err)
+	}
+
+	w, err := config.NewConfigWatcher(configPath, log.New(io.Discard, "", 0), func(path string) (interface{}, error) {
+		return config.LoadServerConfig(path)
+	})
+	if err != nil {
+		t.Fatalf("NewConfigWatcher: %v", err)
+	}
+	defer w.Close()
+
+	srv := New(config.DefaultServerConfig())
+	srv.Reload(mustLoad(t, configPath))
+
+	if got := srv.EffectiveConcurrency(time.Now()); got != 3 {
+		t.Fatalf("expected static cap 3 initially, got %d", got)
+	}
+
+	updateCh := make(chan interface{}, 4)
+	go w.Run(updateCh)
+
+	// A schedule whose "at" is malformed: the watcher must reject the file
+	// rather than hand the bad config to Reload.
+	bad := initial + "concurrency_schedule:\n  - at: \"25:00\"\n    concurrency: 8\n"
+	if err := os.WriteFile(configPath, []byte(bad), 0o644); err != nil {
+		t.Fatalf("write invalid config: %v", err)
+	}
+
+	select {
+	case newCfg := <-updateCh:
+		srv.Reload(newCfg.(config.ServerConfig))
+		t.Fatalf("watcher delivered an invalid config (cap %d)", srv.EffectiveConcurrency(time.Now()))
+	case <-time.After(time.Second):
+	}
+
+	if got := srv.EffectiveConcurrency(time.Now()); got != 3 {
+		t.Errorf("expected the server to keep the last good cap 3, got %d", got)
+	}
+}
+
 func mustLoad(t *testing.T, path string) config.ServerConfig {
 	t.Helper()
 	cfg, err := config.LoadServerConfig(path)

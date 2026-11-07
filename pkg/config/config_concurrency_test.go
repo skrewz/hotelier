@@ -149,7 +149,7 @@ func TestLoadServerConfig_ConcurrencyValidation(t *testing.T) {
 }
 
 // utc builds a UTC instant on 2026-06-15 (a Sydney winter day, AEST/UTC+10).
-func utc(hour, minute int, day int) time.Time {
+func utc(day, hour, minute int) time.Time {
 	return time.Date(2026, 6, day, hour, minute, 0, 0, time.UTC)
 }
 
@@ -166,12 +166,12 @@ func dayNightSchedule(tz string) ServerConfig {
 
 func TestEffectiveConcurrency_EmptySchedule(t *testing.T) {
 	cfg := ServerConfig{MaxConcurrentTasks: 7}
-	if got := cfg.EffectiveConcurrency(utc(3, 0, 15)); got != 7 {
+	if got := cfg.EffectiveConcurrency(utc(15, 3, 0)); got != 7 {
 		t.Errorf("expected static cap 7 with empty schedule, got %d", got)
 	}
 
 	unlimited := ServerConfig{}
-	if got := unlimited.EffectiveConcurrency(utc(3, 0, 15)); got != 0 {
+	if got := unlimited.EffectiveConcurrency(utc(15, 3, 0)); got != 0 {
 		t.Errorf("expected 0 (unlimited) with empty config, got %d", got)
 	}
 }
@@ -179,10 +179,10 @@ func TestEffectiveConcurrency_EmptySchedule(t *testing.T) {
 func TestEffectiveConcurrency_OnBoundary(t *testing.T) {
 	cfg := dayNightSchedule("UTC")
 	// Exactly 07:00: the 07:00 entry takes effect at its wall-clock time.
-	if got := cfg.EffectiveConcurrency(utc(7, 0, 15)); got != 2 {
+	if got := cfg.EffectiveConcurrency(utc(15, 7, 0)); got != 2 {
 		t.Errorf("expected 2 at exactly 07:00, got %d", got)
 	}
-	if got := cfg.EffectiveConcurrency(utc(23, 0, 15)); got != 4 {
+	if got := cfg.EffectiveConcurrency(utc(15, 23, 0)); got != 4 {
 		t.Errorf("expected 4 at exactly 23:00, got %d", got)
 	}
 }
@@ -191,19 +191,19 @@ func TestEffectiveConcurrency_BeforeFirstEntry_WrapsToLastEntry(t *testing.T) {
 	cfg := dayNightSchedule("UTC")
 	// 03:00 is before the first entry; the previous day's last entry (23:00 -> 4)
 	// holds through midnight.
-	if got := cfg.EffectiveConcurrency(utc(3, 0, 15)); got != 4 {
+	if got := cfg.EffectiveConcurrency(utc(15, 3, 0)); got != 4 {
 		t.Errorf("expected 4 at 03:00 (midnight wrap), got %d", got)
 	}
 	// 06:59 is still before 07:00.
-	if got := cfg.EffectiveConcurrency(utc(6, 59, 15)); got != 4 {
+	if got := cfg.EffectiveConcurrency(utc(15, 6, 59)); got != 4 {
 		t.Errorf("expected 4 at 06:59, got %d", got)
 	}
 	// 23:59 is after the last entry.
-	if got := cfg.EffectiveConcurrency(utc(23, 59, 15)); got != 4 {
+	if got := cfg.EffectiveConcurrency(utc(15, 23, 59)); got != 4 {
 		t.Errorf("expected 4 at 23:59, got %d", got)
 	}
 	// Between the two entries.
-	if got := cfg.EffectiveConcurrency(utc(12, 0, 15)); got != 2 {
+	if got := cfg.EffectiveConcurrency(utc(15, 12, 0)); got != 2 {
 		t.Errorf("expected 2 at 12:00, got %d", got)
 	}
 }
@@ -216,7 +216,7 @@ func TestEffectiveConcurrency_UnsortedEntries(t *testing.T) {
 			{At: "07:00", Concurrency: 2},
 		},
 	}
-	if got := cfg.EffectiveConcurrency(utc(12, 0, 15)); got != 2 {
+	if got := cfg.EffectiveConcurrency(utc(15, 12, 0)); got != 2 {
 		t.Errorf("expected 2 with entries listed out of order, got %d", got)
 	}
 }
@@ -228,7 +228,7 @@ func TestEffectiveConcurrency_SingleEntry(t *testing.T) {
 		},
 	}
 	for _, hour := range []int{0, 11, 12, 23} {
-		if got := cfg.EffectiveConcurrency(utc(hour, 30, 15)); got != 3 {
+		if got := cfg.EffectiveConcurrency(utc(15, hour, 30)); got != 3 {
 			t.Errorf("expected 3 for single-entry schedule at %02d:30, got %d", hour, got)
 		}
 	}
@@ -264,11 +264,94 @@ func TestEffectiveConcurrency_TimezoneFollowsClockAcrossDST(t *testing.T) {
 	}
 }
 
-func TestEffectiveConcurrency_UnknownTimezoneFallsBackToUTC(t *testing.T) {
+func TestEffectiveConcurrency_UnknownTimezoneFallsBackToStaticCap(t *testing.T) {
 	cfg := dayNightSchedule("Not/AZone")
-	// The resolver cannot load the zone (validation would have rejected the
-	// file at load time); fall back to UTC rather than guess.
-	if got := cfg.EffectiveConcurrency(utc(3, 0, 15)); got != 4 {
-		t.Errorf("expected UTC fallback (4 at 03:00Z), got %d", got)
+	// The zone cannot be loaded (ValidateConcurrency rejects such a config,
+	// so this only happens for a config built in code). Re-interpreting the
+	// schedule in UTC would shift every boundary by the zone's offset, so
+	// the static cap wins instead.
+	if got := cfg.EffectiveConcurrency(utc(15, 3, 0)); got != cfg.MaxConcurrentTasks {
+		t.Errorf("expected static cap %d when the zone cannot be loaded, got %d", cfg.MaxConcurrentTasks, got)
+	}
+}
+
+func TestEffectiveConcurrency_MalformedAtFallsBackToStaticCap(t *testing.T) {
+	cfg := ServerConfig{
+		MaxConcurrentTasks: 9,
+		ScheduleTimezone:   "UTC",
+		ConcurrencySchedule: []ConcurrencyScheduleEntry{
+			{At: "07:00", Concurrency: 2},
+			{At: "7:30", Concurrency: 5},
+		},
+	}
+	// An unparsable "at" must not silently inherit a neighbouring entry's
+	// cap; the static cap is the documented, obvious fallback.
+	if got := cfg.EffectiveConcurrency(utc(15, 12, 0)); got != 9 {
+		t.Errorf("expected static cap 9 for an unparsable at, got %d", got)
+	}
+}
+
+func TestEffectiveConcurrency_ScheduleEntryInSpringForwardGap(t *testing.T) {
+	cfg := ServerConfig{
+		MaxConcurrentTasks: 9,
+		ScheduleTimezone:   "Australia/Sydney",
+		ConcurrencySchedule: []ConcurrencyScheduleEntry{
+			{At: "02:30", Concurrency: 1},
+			{At: "07:00", Concurrency: 2},
+			{At: "23:00", Concurrency: 4},
+		},
+	}
+
+	// An ordinary day: 02:30 is a normal boundary.
+	if got := cfg.EffectiveConcurrency(utc(15, 16, 30)); got != 1 { // 02:30 AEST
+		t.Errorf("expected 1 from the 02:30 entry on an ordinary day, got %d", got)
+	}
+
+	// Sydney springs forward on the first Sunday of October, 2026-10-04:
+	// local time jumps 02:00 -> 03:00, so 02:30 does not exist that day.
+	before := time.Date(2026, 10, 3, 15, 30, 0, 0, time.UTC) // 01:30 AEST
+	if got := cfg.EffectiveConcurrency(before); got != 4 {
+		t.Errorf("expected 4 at 01:30 AEST (previous day's 23:00 entry), got %d", got)
+	}
+	// The first instant after the gap is 03:00 AEDT, past the missing 02:30
+	// boundary, so the entry takes effect there rather than being skipped.
+	gap := time.Date(2026, 10, 3, 16, 30, 0, 0, time.UTC) // 03:30 AEDT
+	if got := cfg.EffectiveConcurrency(gap); got != 1 {
+		t.Errorf("expected 1 at 03:30 AEDT (02:30 entry takes effect after the gap), got %d", got)
+	}
+	if got := cfg.EffectiveConcurrency(time.Date(2026, 10, 3, 20, 0, 0, 0, time.UTC)); got != 2 { // 07:00 AEDT
+		t.Errorf("expected 2 at 07:00 AEDT, got %d", got)
+	}
+}
+
+// TestLoadLocation_Memoised guards the cache the resolver relies on: the
+// enforcement member calls EffectiveConcurrency on every assignment
+// decision, so a repeated lookup must not re-read the zone file.
+func TestLoadLocation_Memoised(t *testing.T) {
+	first, err := loadLocation("Australia/Sydney")
+	if err != nil {
+		t.Fatalf("loadLocation: %v", err)
+	}
+	second, err := loadLocation("Australia/Sydney")
+	if err != nil {
+		t.Fatalf("loadLocation (second call): %v", err)
+	}
+	if first != second {
+		t.Error("expected the zone to be resolved once and memoised, got two distinct locations")
+	}
+}
+
+func TestValidateConcurrency_Method(t *testing.T) {
+	if err := (ServerConfig{MaxConcurrentTasks: 2}).ValidateConcurrency(); err != nil {
+		t.Errorf("expected a plain static cap to validate, got %v", err)
+	}
+	if err := (ServerConfig{ScheduleTimezone: "Not/AZone"}).ValidateConcurrency(); err == nil {
+		t.Error("expected an unparseable zone to be rejected")
+	}
+	if err := (ServerConfig{ConcurrencySchedule: []ConcurrencyScheduleEntry{{At: "7:00", Concurrency: 2}}}).ValidateConcurrency(); err == nil {
+		t.Error("expected a malformed at to be rejected")
+	}
+	if err := (ServerConfig{MaxConcurrentTasks: -1}).ValidateConcurrency(); err == nil {
+		t.Error("expected a negative static cap to be rejected")
 	}
 }

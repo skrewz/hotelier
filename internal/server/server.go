@@ -267,8 +267,10 @@ type Server struct {
 // Reload updates the server's runtime configuration from a new ServerConfig.
 // It applies changes that can take effect without restarting:
 //   - MaxGuests: updates the registry capacity
-//   - MaxConcurrentTasks, ConcurrencySchedule, ScheduleTimezone: read live
-//     by EffectiveConcurrency, so schedule edits take effect here too
+//   - MaxConcurrentTasks, ConcurrencySchedule, ScheduleTimezone: validated
+//     here and read live by EffectiveConcurrency, so schedule edits take
+//     effect here too; an invalid set of keys is rejected and the previous
+//     values are kept
 //   - LogDir: recreates the disk log store if the path changed
 //   - Personas: rebuilds the persona store
 //   - TaskTimeout, HeartbeatInterval, MaxLogSize: stored for future use
@@ -278,6 +280,19 @@ func (s *Server) Reload(cfg config.ServerConfig) {
 	defer s.mu.Unlock()
 
 	old := s.cfg
+
+	// The concurrency keys are validated here as well as by LoadServerConfig:
+	// a config assembled in code reaches EffectiveConcurrency through this
+	// path without ever passing the loader, and an invalid schedule must be
+	// reported rather than resolved to a plausible-looking wrong cap (issue
+	// #248). Keep the previous keys on failure, the way the personas branch
+	// below keeps the old store.
+	if err := cfg.ValidateConcurrency(); err != nil {
+		s.log.Printf("invalid concurrency configuration after reload: %v (keeping previous concurrency settings)", err)
+		cfg.MaxConcurrentTasks = old.MaxConcurrentTasks
+		cfg.ConcurrencySchedule = old.ConcurrencySchedule
+		cfg.ScheduleTimezone = old.ScheduleTimezone
+	}
 	s.cfg = cfg
 
 	// Update max guests if changed
@@ -362,6 +377,14 @@ func New(cfg config.ServerConfig) *Server {
 
 	// Set max guests on orchestrator
 	s.orchestrator.SetMaxGuests(cfg.MaxGuests)
+
+	// Validate the concurrency configuration at startup the way personas
+	// are; the file path rejects such a config in LoadServerConfig, but a
+	// config built in code would otherwise reach EffectiveConcurrency
+	// unvalidated (issue #248).
+	if err := cfg.ValidateConcurrency(); err != nil {
+		logger.Printf("invalid concurrency configuration: %v", err)
+	}
 
 	// Validate persona configuration at startup
 	if err := persona.Validate(cfg.Personas); err != nil {

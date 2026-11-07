@@ -88,7 +88,9 @@ concurrency_schedule:
 Malformed schedules (unparseable zone, malformed or duplicate `at`, negative
 `concurrency`) are reported as configuration errors at load time; a bad edit
 is rejected by the config watcher and the running server keeps the last good
-configuration.
+configuration. An `at` that falls inside a daylight-saving gap (Sydney has no
+02:00–03:00 on the first Sunday of October) takes effect at the first instant
+after the gap.
 
 ### Guest (`config/guest.yaml`)
 
