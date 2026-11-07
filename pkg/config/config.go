@@ -54,7 +54,9 @@ type ServerConfig struct {
 	// MaxConcurrentTasks is the static cap on how many tasks the server is
 	// willing to run at any moment (0 = unlimited). Used when
 	// ConcurrencySchedule is empty; the schedule takes precedence otherwise
-	// (issue #248).
+	// (issue #248). EffectiveConcurrency reports the uncapped case as
+	// ConcurrencyUnlimited rather than as 0, because a schedule entry uses 0
+	// for the opposite: a full pause.
 	MaxConcurrentTasks int `yaml:"max_concurrent_tasks"`
 	// ConcurrencySchedule is a list of daily wall-clock boundaries for the
 	// concurrency cap. Each entry takes effect at its At time (interpreted
@@ -80,14 +82,29 @@ type ServerConfig struct {
 	Personas []persona.Persona `yaml:"personas"`
 }
 
+// ConcurrencyUnlimited is the value EffectiveConcurrency returns when no cap
+// is in force, so that "unlimited" cannot be mistaken for the 0 a schedule
+// entry uses to pause all work (max_concurrent_tasks itself keeps the
+// max_guests convention, where 0 means unlimited, and the resolver translates
+// it into this sentinel).
+//
+// It is deliberately negative: ValidateConcurrency rejects a negative cap in
+// either key, so no configuration can carry it and a resolver result is never
+// ambiguous. A consumer must compare against ConcurrencyUnlimited before
+// treating the result as a number of tasks; a bare "cap == 0 means unlimited"
+// test would turn a configured overnight pause into no pause at all.
+const ConcurrencyUnlimited = -1
+
 // ConcurrencyScheduleEntry is one boundary of the daily concurrency
 // schedule (issue #248).
 type ConcurrencyScheduleEntry struct {
 	// At is the wall-clock time the entry takes effect, in strict
 	// 24-hour "HH:MM" form, interpreted in the config's schedule_timezone.
 	At string `yaml:"at"`
-	// Concurrency is the cap in force from At until the next entry
-	// (0 pauses all work).
+	// Concurrency is the cap in force from At until the next entry. Unlike
+	// max_concurrent_tasks, where 0 means unlimited, 0 here is a real cap:
+	// no new work may start. EffectiveConcurrency keeps the two apart by
+	// reporting the uncapped case as ConcurrencyUnlimited.
 	Concurrency int `yaml:"concurrency"`
 }
 
@@ -260,16 +277,29 @@ func parseScheduleAt(at string) (int, error) {
 // EffectiveConcurrency returns the concurrency cap in force at now: the
 // last schedule entry whose "at" is at or before now in schedule_timezone,
 // wrapping to the previous day's last entry before the first one; or
-// MaxConcurrentTasks when no schedule is configured. Entries need not be
+// max_concurrent_tasks when no schedule is configured. Entries need not be
 // sorted.
 //
+// The result is a cap on how many tasks may start, and the three answers a
+// caller can get mean:
+//
+//   - ConcurrencyUnlimited: no cap is in force, work starts freely. This is
+//     what an unconfigured deployment resolves to, since max_concurrent_tasks
+//     defaults to 0 and 0 means unlimited in that key.
+//   - 0: no new task may start. A schedule entry expresses this overnight
+//     pause with concurrency: 0.
+//   - n > 0: at most n tasks may be in flight.
+//
+// Callers must test ConcurrencyUnlimited first; comparing only for 0 would
+// read an overnight pause as "unlimited".
+//
 // A schedule this function cannot trust (an unparsable "at", an unloadable
-// zone) resolves to MaxConcurrentTasks rather than to a guess. ValidateConcurrency
+// zone) resolves to the static cap rather than to a guess. ValidateConcurrency
 // rejects such a config at load and reload time, so reaching those branches
 // means the config was built in code without ever being validated.
 func (c ServerConfig) EffectiveConcurrency(now time.Time) int {
 	if len(c.ConcurrencySchedule) == 0 {
-		return c.MaxConcurrentTasks
+		return c.staticConcurrency()
 	}
 
 	type entry struct {
@@ -282,12 +312,12 @@ func (c ServerConfig) EffectiveConcurrency(now time.Time) int {
 		if err != nil {
 			// Dropping the entry would silently hand its window to a
 			// neighbouring cap, so fall back to the static cap instead.
-			return c.MaxConcurrentTasks
+			return c.staticConcurrency()
 		}
 		entries = append(entries, entry{minutes: m, value: e.Concurrency})
 	}
 	if len(entries) == 0 {
-		return c.MaxConcurrentTasks
+		return c.staticConcurrency()
 	}
 	sort.Slice(entries, func(i, j int) bool { return entries[i].minutes < entries[j].minutes })
 
@@ -295,7 +325,7 @@ func (c ServerConfig) EffectiveConcurrency(now time.Time) int {
 	if err != nil {
 		// Evaluating the schedule in UTC would shift every boundary by the
 		// zone's offset; the static cap is the honest answer.
-		return c.MaxConcurrentTasks
+		return c.staticConcurrency()
 	}
 	local := now.In(loc)
 	cur := local.Hour()*60 + local.Minute()
@@ -309,6 +339,17 @@ func (c ServerConfig) EffectiveConcurrency(now time.Time) int {
 		}
 	}
 	return chosen.value
+}
+
+// staticConcurrency states the static cap in the resolver's vocabulary:
+// max_concurrent_tasks follows the max_guests convention where 0 means
+// unlimited, and ConcurrencyUnlimited is how the resolver says that without
+// colliding with the 0 a schedule entry uses for a full pause.
+func (c ServerConfig) staticConcurrency() int {
+	if c.MaxConcurrentTasks == 0 {
+		return ConcurrencyUnlimited
+	}
+	return c.MaxConcurrentTasks
 }
 
 // zoneLocations memoises resolved *time.Location values by zone name.

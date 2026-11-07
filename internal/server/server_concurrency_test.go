@@ -15,8 +15,8 @@ func TestServerReload_ConcurrencySchedule(t *testing.T) {
 	srv := newTestServer(t)
 
 	// Initially: no schedule, no static cap -> unlimited.
-	if got := srv.EffectiveConcurrency(time.Now()); got != 0 {
-		t.Fatalf("expected unlimited (0) initially, got %d", got)
+	if got := srv.EffectiveConcurrency(time.Now()); got != config.ConcurrencyUnlimited {
+		t.Fatalf("expected unlimited initially, got %d", got)
 	}
 
 	// Reload carrying only the static cap.
@@ -39,6 +39,33 @@ func TestServerReload_ConcurrencySchedule(t *testing.T) {
 	noon := time.Date(2026, 6, 15, 12, 0, 0, 0, time.UTC)
 	if got := srv.EffectiveConcurrency(noon); got != 2 {
 		t.Fatalf("expected schedule cap 2 at noon UTC, got %d", got)
+	}
+}
+
+// TestServerReload_ConcurrencyPauseIsDistinctFromUnlimited checks the same
+// contract through the server: an overnight entry carrying concurrency 0
+// must reach the enforcement member as "start nothing", never as the
+// unlimited answer an unconfigured server gives.
+func TestServerReload_ConcurrencyPauseIsDistinctFromUnlimited(t *testing.T) {
+	srv := New(config.ServerConfig{Host: "127.0.0.1", Port: 0})
+	if got := srv.EffectiveConcurrency(time.Now()); got != config.ConcurrencyUnlimited {
+		t.Fatalf("expected unlimited before the schedule is installed, got %d", got)
+	}
+
+	srv.Reload(config.ServerConfig{
+		Host:             "127.0.0.1",
+		Port:             0,
+		ScheduleTimezone: "UTC",
+		ConcurrencySchedule: []config.ConcurrencyScheduleEntry{
+			{At: "07:00", Concurrency: 2},
+			{At: "23:00", Concurrency: 0},
+		},
+	})
+	if got := srv.EffectiveConcurrency(time.Date(2026, 6, 15, 23, 30, 0, 0, time.UTC)); got != 0 {
+		t.Errorf("expected the 23:00 pause (0) after reload, got %d", got)
+	}
+	if got := srv.EffectiveConcurrency(time.Date(2026, 6, 15, 12, 0, 0, 0, time.UTC)); got != 2 {
+		t.Errorf("expected cap 2 by day, got %d", got)
 	}
 }
 

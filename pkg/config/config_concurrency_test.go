@@ -171,8 +171,60 @@ func TestEffectiveConcurrency_EmptySchedule(t *testing.T) {
 	}
 
 	unlimited := ServerConfig{}
-	if got := unlimited.EffectiveConcurrency(utc(15, 3, 0)); got != 0 {
-		t.Errorf("expected 0 (unlimited) with empty config, got %d", got)
+	if got := unlimited.EffectiveConcurrency(utc(15, 3, 0)); got != ConcurrencyUnlimited {
+		t.Errorf("expected ConcurrencyUnlimited with empty config, got %d", got)
+	}
+}
+
+// TestEffectiveConcurrency_UnlimitedIsDistinctFromPause pins the contract the
+// enforcement member builds on: the resolver returns a single int, so the
+// "no cap" answer must not be the 0 that a schedule entry uses to pause all
+// work. A consumer that read a bare 0 as unlimited would leave the overnight
+// window uncapped.
+func TestEffectiveConcurrency_UnlimitedIsDistinctFromPause(t *testing.T) {
+	unconfigured := ServerConfig{}
+	if got := unconfigured.EffectiveConcurrency(utc(15, 3, 0)); got != ConcurrencyUnlimited {
+		t.Errorf("expected ConcurrencyUnlimited for an unconfigured server, got %d", got)
+	}
+
+	// The same server with a schedule entry that pauses the overnight window.
+	paused := ServerConfig{
+		ScheduleTimezone: "UTC",
+		ConcurrencySchedule: []ConcurrencyScheduleEntry{
+			{At: "07:00", Concurrency: 2},
+			{At: "23:00", Concurrency: 0},
+		},
+	}
+	if got := paused.EffectiveConcurrency(utc(15, 23, 30)); got != 0 {
+		t.Errorf("expected 0 (no new work may start) from the 23:00 entry, got %d", got)
+	}
+	if got := paused.EffectiveConcurrency(utc(15, 12, 0)); got != 2 {
+		t.Errorf("expected the 07:00 cap 2 to still apply by day, got %d", got)
+	}
+
+	// The sentinel must never be a value a config can carry, otherwise the
+	// two meanings would share the channel again. Validation rejects every
+	// negative, which is what keeps ConcurrencyUnlimited unrepresentable.
+	if ConcurrencyUnlimited >= 0 {
+		t.Errorf("ConcurrencyUnlimited must be outside the range a config can hold, got %d", ConcurrencyUnlimited)
+	}
+	if err := (ServerConfig{MaxConcurrentTasks: ConcurrencyUnlimited}).ValidateConcurrency(); err == nil {
+		t.Error("expected the unlimited sentinel to be rejected as a configuration value")
+	}
+	if err := (ServerConfig{ConcurrencySchedule: []ConcurrencyScheduleEntry{{At: "07:00", Concurrency: ConcurrencyUnlimited}}}).ValidateConcurrency(); err == nil {
+		t.Error("expected the unlimited sentinel to be rejected as a schedule entry cap")
+	}
+}
+
+// TestEffectiveConcurrency_StaticFallbackKeepsUnlimitedMeaning: a schedule
+// the resolver cannot trust falls back to max_concurrent_tasks, and that key
+// means unlimited when it is 0, so the fallback resolves to the sentinel
+// rather than to a pause.
+func TestEffectiveConcurrency_StaticFallbackKeepsUnlimitedMeaning(t *testing.T) {
+	cfg := dayNightSchedule("Not/AZone")
+	cfg.MaxConcurrentTasks = 0
+	if got := cfg.EffectiveConcurrency(utc(15, 3, 0)); got != ConcurrencyUnlimited {
+		t.Errorf("expected an uncapped static fallback, got %d", got)
 	}
 }
 

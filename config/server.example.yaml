@@ -22,8 +22,10 @@ max_concurrent_tasks: 0
 #schedule_timezone: "Australia/Sydney"
 # Daily concurrency schedule: each entry takes effect at its wall-clock
 # time and holds until the next entry; the last entry of the day holds
-# through midnight to the first. Worked day/night example — cap 2 from
-# 07:00 and 4 from 23:00 Sydney time:
+# through midnight to the first. In an entry, concurrency: 0 is a real cap
+# and pauses all new work — unlike max_concurrent_tasks: 0, which means
+# unlimited. Worked day/night example — cap 2 from 07:00 and 4 from 23:00
+# Sydney time:
 #concurrency_schedule:
 #  - at: "07:00"
 #    concurrency: 2
