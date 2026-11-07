@@ -9,8 +9,8 @@ const outputPath = process.argv[2] || 'docs/screenshot-candidate.png';
 const serverUrl = 'http://localhost:8080';
 
 const guests = [
-  { id: 'guest-alpha', name: 'Dev Guest Alpha', tags: ['business-default', 'frontend'] },
-  { id: 'guest-beta', name: 'Dev Guest Beta', tags: ['business-default', 'backend'] },
+  { id: 'guest-alpha', name: 'Dev Guest Alpha', tags: ['business-default', 'frontend'], host: 'dev-box-alpha' },
+  { id: 'guest-beta', name: 'Dev Guest Beta', tags: ['business-default', 'backend'], host: 'dev-box-beta' },
 ];
 
 const connections = [];
@@ -21,7 +21,7 @@ for (const g of guests) {
   ws.on('open', () => {
     ws.send(JSON.stringify({
       jsonrpc: '2.0', method: 'guest.register',
-      params: { id: g.id, name: g.name, tags: g.tags }, id: 1
+      params: { id: g.id, name: g.name, tags: g.tags, host: g.host }, id: 1
     }));
     console.log('Registered guest:', g.id);
   });
