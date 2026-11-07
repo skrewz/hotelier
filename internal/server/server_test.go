@@ -704,6 +704,78 @@ func TestHandleGuests_GET_Empty(t *testing.T) {
 	}
 }
 
+// TestHandleGuests_GET_HeartbeatAge covers issue #240: the response must
+// carry the server-measured seconds since each guest's last heartbeat (so
+// the UI need not compare its own clock to the server's) and the effective
+// heartbeat_interval / silence_timeout the UI derives its colour thresholds
+// from.
+func TestHandleGuests_GET_HeartbeatAge(t *testing.T) {
+	srv := New(config.ServerConfig{Host: "127.0.0.1", Port: 0, HeartbeatInterval: 45, SilenceTimeout: 300})
+
+	if _, err := srv.Registry().Register("age-guest", "Age Guest", nil); err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	srv.Registry().SetLastHeartbeat("age-guest", time.Now().Add(-45*time.Second))
+
+	req := httptest.NewRequest(http.MethodGet, "/api/guests", nil)
+	w := httptest.NewRecorder()
+	srv.HandleGuests(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+
+	var response struct {
+		Guests []struct {
+			registry.Guest
+			HeartbeatAgeSeconds float64 `json:"heartbeat_age_seconds"`
+		} `json:"guests"`
+		HeartbeatInterval int `json:"heartbeat_interval"`
+		SilenceTimeout    int `json:"silence_timeout"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &response); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+
+	if len(response.Guests) != 1 {
+		t.Fatalf("expected 1 guest, got %d", len(response.Guests))
+	}
+	age := response.Guests[0].HeartbeatAgeSeconds
+	if age < 44 || age > 47 {
+		t.Errorf("expected heartbeat_age_seconds ~45, got %v", age)
+	}
+	if response.HeartbeatInterval != 45 {
+		t.Errorf("expected heartbeat_interval 45, got %d", response.HeartbeatInterval)
+	}
+	if response.SilenceTimeout != 300 {
+		t.Errorf("expected silence_timeout 300, got %d", response.SilenceTimeout)
+	}
+}
+
+// TestHandleGuests_GET_HeartbeatAgeDefaults verifies the zero-value config
+// falls back to the same 30s heartbeat interval the stale-guest cleanup uses.
+func TestHandleGuests_GET_HeartbeatAgeDefaults(t *testing.T) {
+	srv := newTestServer(t)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/guests", nil)
+	w := httptest.NewRecorder()
+	srv.HandleGuests(w, req)
+
+	var response struct {
+		HeartbeatInterval int `json:"heartbeat_interval"`
+		SilenceTimeout    int `json:"silence_timeout"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &response); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if response.HeartbeatInterval != 30 {
+		t.Errorf("expected heartbeat_interval fallback 30, got %d", response.HeartbeatInterval)
+	}
+	if response.SilenceTimeout != 0 {
+		t.Errorf("expected silence_timeout 0, got %d", response.SilenceTimeout)
+	}
+}
+
 // Guest detail tests
 func TestHandleGuestDetail(t *testing.T) {
 	srv := newTestServer(t)

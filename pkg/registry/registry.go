@@ -3,6 +3,7 @@ package registry
 import (
 	"encoding/json"
 	"fmt"
+	"sort"
 	"sync"
 	"time"
 )
@@ -283,7 +284,9 @@ func (r *GuestRegistry) GetGuests(state GuestState) []*Guest {
 	return result
 }
 
-// GetAllGuests returns all guests.
+// GetAllGuests returns all guests, sorted by ID so callers get a
+// deterministic order. Map iteration in Go is randomised per call, which
+// made the UI's guest list re-order itself between polls (issue #240).
 func (r *GuestRegistry) GetAllGuests() []*Guest {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
@@ -292,6 +295,7 @@ func (r *GuestRegistry) GetAllGuests() []*Guest {
 	for _, guest := range r.guests {
 		result = append(result, guest)
 	}
+	sort.Slice(result, func(i, j int) bool { return result[i].ID < result[j].ID })
 	return result
 }
 

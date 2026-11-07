@@ -3295,6 +3295,69 @@ const { chromium } = require('playwright');
   }
   console.log('PASS: guests list shows the UID and the host it sits on');
 
+  // Check-in latency (issue #240): every guest card carries a "how long
+  // since the last heartbeat" row, and the list order matches the server's
+  // (sorted) order rather than flicking with map iteration. Heartbeat once
+  // over a throwaway WS connection so the age assertion isn't at the mercy
+  // of how long the earlier phases took, then wait for the next 5s poll to
+  // pick the fresh age up.
+  await page.evaluate((wsURL) => new Promise((resolve, reject) => {
+    const ws = new WebSocket(wsURL);
+    ws.onopen = () => ws.send(JSON.stringify({ jsonrpc: '2.0', id: 9990, method: 'guest.heartbeat', params: { id: 'ui-test-guest' } }));
+    ws.onmessage = () => { ws.close(); resolve(); };
+    ws.onerror = () => reject(new Error('heartbeat ws failed'));
+    setTimeout(() => reject(new Error('heartbeat timed out')), 5000);
+  }), baseURL.replace(/^http/, 'ws') + '/ws');
+  await page.waitForFunction(() => {
+    const row = document.querySelector('#guest-list .guest-item .guest-latency');
+    return row && getComputedStyle(row).color === 'rgb(100, 116, 139)';
+  }, null, { timeout: 15000 });
+  const latencyRow = await page.evaluate(() => {
+    const row = document.querySelector('#guest-list .guest-item .guest-latency');
+    return row ? { text: row.textContent, colour: getComputedStyle(row).color } : null;
+  });
+  if (!latencyRow || !/\d+/.test(latencyRow.text) || !latencyRow.text.includes('ago')) {
+    fail('guest card shows no heartbeat-age row: ' + JSON.stringify(latencyRow));
+  }
+  const orderMatches = await page.evaluate(async () => {
+    const res = await fetch('/api/guests');
+    const data = await res.json();
+    const apiOrder = data.guests.map(g => g.id);
+    const domOrder = Array.from(document.querySelectorAll('#guest-list .guest-item .guest-uid'))
+      .map(el => el.textContent.trim());
+    // Guests with no display name show the UID in the heading instead.
+    const shown = domOrder.length ? domOrder : Array.from(document.querySelectorAll('#guest-list .guest-item .guest-name'))
+      .map(el => el.textContent.replace(/[\u25cf\u00b7\s]+/g, '').trim());
+    return JSON.stringify(shown.slice(0, apiOrder.length)) === JSON.stringify(apiOrder);
+  });
+  if (!orderMatches) fail('guests list order does not match the server list order');
+  console.log('PASS: guest card shows heartbeat age; list order is stable and matches the API');
+
+  // Colour tiers (issue #240): orange once a heartbeat is missed (2x the
+  // interval), red at half the silence timeout. Injected renderGuests calls
+  // are the only way to force an aged heartbeat without sleeping for
+  // minutes; the list is restored straight after, as with the nameless
+  // guest below.
+  const latencyTiers = await page.evaluate(() => {
+    const list = document.getElementById('guest-list');
+    const keep = list.innerHTML;
+    try {
+      const probe = age => {
+        renderGuests({ guests: [{ id: 'tier-guest', name: '', state: 'IDLE', tags: [], heartbeat_age_seconds: age }], heartbeat_interval: 30, silence_timeout: 180 });
+        const row = document.querySelector('#guest-list .guest-latency');
+        return getComputedStyle(row).color;
+      };
+      updateGuestLatencyThresholds({ heartbeat_interval: 30, silence_timeout: 180 });
+      return { ok: probe(5), warn: probe(70), crit: probe(95) };
+    } finally {
+      list.innerHTML = keep;
+    }
+  });
+  if (latencyTiers.ok !== 'rgb(100, 116, 139)') fail('latency tier ok: expected grey, got ' + latencyTiers.ok);
+  if (latencyTiers.warn !== 'rgb(245, 158, 11)') fail('latency tier warn: expected orange, got ' + latencyTiers.warn);
+  if (latencyTiers.crit !== 'rgb(239, 68, 68)') fail('latency tier crit: expected red, got ' + latencyTiers.crit);
+  console.log('PASS: latency text turns orange past 2x interval and red past half the silence timeout');
+
   // A guest with no display name must not have its UID printed twice. The
   // sidebar is restored straight after so later phases see the real list.
   const nameless = await page.evaluate(() => {
