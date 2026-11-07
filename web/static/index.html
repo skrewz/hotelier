@@ -74,11 +74,16 @@
         .task-detail-id { font-weight: 600; font-size: 0.875rem; color: #38bdf8; }
         .task-detail-id .task-title a { color: inherit; }
         .task-detail-meta { font-size: 0.75rem; color: #94a3b8; margin-top: 0.25rem; }
-        /* Hourglass spinner for running tasks (issue #210). Rotation is keyed
-           off the task's log count (angle = log_count % 360 degrees), so the
-           ⏳ advances each time a new log entry arrives. inline-block so the
-           transform applies to the glyph; the transition animates the step. */
+        /* Hourglass spinner for running tasks (issue #210). In the task
+           detail view rotation is keyed off the task's log count (angle =
+           log_count % 360 degrees), so the ⏳ advances each time a new log
+           entry arrives. inline-block so the transform applies to the glyph;
+           the transition animates the step. On the /tasks/ overview page the
+           angle instead tracks activity (issue #246): a JS ticker advances it
+           in small steps while the task's log count is changing between
+           updates, so the list spinner interpolates linearly per tick. */
         .task-spinner { display: inline-block; transform: rotate(0deg); transition: transform 0.3s ease; }
+        .task-spinner.list-spinner { transition: transform 0.05s linear; }
         /* Collapsible prompt section */
         .task-detail-prompt { border: 1px solid #334155; border-top: none; border-radius: 0 0 0.5rem 0.5rem; margin-bottom: 1rem; overflow: hidden; }
         .task-detail-prompt-header { display: flex; align-items: center; justify-content: space-between; padding: 0.5rem 1rem; background: #1e293b; cursor: pointer; user-select: none; font-size: 0.8rem; }
@@ -493,6 +498,15 @@
         let ws;
         let activeTaskId = null;
         let taskLogs = {};  // Accumulates logs per task: { taskId: [entries] }
+        // Overview-page hourglass state (issue #246), keyed by task ID. Each
+        // entry remembers the log count seen at the previous update, the
+        // current rotation angle, and whether the hourglass is spinning:
+        // a changed count between two frontend updates means activity, so the
+        // spinner turns smoothly; an unchanged count pauses it where it is.
+        const listSpinners = new Map(); // taskId -> { lastLogCount, angle, spinning }
+        let listSpinnerTimer = null;
+        const LIST_SPINNER_TICK_MS = 50;
+        const LIST_SPINNER_DEG_PER_TICK = 3; // 60 degrees per second at 20 ticks/s
         // Guest UID -> hostname, refreshed from /api/guests on every poll so
         // the task views can say which machine a task is running on (issue #238).
         const guestHosts = {};
@@ -777,6 +791,9 @@
         function renderTasks(data) {
             const list = document.getElementById('task-list');
             const tasks = data.tasks || [];
+            // Snapshot log-count deltas before rendering so the spinners in
+            // this frame reflect the latest activity (issue #246).
+            updateListSpinners(tasks);
 
             // Render summary and filter row (always with full data)
             renderTaskSummary(tasks);
@@ -807,7 +824,7 @@
                 const isRerunnable = t.status === 'FAILED' || t.status === 'CANCELLED';
                 const rerunBtn = isRerunnable ? `<button class="btn btn-sm btn-ghost" onclick="event.stopPropagation(); rerunTask('${t.id}')">🔄</button>` : '';
                 const btnRow = (rerunBtn || cancelBtn) ? `<div class="task-btn-row">${rerunBtn}${cancelBtn}</div>` : '';
-                const logCount = t.log_count != null ? ` · ${t.log_count} log${t.log_count === 1 ? '' : 's'}${spinnerHTML(t.log_count, isTaskRunning(t))}` : '';
+                const logCount = t.log_count != null ? ` · ${t.log_count} log${t.log_count === 1 ? '' : 's'}${listSpinnerHTML(t)}` : '';
                 // Priority label shown only for PENDING tasks
                 const priorityLabel = t.status === 'PENDING' && t.priority ? `<span class="badge badge-priority" title="Priority">🔜${priorityToEmoji(t.priority)}</span>` : '';
                 const personaBadge = t.persona ? ` <span class="persona-badge ${personaColourClass(t.persona)}" title="Persona: ${escapeHtml(t.persona)}">🧑 ${escapeHtml(t.persona)}</span>` : '';
@@ -1352,6 +1369,79 @@
             if (!running) return '';
             const angle = (logCount || 0) % 360;
             return ` <span class="task-spinner" style="transform: rotate(${angle}deg)" title="Task running">⏳</span>`;
+        }
+
+        // listSpinnerHTML is the overview page's variant of spinnerHTML
+        // (issue #246). Unlike the detail-view spinner its angle is not keyed
+        // off the log count: the angle held in listSpinners is what the
+        // markup renders, so a list re-render never snaps the hourglass back
+        // while the ticker keeps it turning between renders.
+        function listSpinnerHTML(task) {
+            if (!isTaskRunning(task)) return '';
+            const st = listSpinners.get(task.id);
+            const angle = st ? st.angle : 0;
+            return ` <span class="task-spinner list-spinner" data-task-id="${escapeAttr(task.id)}" style="transform: rotate(${angle}deg)" title="Task running">⏳</span>`;
+        }
+
+        // updateListSpinners runs on every task-list update (the 5s poller,
+        // WebSocket task.updated, and filter toggles all arrive through
+        // renderTasks). A task whose log count changed since the previous
+        // update spins; one whose count is unchanged pauses at its current
+        // angle. Tasks that settled or disappeared lose their state, and a
+        // task seen for the first time starts at rest — there is no earlier
+        // update yet to have changed anything.
+        function updateListSpinners(tasks) {
+            const live = new Set();
+            for (const t of tasks || []) {
+                if (!isTaskRunning(t)) continue;
+                live.add(t.id);
+                const count = t.log_count || 0;
+                const st = listSpinners.get(t.id);
+                if (!st) {
+                    listSpinners.set(t.id, { lastLogCount: count, angle: 0, spinning: false });
+                } else {
+                    st.spinning = count !== st.lastLogCount;
+                    st.lastLogCount = count;
+                }
+            }
+            for (const id of Array.from(listSpinners.keys())) {
+                if (!live.has(id)) listSpinners.delete(id);
+            }
+            ensureListSpinnerTicker();
+        }
+
+        // ensureListSpinnerTicker starts the ticker when something should be
+        // spinning and none is running yet; tickListSpinners stops it again
+        // once nothing is.
+        function ensureListSpinnerTicker() {
+            if (listSpinnerTimer) return;
+            for (const st of listSpinners.values()) {
+                if (st.spinning) {
+                    listSpinnerTimer = setInterval(tickListSpinners, LIST_SPINNER_TICK_MS);
+                    return;
+                }
+            }
+        }
+
+        // tickListSpinners advances every spinning hourglass a few degrees
+        // and writes the angle to the live DOM element between list renders —
+        // this is what makes the rotation smooth rather than one step per log
+        // entry. Paused spinners are left where they are. When nothing is
+        // spinning the ticker stops itself.
+        function tickListSpinners() {
+            let anySpinning = false;
+            const nodes = {};
+            document.querySelectorAll('.task-item .list-spinner').forEach(el => { nodes[el.dataset.taskId] = el; });
+            for (const [id, st] of listSpinners) {
+                if (!st.spinning) continue;
+                anySpinning = true;
+                st.angle = (st.angle + LIST_SPINNER_DEG_PER_TICK) % 360;
+                if (nodes[id]) nodes[id].style.transform = `rotate(${st.angle}deg)`;
+            }
+            if (!anySpinning && listSpinnerTimer) {
+                clearInterval(listSpinnerTimer);
+                listSpinnerTimer = null;
+            }
         }
 
         // escapeAttr escapes a value for interpolation into a double-quoted

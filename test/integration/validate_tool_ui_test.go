@@ -1210,9 +1210,11 @@ const { chromium } = require('playwright');
   if (!runningTaskHasLogs) fail('At least one visible task should have log entries > 0');
   console.log('PASS: Log counts displayed in task meta:', logCountResult.map(r => r.count + ' logs').join(', '));
 
-  // Hourglass spinner for running tasks (issue #210): each visible task
-  // card shows an ⏳ next to its log count exactly while the task is
-  // running, rotated by the log count modulo 360 degrees.
+  // Hourglass spinner for running tasks (issues #210, #246): each visible
+  // task card shows an ⏳ next to its log count exactly while the task is
+  // running. The overview angle is no longer keyed off the log count
+  // (issue #246): it advances while the count changes between updates, so
+  // the assertion here only checks the transform is a rotation.
   const spinnerListResult = await page.evaluate(() => {
     const items = [];
     for (const item of document.querySelectorAll('.task-item')) {
@@ -1236,8 +1238,7 @@ const { chromium } = require('playwright');
     if (!running && r.hasSpinner) fail('Non-running task card (' + r.status + ') should not show a spinner');
     if (r.hasSpinner) {
       if (r.glyph !== '⏳') fail('Spinner glyph should be ⏳, got: ' + r.glyph);
-      const expected = 'rotate(' + (r.count %% 360) + 'deg)';
-      if (r.transform !== expected) fail('Spinner rotation should be ' + expected + ' for ' + r.count + ' logs, got: ' + r.transform);
+      if (!/^rotate\(\d+(\.\d+)?deg\)$/.test(r.transform || '')) fail('Spinner rotation should be a rotate(Ndeg) transform, got: ' + r.transform);
     }
   }
   console.log('PASS: ⏳ spinner on task cards is keyed off status and log count');
@@ -3106,6 +3107,100 @@ const { chromium } = require('playwright');
   }
   console.log('PASS: hourglass spinner rotation keyed off log count');
   await takeScreenshot('13b-spinner-settled');
+
+  // =====================================================================
+  // Phase 13e: overview hourglass rotation keyed off activity (issue #246)
+  // The /tasks/ overview spinner spins smoothly while a task's log count
+  // changes between frontend updates, pauses at its current angle when the
+  // count is unchanged, and resumes on the next change. The within-task
+  // detail spinner (phase 13b) is deliberately unchanged.
+  // =====================================================================
+  console.log('=== Phase 13e: overview activity-driven hourglass ===');
+
+  // Show the Tasks tab so the overview list is visible for the DOM checks
+  // and screenshots below.
+  await page.locator('.tab').filter({ hasText: 'Tasks' }).click();
+  await page.waitForFunction(() => document.getElementById('tab-tasks').style.display === 'block', { timeout: 5000 });
+
+  const listSpinnerUnit = await page.evaluate(() => {
+    const out = {};
+    const uid = 'unit-list-spinner-task';
+    const T = (count, status) => ({ id: uid, status: status || 'RUNNING', prompt: 'p', created_at: '2026-09-15T10:00:00Z', log_count: count });
+
+    // State machine, driven directly the way the poller/WebSocket would.
+    listSpinners.clear();
+    updateListSpinners([T(10)]);
+    out.restOnFirstSeen = listSpinners.get(uid).spinning === false && listSpinners.get(uid).angle === 0;
+    updateListSpinners([T(11)]);
+    out.spinsOnChange = listSpinners.get(uid).spinning === true;
+    const a1 = listSpinners.get(uid).angle;
+    tickListSpinners();
+    out.ticksWhileActive = listSpinners.get(uid).angle === (a1 + LIST_SPINNER_DEG_PER_TICK) %% 360;
+    updateListSpinners([T(11)]);
+    out.pausesWhenUnchanged = listSpinners.get(uid).spinning === false;
+    tickListSpinners();
+    out.holdsAngleWhenPaused = listSpinners.get(uid).angle === a1 + LIST_SPINNER_DEG_PER_TICK;
+    updateListSpinners([T(12)]);
+    out.resumesOnNextChange = listSpinners.get(uid).spinning === true;
+    updateListSpinners([{ id: uid, status: 'COMPLETED', prompt: 'p', log_count: 12 }]);
+    out.prunedWhenSettled = !listSpinners.has(uid);
+
+    // DOM: the overview renders the spinner at the angle held in state, the
+    // ticker moves the live element between renders, and a re-render at an
+    // unchanged count must not snap the spinner back to its old position.
+    const domId = 'unit-list-spinner-dom';
+    const D = (count) => ({ id: domId, status: 'RUNNING', prompt: 'dom spinner check', created_at: '2026-09-15T10:00:00Z', log_count: count });
+    renderTasks({ tasks: [D(5)] });
+    const el1 = document.querySelector('.task-item .list-spinner');
+    out.domRendered = !!el1 && el1.textContent === '⏳';
+    out.domStartsAtStateAngle = !!el1 && el1.style.transform === 'rotate(' + listSpinners.get(domId).angle + 'deg)';
+    renderTasks({ tasks: [D(6)] });
+    const angleBefore = listSpinners.get(domId).angle;
+    tickListSpinners();
+    const el2 = document.querySelector('.task-item .list-spinner');
+    out.domTickerMovesElement = !!el2 && el2.style.transform === 'rotate(' + ((angleBefore + LIST_SPINNER_DEG_PER_TICK) %% 360) + 'deg)';
+    const liveAngle = listSpinners.get(domId).angle;
+    renderTasks({ tasks: [D(6)] });
+    const el3 = document.querySelector('.task-item .list-spinner');
+    out.domRerenderHoldsAngle = !!el3 && el3.style.transform === 'rotate(' + liveAngle + 'deg)';
+
+    // Remove the fake entries so they cannot leak into later phases.
+    listSpinners.clear();
+    if (listSpinnerTimer) { clearInterval(listSpinnerTimer); listSpinnerTimer = null; }
+    return out;
+  });
+  await takeScreenshot('13e-list-spinner');
+
+  const listSpinnerChecks = [
+    { name: 'overview spinner rests on first sighting of a task', pass: listSpinnerUnit.restOnFirstSeen },
+    { name: 'count change between updates starts the spin', pass: listSpinnerUnit.spinsOnChange },
+    { name: 'ticker advances the angle while active', pass: listSpinnerUnit.ticksWhileActive },
+    { name: 'unchanged count pauses the spinner', pass: listSpinnerUnit.pausesWhenUnchanged },
+    { name: 'paused spinner holds its angle across ticks', pass: listSpinnerUnit.holdsAngleWhenPaused },
+    { name: 'next change resumes the spin', pass: listSpinnerUnit.resumesOnNextChange },
+    { name: 'settled task state is pruned', pass: listSpinnerUnit.prunedWhenSettled },
+    { name: 'overview renders the ⏳ list spinner', pass: listSpinnerUnit.domRendered },
+    { name: 'rendered spinner starts at the state angle', pass: listSpinnerUnit.domStartsAtStateAngle },
+    { name: 'ticker moves the live element between renders', pass: listSpinnerUnit.domTickerMovesElement },
+    { name: 're-render at unchanged count keeps the live angle', pass: listSpinnerUnit.domRerenderHoldsAngle },
+  ];
+  let listSpinnerFailed = false;
+  for (const check of listSpinnerChecks) {
+    if (!check.pass) { console.error('FAIL:', check.name); listSpinnerFailed = true; }
+    else { console.log('PASS:', check.name); }
+  }
+  if (listSpinnerFailed) {
+    console.error('list spinner result:', JSON.stringify(listSpinnerUnit));
+    await takeScreenshot('13e-list-spinner-failed');
+    process.exit(1);
+  }
+  console.log('PASS: overview hourglass rotates while the log count changes');
+
+  // The unit DOM checks replaced the task list with a fake task; restore the
+  // real list before the following phases interact with it.
+  await page.evaluate(() => refresh());
+  await page.waitForFunction(() => document.querySelectorAll('.task-item').length > 0, { timeout: 5000 });
+  await takeScreenshot('13e-list-spinner-restored');
 
   // Navigate to Tasks tab
   await page.locator('.tab').filter({ hasText: 'Tasks' }).click();
