@@ -72,8 +72,13 @@ type Guest struct {
 	State             GuestState `json:"state"`
 	ConnectedAt       time.Time  `json:"connected_at"`
 	LastHeartbeat     time.Time  `json:"last_heartbeat"`
-	LastTaskHeartbeat time.Time  `json:"last_task_heartbeat,omitempty"` // last heartbeat that included a task_id
+	LastTaskHeartbeat time.Time  `json:"last_task_heartbeat,omitempty"` // last heartbeat that confirmed the assigned task
 	TaskID            string     `json:"task_id,omitempty"`
+	// HeartbeatTaskID is the task the guest's own heartbeat last reported as
+	// executing (issue #251). It is a liveness signal, not an assignment:
+	// assignments live only in TaskID. A guest reporting a task here is
+	// running it, whatever the server-side bookkeeping says.
+	HeartbeatTaskID string `json:"heartbeat_task_id,omitempty"`
 }
 
 // GuestRegistry manages the lifecycle of connected guests.
@@ -150,7 +155,26 @@ func (r *GuestRegistry) Unregister(guestID string) error {
 	return nil
 }
 
-// Heartbeat updates the last heartbeat time for a guest.
+// AvailableForAssignment reports whether a guest can take a new task.
+// Availability is a fact about the guest, never a side effect of task
+// bookkeeping (issue #251): a guest is available only when it holds no
+// claim (TaskID empty) and does not report a task as executing in its
+// heartbeat (HeartbeatTaskID empty). A guest that holds a claim it has not
+// started — the state ARCHITECTURE.md's machine left unnamed, e.g. an
+// assignment buffered on the guest's taskCh — is not available, and neither
+// is a guest whose reference was cleared by bookkeeping while it is still
+// running a task.
+func AvailableForAssignment(guest *Guest) bool {
+	return guest != nil &&
+		guest.State != GuestStateDisconnected &&
+		guest.State != GuestStateRunning &&
+		guest.TaskID == "" &&
+		guest.HeartbeatTaskID == ""
+}
+
+// Heartbeat updates the last heartbeat time for a guest. A heartbeat that
+// names no task is the guest's report that it is executing nothing, so the
+// reported task clears too (issue #251).
 func (r *GuestRegistry) Heartbeat(guestID string) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -161,13 +185,23 @@ func (r *GuestRegistry) Heartbeat(guestID string) error {
 	}
 
 	guest.LastHeartbeat = time.Now()
+	guest.HeartbeatTaskID = ""
 	return nil
 }
 
-// TaskHeartbeat updates the last heartbeat time and records the task_id
-// that the guest is reporting. This is used by the server's task liveness
-// probe to detect when a guest has been assigned a task but is not
-// heartbeating with it (indicating the assignment was not received).
+// TaskHeartbeat records the guest's liveness heartbeat, which names the
+// task the guest reports as executing.
+//
+// A heartbeat is a liveness signal only (issue #251): it never creates or
+// changes an assignment. When the reported task is the one assigned, the
+// heartbeat confirms that claim and LastTaskHeartbeat advances — this is
+// what the task liveness probe waits for. When the reported task differs
+// from the assignment, the mismatch is logged naming both tasks and
+// surfaced via HeartbeatTaskID on /api/guests; the assignment is left
+// untouched and left for the reconcile path to resolve. The previous
+// behaviour — overwriting guest.TaskID with whatever the heartbeat
+// reported — orphaned assignments and fuelled the re-queue loop described
+// in issue #251.
 func (r *GuestRegistry) TaskHeartbeat(guestID, taskID string) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -178,16 +212,17 @@ func (r *GuestRegistry) TaskHeartbeat(guestID, taskID string) error {
 	}
 
 	guest.LastHeartbeat = time.Now()
-	guest.LastTaskHeartbeat = time.Now()
-	// Update the task ID if the guest is reporting a different one.
-	// This allows the server to detect mismatches between the server-side
-	// assignment and the guest's actual state.
-	if guest.TaskID != taskID {
-		guest.TaskID = taskID
+
+	switch {
+	case taskID == guest.TaskID:
+		// The guest is confirming the very task the server assigned it.
+		guest.LastTaskHeartbeat = time.Now()
+	case taskID != "" && guest.TaskID != "":
 		if r.logf != nil {
-			r.logf("guest %s task updated via heartbeat: %s", guestID, taskID)
+			r.logf("heartbeat task mismatch: guest %s reports %s but is assigned %s", guestID, taskID, guest.TaskID)
 		}
 	}
+	guest.HeartbeatTaskID = taskID
 	return nil
 }
 
@@ -378,14 +413,16 @@ func (r *GuestRegistry) KillRunningGuestTask(guestID string) error {
 	return nil
 }
 
-// FindAvailableGuests returns guests that can handle tasks with the given tags.
+// FindAvailableGuests returns guests that can handle tasks with the given
+// tags. Availability is decided by AvailableForAssignment, not by the
+// guest's state alone (issue #251).
 func (r *GuestRegistry) FindAvailableGuests(requiredTags []string) []*Guest {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 
 	var result []*Guest
 	for _, guest := range r.guests {
-		if guest.State != GuestStateIdle {
+		if !AvailableForAssignment(guest) {
 			continue
 		}
 		if len(requiredTags) == 0 {

@@ -1,6 +1,8 @@
 package orchestrator
 
 import (
+	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -1165,5 +1167,294 @@ func TestCheckSilentGuests_UsesTaskSilenceTimeout(t *testing.T) {
 	}
 	if silent[0].TaskID != "task-1" {
 		t.Errorf("expected task-1, got %s", silent[0].TaskID)
+	}
+}
+
+// --- Availability is a fact about the guest (issue #251) ---
+
+// TestAssignTask_RejectsGuestReportingRunningTask: a guest whose heartbeat
+// reports a running task must not be assigned, even when no task reference
+// is held server-side (e.g. bookkeeping cleared it).
+func TestAssignTask_RejectsGuestReportingRunningTask(t *testing.T) {
+	orch := newTestOrchestrator(t)
+	_ = orch.RegisterGuest("guest-1", "Test Guest", []string{})
+	_ = orch.AddTask(&queue.Task{ID: "task-1", Prompt: "test"})
+
+	// Guest reports it is executing something (no server-side assignment).
+	if err := orch.TaskHeartbeat("guest-1", "ghost-task"); err != nil {
+		t.Fatalf("TaskHeartbeat failed: %v", err)
+	}
+
+	if err := orch.AssignTask("task-1", "guest-1"); err == nil {
+		t.Error("expected AssignTask to reject a guest that reports a running task")
+	}
+}
+
+// TestRunningGuestNotAvailableAfterRequeue: a guest that is running a task
+// is never returned by FindAvailableGuests, whichever code path cleared its
+// reference. Re-queue revokes the claim but the guest's heartbeat still
+// names the task it is executing — that is what keeps it unavailable.
+func TestRunningGuestNotAvailableAfterRequeue(t *testing.T) {
+	orch := newTestOrchestrator(t)
+	_ = orch.RegisterGuest("guest-1", "Test Guest", []string{})
+	_ = orch.AddTask(&queue.Task{ID: "task-1", Prompt: "test"})
+
+	_ = orch.AssignTask("task-1", "guest-1")
+	_ = orch.AcknowledgeTask("task-1", "guest-1")
+	if err := orch.TaskHeartbeat("guest-1", "task-1"); err != nil {
+		t.Fatalf("TaskHeartbeat failed: %v", err)
+	}
+
+	if err := orch.RequeueTask("task-1"); err != nil {
+		t.Fatalf("RequeueTask failed: %v", err)
+	}
+
+	if guests := orch.FindAvailableGuests(nil); len(guests) != 0 {
+		t.Errorf("expected no available guests while one reports a running task, got %d", len(guests))
+	}
+	if orch.TryAssignNext() {
+		t.Error("TryAssignNext assigned a task to a guest that reports a running task")
+	}
+
+	// Once the guest finishes (heartbeat no longer names a task) it is free.
+	if err := orch.Heartbeat("guest-1"); err != nil {
+		t.Fatalf("Heartbeat failed: %v", err)
+	}
+	if guests := orch.FindAvailableGuests(nil); len(guests) != 1 {
+		t.Errorf("expected guest available after its task finished, got %d", len(guests))
+	}
+}
+
+// TestHeartbeatMismatch_RequeuesOnceNotEveryTick covers the acceptance
+// criterion: a guest heartbeating with task A while assigned task B keeps B
+// assigned; the probe re-queues B once, at the timeout, not on every tick.
+func TestHeartbeatMismatch_RequeuesOnceNotEveryTick(t *testing.T) {
+	var logged []string
+	orch := New(func(format string, args ...interface{}) {
+		logged = append(logged, fmt.Sprintf(format, args...))
+	})
+	_ = orch.RegisterGuest("guest-1", "Test Guest", []string{})
+	_ = orch.AddTask(&queue.Task{ID: "task-a", Prompt: "long"})
+	_ = orch.AddTask(&queue.Task{ID: "task-b", Prompt: "other"})
+
+	// guest-1 is executing task-a; the server loses track (silent window)
+	// and the guest reports alive again without naming a task.
+	_ = orch.AssignTask("task-a", "guest-1")
+	_ = orch.AcknowledgeTask("task-a", "guest-1")
+	_ = orch.TaskHeartbeat("guest-1", "task-a")
+	guest, _ := orch.GetGuest("guest-1")
+	guest.LastHeartbeat = time.Now().Add(-5 * time.Minute)
+	if silent := orch.CheckSilentGuests(1 * time.Minute); len(silent) != 1 {
+		t.Fatalf("expected 1 silent guest, got %d", len(silent))
+	}
+	if err := orch.Heartbeat("guest-1"); err != nil {
+		t.Fatalf("Heartbeat failed: %v", err)
+	}
+
+	// The server now believes the guest is free and assigns task-b.
+	if err := orch.AssignTask("task-b", "guest-1"); err != nil {
+		t.Fatalf("AssignTask failed: %v", err)
+	}
+
+	// The guest's heartbeat keeps reporting task-a — a mismatch to surface,
+	// not an assignment to adopt.
+	if err := orch.TaskHeartbeat("guest-1", "task-a"); err != nil {
+		t.Fatalf("TaskHeartbeat failed: %v", err)
+	}
+	guest, _ = orch.GetGuest("guest-1")
+	if guest.TaskID != "task-b" {
+		t.Fatalf("expected assignment task-b to survive, got %s", guest.TaskID)
+	}
+
+	// Age the assignment past the probe timeout, then run the probe twice.
+	taskB, _ := orch.GetTask("task-b")
+	taskB.AssignedAt = time.Now().Add(-2 * time.Minute)
+
+	if requeued := orch.CheckStuckTasks(1 * time.Minute); len(requeued) != 1 {
+		t.Fatalf("expected 1 re-queue at the timeout, got %d", len(requeued))
+	}
+	if requeued := orch.CheckStuckTasks(1 * time.Minute); len(requeued) != 0 {
+		t.Errorf("expected no further re-queues on later ticks, got %d", len(requeued))
+	}
+
+	// The task was not adopted back from the mismatched heartbeat either.
+	found := false
+	for _, line := range logged {
+		if strings.Contains(line, "task updated via heartbeat") {
+			found = true
+		}
+	}
+	if found {
+		t.Error("heartbeat must not update the guest's task assignment")
+	}
+}
+
+// TestCheckStuckTasks_StaleReferenceBranchesOnlyLog: the stale-reference
+// cleanups are assertions now — a regression shows up as a message, not as
+// a state mutation (and the re-queue loop it used to fuel).
+func TestCheckStuckTasks_StaleReferenceBranchesOnlyLog(t *testing.T) {
+	t.Run("guest points at terminal task", func(t *testing.T) {
+		var logged []string
+		orch := New(func(format string, args ...interface{}) {
+			logged = append(logged, fmt.Sprintf(format, args...))
+		})
+		_ = orch.RegisterGuest("guest-1", "Test Guest", []string{})
+		_ = orch.AddTask(&queue.Task{ID: "task-1", Prompt: "test"})
+		_ = orch.AssignTask("task-1", "guest-1")
+
+		// Simulate the regression: the task went terminal but the guest
+		// reference survived.
+		task, _ := orch.GetTask("task-1")
+		task.Status = queue.TaskStatusCompleted
+
+		orch.CheckStuckTasks(1 * time.Minute)
+
+		guest, _ := orch.GetGuest("guest-1")
+		if guest.TaskID != "task-1" {
+			t.Errorf("assertion branch must not mutate state, task_id is now %q", guest.TaskID)
+		}
+		if guest.State != registry.GuestStateRunning {
+			t.Errorf("assertion branch must not mutate state, state is now %s", guest.State)
+		}
+		var seen bool
+		for _, line := range logged {
+			if strings.Contains(line, "stale guest reference") {
+				seen = true
+			}
+		}
+		if !seen {
+			t.Errorf("expected a stale-reference log line, got %v", logged)
+		}
+	})
+
+	t.Run("guest points at task assigned elsewhere", func(t *testing.T) {
+		var logged []string
+		orch := New(func(format string, args ...interface{}) {
+			logged = append(logged, fmt.Sprintf(format, args...))
+		})
+		_ = orch.RegisterGuest("guest-1", "Test Guest 1", []string{})
+		_ = orch.RegisterGuest("guest-2", "Test Guest 2", []string{})
+		_ = orch.AddTask(&queue.Task{ID: "task-1", Prompt: "test"})
+		_ = orch.AssignTask("task-1", "guest-2")
+
+		// Simulate the regression: guest-1 also claims task-1.
+		guest1, _ := orch.GetGuest("guest-1")
+		guest1.TaskID = "task-1"
+
+		orch.CheckStuckTasks(1 * time.Minute)
+
+		guest1, _ = orch.GetGuest("guest-1")
+		if guest1.TaskID != "task-1" {
+			t.Errorf("assertion branch must not mutate state, task_id is now %q", guest1.TaskID)
+		}
+		var seen bool
+		for _, line := range logged {
+			if strings.Contains(line, "stale guest reference") {
+				seen = true
+			}
+		}
+		if !seen {
+			t.Errorf("expected a stale-reference log line, got %v", logged)
+		}
+	})
+}
+
+// TestEndToEnd_NoPerTickAssignmentChurn: two guests, one long task in
+// flight, ten pending tasks. Assignments stay bounded by tasks actually
+// started (one per task — no per-tick churn) and every task is
+// acknowledged exactly once.
+func TestEndToEnd_NoPerTickAssignmentChurn(t *testing.T) {
+	orch := newTestOrchestrator(t)
+	_ = orch.RegisterGuest("guest-1", "Busy Guest", []string{})
+	_ = orch.RegisterGuest("guest-2", "Free Guest", []string{})
+
+	const pending = 10
+	_ = orch.AddTask(&queue.Task{ID: "long", Prompt: "long-running"})
+	for i := 0; i < pending; i++ {
+		_ = orch.AddTask(&queue.Task{ID: fmt.Sprintf("task-%d", i), Prompt: "work"})
+	}
+
+	// guest-1 is deep into the long task and stays there.
+	if err := orch.AssignTask("long", "guest-1"); err != nil {
+		t.Fatalf("assign long task: %v", err)
+	}
+	if err := orch.AcknowledgeTask("long", "guest-1"); err != nil {
+		t.Fatalf("ack long task: %v", err)
+	}
+	assignments := 1
+	acknowledges := 1
+	completed := 0
+
+	g2Task := ""
+	for tick := 0; tick < 200 && completed < pending; tick++ {
+		// Heartbeats: guest-1 keeps reporting its long task; guest-2
+		// reports whatever it runs, nothing when idle.
+		if err := orch.TaskHeartbeat("guest-1", "long"); err != nil {
+			t.Fatalf("heartbeat g1: %v", err)
+		}
+		if g2Task != "" {
+			if err := orch.TaskHeartbeat("guest-2", g2Task); err != nil {
+				t.Fatalf("heartbeat g2: %v", err)
+			}
+		} else {
+			if err := orch.Heartbeat("guest-2"); err != nil {
+				t.Fatalf("heartbeat g2: %v", err)
+			}
+		}
+
+		// guest-2 finishes whatever it holds every other tick.
+		if g2Task != "" && tick%2 == 1 {
+			if err := orch.CompleteTask(g2Task, "guest-2", "done"); err != nil {
+				t.Fatalf("complete %s: %v", g2Task, err)
+			}
+			completed++
+			g2Task = ""
+		}
+
+		// The tick's assignment pass: only one guest can take work.
+		if g2Task == "" && orch.TryAssignNext() {
+			assignments++
+			g2, _ := orch.GetGuest("guest-2")
+			if g2.TaskID == "" {
+				t.Fatal("TryAssignNext succeeded but guest-2 holds no task")
+			}
+			g2Task = g2.TaskID
+			if g2Task == "long" {
+				t.Fatal("the long task was re-assigned while still running")
+			}
+			if err := orch.AcknowledgeTask(g2Task, "guest-2"); err != nil {
+				t.Fatalf("ack %s: %v", g2Task, err)
+			}
+			acknowledges++
+		}
+
+		if requeued := orch.CheckStuckTasks(30 * time.Second); len(requeued) != 0 {
+			t.Fatalf("tick %d: unexpected re-queue of %v — per-tick churn", tick, requeued)
+		}
+	}
+
+	if completed != pending {
+		t.Fatalf("expected %d tasks completed, got %d", pending, completed)
+	}
+
+	// The long task finishes on the guest that has been running it all along.
+	if err := orch.CompleteTask("long", "guest-1", "done"); err != nil {
+		t.Fatalf("complete long task: %v", err)
+	}
+
+	if assignments > pending+1 {
+		t.Errorf("expected at most %d assignments (one per task), got %d", pending+1, assignments)
+	}
+	if acknowledges != pending+1 {
+		t.Errorf("expected each task acknowledged exactly once (%d), got %d", pending+1, acknowledges)
+	}
+
+	// The long task was never stolen from guest-1.
+	long, _ := orch.GetTask("long")
+	if long.Status != queue.TaskStatusCompleted {
+		t.Errorf("expected long task COMPLETED, got %s", long.Status)
+	}
+	if long.AssignedTo != "guest-1" {
+		t.Errorf("expected long task to stay on guest-1, ended on %s", long.AssignedTo)
 	}
 }

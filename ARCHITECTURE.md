@@ -261,8 +261,32 @@ DISCONNECTED → REGISTERED → IDLE → RUNNING → IDLE → (DISCONNECTED)
 
 - **DISCONNECTED**: Not connected to the host.
 - **REGISTERED**: Connected, heartbeating, but no active task.
-- **IDLE**: Registered and available to accept tasks.
+- **IDLE**: Registered, and free — available to accept a task.
 - **RUNNING**: Currently executing a task.
+
+A guest may also **hold a claim it has not started**: the host has assigned
+a task (task `ASSIGNED`) and the guest holds it without having begun
+execution — for example while the guest-side dispatcher waits for its
+current task to finish before starting the next. The host accounts for
+this: availability is a fact about the guest, evaluated by a single
+predicate (`registry.AvailableForAssignment`) that every assignment path
+consults. A guest is available only when it holds no claim **and** its
+heartbeat reports no task as executing. `IDLE` means what the machine
+above says it means — registered, and free — and is never set as a side
+effect of clearing a task reference; only paths where the guest is
+verifiably finished (result received, decline, explicit re-queue,
+reconcile on reconnect) release a guest to `IDLE`.
+
+The guest's heartbeat is a **liveness signal, not an assignment**. It
+names the task the guest reports as executing; that report is recorded
+(`heartbeat_task_id` on `/api/guests`) and never overwrites the server's
+assignment record. A report differing from the assignment is a mismatch
+to surface — logged and flagged via `heartbeat_task_mismatch` — and is
+resolved through the reconcile path, never by silently deleting an
+assignment. Similarly, the stuck-task sweep treats a guest still pointing
+at a terminal or reassigned task as a failed assertion: it logs and
+leaves the state alone, because mutating it was the re-queue loop of
+issue #251.
 
 ### Task State
 
