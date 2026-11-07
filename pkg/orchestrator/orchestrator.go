@@ -603,6 +603,39 @@ func (o *Orchestrator) ReconcileGuest(guestID string) ReconcileState {
 	return ReconcileState{Status: queue.TaskStatusPending}
 }
 
+// ReconcileFreshGuest reconciles a registration from a process that has
+// never registered before — the case a stable, configured guest id (issue
+// #253) makes possible: the registry still holds an id a dead process left
+// behind, and the process now registering under it holds no task at all.
+//
+// ReconcileGuest must not be used there. It reads the registry's task
+// reference as fact and would report the previous process's task as this
+// one's, so the fresh guest would be handed work it is not running.
+//
+// The task itself is deliberately left alone: revoking the claim an
+// assignment leaves behind is issue #252. The stuck-task probe re-queues it
+// within its timeout, and the guest is IDLE and available meanwhile.
+//
+// Returns the authoritative state (always no task) so the server can answer
+// the registration.
+func (o *Orchestrator) ReconcileFreshGuest(guestID string) ReconcileState {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+
+	guest, ok := o.registry.GetGuest(guestID)
+	if !ok {
+		return ReconcileState{Status: queue.TaskStatusPending}
+	}
+
+	if guest.TaskID != "" {
+		o.logf("guest %s registered fresh: dropped stale reference to task %s", guestID, guest.TaskID)
+		o.clearGuestTaskInternal(guestID)
+	}
+	guest.State = registry.GuestStateIdle
+
+	return ReconcileState{Status: queue.TaskStatusPending}
+}
+
 // --- Liveness Probes ---
 
 // StuckTask represents a task that was re-queued by CheckStuckTasks.
@@ -655,15 +688,21 @@ func (o *Orchestrator) CheckStuckTasks(timeout time.Duration) []StuckTask {
 
 			requeued = append(requeued, StuckTask{TaskID: task.ID, GuestID: guestID})
 
+			// Capture the elapsed assignment time *before* the re-queue:
+			// requeueTaskInternal clears AssignedAt on this very task
+			// pointer, and subtracting the zero time from now saturates at
+			// math.MaxInt64 nanoseconds — every line used to read
+			// "for 2562047h47m16.854775807s". Issue #253.
+			dur := now.Sub(task.AssignedAt)
+			if dur < 0 {
+				dur = 0
+			}
+
 			o.requeueTaskInternal(task.ID)
 			if guestID != "" {
 				o.clearGuestTaskInternal(guestID)
 			}
 
-			dur := now.Sub(task.AssignedAt)
-			if dur < 0 {
-				dur = 0
-			}
 			o.logf("stuck task %s re-queued (was ASSIGNED to %s for %v)", task.ID, guestID, dur)
 			continue
 		}

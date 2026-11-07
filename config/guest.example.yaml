@@ -1,5 +1,10 @@
 # Hotelier Guest Configuration
 url: "wss://hotelier.example.com:443/ws"
+# Identity this guest registers under (issue #253). Set it to something stable
+# per machine — typically the hostname — so a process restart keeps the same
+# identity in the registry and work assigned to this machine stays with it.
+# When empty the guest generates one per process (guest-<8 random hex>), which
+# renames the guest on every restart. Never give one id to two live guests.
 id: "guest-1"
 name: "Development Guest #1"
 tags:

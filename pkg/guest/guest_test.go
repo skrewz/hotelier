@@ -74,8 +74,10 @@ func TestNewGuest(t *testing.T) {
 	if ag == nil {
 		t.Fatal("expected non-nil guest")
 	}
-	if !strings.HasPrefix(ag.id, "guest-") {
-		t.Errorf("expected ephemeral id starting with 'guest-', got %s", ag.id)
+	if ag.id != "test-guest-1" {
+		// The configured id is the guest's identity (issue #253); a generated
+		// one only appears when the config leaves it unset.
+		t.Errorf("expected the configured id 'test-guest-1', got %s", ag.id)
 	}
 	if len(ag.tags) != 2 {
 		t.Errorf("expected 2 tags, got %d", len(ag.tags))
@@ -182,8 +184,8 @@ func TestNewGuestWithConfig(t *testing.T) {
 		return &TaskResult{TaskID: task.TaskID, Success: true, Output: "done"}, nil
 	}
 	ag := New(cfg, handler)
-	if !strings.HasPrefix(ag.id, "guest-") {
-		t.Errorf("expected ephemeral id starting with 'guest-', got %s", ag.id)
+	if ag.id != "test-guest" {
+		t.Errorf("expected the configured id 'test-guest', got %s", ag.id)
 	}
 	if ag.config.TaskTimeout != 1800 {
 		t.Errorf("expected task_timeout 1800, got %d", ag.config.TaskTimeout)

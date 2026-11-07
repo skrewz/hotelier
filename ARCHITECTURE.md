@@ -193,11 +193,17 @@ The Check-In Host exposes JSON-RPC methods for guest communication.
 
 | Method              | Direction   | Description                              |
 |---------------------|-------------|------------------------------------------|
-| `guest.register`    | Guest→Host  | Check in with tags, name and host.       |
+| `guest.register`    | Guest→Host  | Check in with tags, name, host, resumed. |
 | `guest.unregister`  | Guest→Host  | Disconnect / deregister.                 |
 | `guest.heartbeat`   | Guest→Host  | Liveness ping.                           |
 | `guest.log`         | Guest→Host  | Push a log entry (chunk).                |
 | `guest.result`      | Guest→Host  | Submit final task result.                |
+
+`resumed` (issue #253) tells the host whether the process registering has
+done so before. With a configured guest `id` an id the registry already holds
+can be a brand-new process, and only the process knows that: a reconnect is
+reconciled against the task queue, a fresh registration has its stale task
+reference dropped.
 
 ### Host → Guest Methods
 
