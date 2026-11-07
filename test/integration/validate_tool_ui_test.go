@@ -3135,7 +3135,7 @@ const { chromium } = require('playwright');
     out.spinsOnChange = listSpinners.get(uid).spinning === true;
     const a1 = listSpinners.get(uid).angle;
     tickListSpinners();
-    out.ticksWhileActive = listSpinners.get(uid).angle === (a1 + LIST_SPINNER_DEG_PER_TICK) %% 360;
+    out.ticksWhileActive = listSpinners.get(uid).angle === a1 + LIST_SPINNER_DEG_PER_TICK;
     updateListSpinners([T(11)]);
     out.pausesWhenUnchanged = listSpinners.get(uid).spinning === false;
     tickListSpinners();
@@ -3158,11 +3158,55 @@ const { chromium } = require('playwright');
     const angleBefore = listSpinners.get(domId).angle;
     tickListSpinners();
     const el2 = document.querySelector('.task-item .list-spinner');
-    out.domTickerMovesElement = !!el2 && el2.style.transform === 'rotate(' + ((angleBefore + LIST_SPINNER_DEG_PER_TICK) %% 360) + 'deg)';
+    out.domTickerMovesElement = !!el2 && el2.style.transform === 'rotate(' + (angleBefore + LIST_SPINNER_DEG_PER_TICK) + 'deg)';
     const liveAngle = listSpinners.get(domId).angle;
     renderTasks({ tasks: [D(6)] });
     const el3 = document.querySelector('.task-item .list-spinner');
     out.domRerenderHoldsAngle = !!el3 && el3.style.transform === 'rotate(' + liveAngle + 'deg)';
+
+    // The angle must grow monotonically rather than folding at every
+    // revolution: CSS interpolates rotate() numerically, so a 357deg -> 0deg
+    // fold would animate backwards through 357 degrees over one tick.
+    const foldId = 'unit-list-spinner-fold';
+    const F = (count) => ({ id: foldId, status: 'RUNNING', prompt: 'p', created_at: '2026-09-15T10:00:00Z', log_count: count });
+    listSpinners.clear();
+    if (listSpinnerTimer) { clearInterval(listSpinnerTimer); listSpinnerTimer = null; }
+    updateListSpinners([F(1)]);
+    updateListSpinners([F(2)]);
+    let monotonic = true;
+    let prevAngle = listSpinners.get(foldId).angle;
+    // More than a full revolution of ticks, so any fold at 360deg is hit.
+    const foldTicks = Math.floor(400 / LIST_SPINNER_DEG_PER_TICK);
+    for (let i = 0; i < foldTicks; i++) {
+        tickListSpinners();
+        const angle = listSpinners.get(foldId).angle;
+        if (angle <= prevAngle) monotonic = false;
+        prevAngle = angle;
+    }
+    out.angleNeverSweepsBackwards = monotonic && listSpinners.get(foldId).angle === foldTicks * LIST_SPINNER_DEG_PER_TICK;
+
+    // A running task the status filter hides renders no hourglass, so it must
+    // not keep the 50ms ticker alive with nothing to animate.
+    const hidId = 'unit-list-spinner-hidden';
+    const H = (count) => ({ id: hidId, status: 'RUNNING', prompt: 'hidden spinner check', created_at: '2026-09-15T10:00:00Z', log_count: count });
+    const savedRunningFilter = taskFilter.RUNNING;
+    listSpinners.clear();
+    if (listSpinnerTimer) { clearInterval(listSpinnerTimer); listSpinnerTimer = null; }
+    updateListSpinners([H(1)]);
+    updateListSpinners([H(2)]);
+    out.tickerRunsWhileVisibleTaskActive = listSpinners.get(hidId).spinning === true && listSpinnerTimer !== null;
+    taskFilter.RUNNING = false;
+    renderTasks({ tasks: [H(3)] });
+    out.hiddenTaskRendersNoSpinner = document.querySelector('.list-spinner[data-task-id="' + hidId + '"]') === null;
+    out.hiddenTaskNotSpinning = listSpinners.get(hidId).spinning === false;
+    tickListSpinners();
+    out.tickerStopsWhenNothingVisible = listSpinnerTimer === null;
+    taskFilter.RUNNING = savedRunningFilter;
+    // Rendering the task again through the real path both resumes the spin
+    // (its count changed while hidden) and leaves a visible hourglass in the
+    // DOM for the screenshot below.
+    renderTasks({ tasks: [H(4)] });
+    out.visibleTaskResumesSpin = listSpinners.get(hidId).spinning === true;
 
     // Remove the fake entries so they cannot leak into later phases.
     listSpinners.clear();
@@ -3183,6 +3227,12 @@ const { chromium } = require('playwright');
     { name: 'rendered spinner starts at the state angle', pass: listSpinnerUnit.domStartsAtStateAngle },
     { name: 'ticker moves the live element between renders', pass: listSpinnerUnit.domTickerMovesElement },
     { name: 're-render at unchanged count keeps the live angle', pass: listSpinnerUnit.domRerenderHoldsAngle },
+    { name: 'angle grows past a revolution without sweeping backwards', pass: listSpinnerUnit.angleNeverSweepsBackwards },
+    { name: 'ticker runs while a visible task is active', pass: listSpinnerUnit.tickerRunsWhileVisibleTaskActive },
+    { name: 'filtered-out task renders no spinner', pass: listSpinnerUnit.hiddenTaskRendersNoSpinner },
+    { name: 'filtered-out task is not marked spinning', pass: listSpinnerUnit.hiddenTaskNotSpinning },
+    { name: 'ticker stops when nothing rendered is turning', pass: listSpinnerUnit.tickerStopsWhenNothingVisible },
+    { name: 'task visible again resumes the spin', pass: listSpinnerUnit.visibleTaskResumesSpin },
   ];
   let listSpinnerFailed = false;
   for (const check of listSpinnerChecks) {

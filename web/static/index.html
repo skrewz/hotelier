@@ -507,6 +507,13 @@
         let listSpinnerTimer = null;
         const LIST_SPINNER_TICK_MS = 50;
         const LIST_SPINNER_DEG_PER_TICK = 3; // 60 degrees per second at 20 ticks/s
+        // The angle grows monotonically and is only folded back into [0, 360)
+        // once it reaches this many degrees. CSS interpolates rotate() between
+        // two numeric angles rather than by the shortest arc, so folding at
+        // every revolution would animate 357deg -> 0deg backwards through 357
+        // degrees (see the CSS Transforms spec on transform interpolation).
+        // Folding rarely keeps that sweep invisible while bounding the value.
+        const LIST_SPINNER_FOLD_DEG = 360000; // 1000 revolutions
         // Guest UID -> hostname, refreshed from /api/guests on every poll so
         // the task views can say which machine a task is running on (issue #238).
         const guestHosts = {};
@@ -1390,17 +1397,24 @@
         // angle. Tasks that settled or disappeared lose their state, and a
         // task seen for the first time starts at rest — there is no earlier
         // update yet to have changed anything.
+        //
+        // Log counts are tracked for every task, but only a task the list
+        // actually renders (the same predicate renderTasks uses for
+        // `filtered`) may be spinning: a running task hidden by the status
+        // filter has no hourglass on screen, so leaving it spinning would
+        // keep the ticker alive with nothing to animate.
         function updateListSpinners(tasks) {
             const live = new Set();
             for (const t of tasks || []) {
                 if (!isTaskRunning(t)) continue;
                 live.add(t.id);
                 const count = t.log_count || 0;
+                const visible = taskFilter[t.status] !== false;
                 const st = listSpinners.get(t.id);
                 if (!st) {
                     listSpinners.set(t.id, { lastLogCount: count, angle: 0, spinning: false });
                 } else {
-                    st.spinning = count !== st.lastLogCount;
+                    st.spinning = visible && count !== st.lastLogCount;
                     st.lastLogCount = count;
                 }
             }
@@ -1435,7 +1449,8 @@
             for (const [id, st] of listSpinners) {
                 if (!st.spinning) continue;
                 anySpinning = true;
-                st.angle = (st.angle + LIST_SPINNER_DEG_PER_TICK) % 360;
+                st.angle += LIST_SPINNER_DEG_PER_TICK;
+                if (st.angle >= LIST_SPINNER_FOLD_DEG) st.angle %= 360;
                 if (nodes[id]) nodes[id].style.transform = `rotate(${st.angle}deg)`;
             }
             if (!anySpinning && listSpinnerTimer) {
