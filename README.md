@@ -151,7 +151,7 @@ curl -X POST http://localhost:8080/api/tasks \
 | `POST` | `/api/tasks` | Submit a new task |
 | `GET` | `/api/tasks/:id` | Get task details |
 | `GET` | `/api/tasks/:id/download` | Download the task's whole log trace as JSONL |
-| `GET` | `/api/guests` | List connected guests |
+| `GET` | `/api/guests` | List connected guests (UID, host, state, tags) |
 | `GET` | `/api/guests/:id` | Get guest details |
 | `GET` | `/api/health` | Health check |
 | `WS` | `/ws` | WebSocket (JSON-RPC) |

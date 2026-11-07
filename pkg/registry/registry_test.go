@@ -3,6 +3,7 @@ package registry
 import (
 	"encoding/json"
 	"fmt"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -805,5 +806,55 @@ func TestRegistryConcurrency(t *testing.T) {
 
 	if reg.Count() != 50 {
 		t.Errorf("expected 50 guests, got %d", reg.Count())
+	}
+}
+
+// TestSetGuestHost covers issue #238: the dashboard shows which machine a
+// guest is running on, so the registry must carry the host the guest reports.
+func TestSetGuestHost(t *testing.T) {
+	reg := newTestRegistry(t)
+
+	if _, err := reg.Register("host-guest", "Host Guest", []string{"tag"}); err != nil {
+		t.Fatalf("Register failed: %v", err)
+	}
+	if err := reg.SetGuestHost("host-guest", "build-box-1"); err != nil {
+		t.Fatalf("SetGuestHost failed: %v", err)
+	}
+
+	guest, ok := reg.GetGuest("host-guest")
+	if !ok {
+		t.Fatal("guest not found")
+	}
+	if guest.Host != "build-box-1" {
+		t.Errorf("expected host build-box-1, got %q", guest.Host)
+	}
+}
+
+func TestSetGuestHost_NonExistent(t *testing.T) {
+	reg := newTestRegistry(t)
+
+	if err := reg.SetGuestHost("missing", "build-box-1"); err == nil {
+		t.Error("expected error for non-existent guest")
+	}
+}
+
+// TestGuestHostJSON checks the host is serialised for the web UI, and dropped
+// entirely when a guest (e.g. an older binary) never reported one — so the UI
+// can treat a missing host as "unknown" rather than an empty string.
+func TestGuestHostJSON(t *testing.T) {
+	withHost, err := json.Marshal(&Guest{ID: "guest-1", Host: "build-box-1"})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if !strings.Contains(string(withHost), `"host":"build-box-1"`) {
+		t.Errorf("expected host in JSON, got %s", withHost)
+	}
+
+	withoutHost, err := json.Marshal(&Guest{ID: "guest-1"})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if strings.Contains(string(withoutHost), `"host"`) {
+		t.Errorf("expected host to be omitted when empty, got %s", withoutHost)
 	}
 }

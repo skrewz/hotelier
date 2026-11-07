@@ -62,8 +62,11 @@ func (s *GuestState) UnmarshalJSON(data []byte) error {
 
 // Guest represents a connected guest in the system.
 type Guest struct {
-	ID                string     `json:"id"`
-	Name              string     `json:"name"`
+	ID   string `json:"id"`
+	Name string `json:"name"`
+	// Host is the machine the guest process runs on, as reported by the guest
+	// at registration (issue #238). Empty when the guest did not report one.
+	Host              string     `json:"host,omitempty"`
 	Tags              []string   `json:"tags"`
 	State             GuestState `json:"state"`
 	ConnectedAt       time.Time  `json:"connected_at"`
@@ -184,6 +187,22 @@ func (r *GuestRegistry) TaskHeartbeat(guestID, taskID string) error {
 			r.logf("guest %s task updated via heartbeat: %s", guestID, taskID)
 		}
 	}
+	return nil
+}
+
+// SetGuestHost records the machine a guest is running on. The guest reports it
+// at registration (see guest.register, issue #238); keeping it in the registry
+// means the task views can name the host a task is running on.
+func (r *GuestRegistry) SetGuestHost(guestID, host string) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	guest, exists := r.guests[guestID]
+	if !exists {
+		return fmt.Errorf("guest %s not found", guestID)
+	}
+
+	guest.Host = host
 	return nil
 }
 

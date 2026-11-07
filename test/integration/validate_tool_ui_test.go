@@ -490,6 +490,9 @@ func TestValidateToolUI(t *testing.T) {
 		"id":   "ui-test-guest",
 		"name": "UI Test Guest",
 		"tags": []string{"business-default"},
+		// The machine the guest runs on (issue #238). Fixed rather than the
+		// test host's real hostname so the assertions below are stable.
+		"host": "ui-test-host",
 	})
 	if err := rpc.WriteMessage(guestWS, &rpc.JSONRPCMessage{
 		JSONRPC: "2.0", ID: jsonID(1), Method: "guest.register", Params: regParams,
@@ -3270,6 +3273,95 @@ const { chromium } = require('playwright');
   // Return to the Tasks tab so later phases start from the same state.
   await page.locator('.tab').filter({ hasText: 'Tasks' }).click();
   await page.waitForFunction(() => document.getElementById('tab-tasks').style.display === 'block', null, { timeout: 5000 });
+
+  // =====================================================================
+  // Phase 13d: Guest host and UID (issue #238)
+  // =====================================================================
+  // The guests list must show the UID a task is assigned to (not just its
+  // display name), and every view of an assignment must name the machine the
+  // guest is running on.
+  console.log('=== Phase 13d: Guest host and UID ===');
+
+  const guestCard = await page.evaluate(() => {
+    const item = document.querySelector('#guest-list .guest-item');
+    return item ? item.textContent : null;
+  });
+  if (!guestCard) fail('guests list rendered no guest card');
+  if (!guestCard || !guestCard.includes('ui-test-guest')) {
+    fail('guest card does not show the guest UID: ' + guestCard);
+  }
+  if (!guestCard || !guestCard.includes('ui-test-host')) {
+    fail('guest card does not show the host the guest sits on: ' + guestCard);
+  }
+  console.log('PASS: guests list shows the UID and the host it sits on');
+
+  // A guest with no display name must not have its UID printed twice. The
+  // sidebar is restored straight after so later phases see the real list.
+  const nameless = await page.evaluate(() => {
+    const list = document.getElementById('guest-list');
+    const keep = list.innerHTML;
+    try {
+      renderGuests({ guests: [{ id: 'nameless-guest', name: '', state: 'IDLE', tags: [], host: 'ui-test-host' }] });
+      const item = document.querySelector('#guest-list .guest-item');
+      return { text: item ? item.textContent : '' };
+    } finally {
+      list.innerHTML = keep;
+    }
+  });
+  const uidCount = (nameless.text.match(/nameless-guest/g) || []).length;
+  if (uidCount !== 1) {
+    fail('nameless guest prints its UID ' + uidCount + ' times: ' + JSON.stringify(nameless.text));
+  }
+  console.log('PASS: a guest without a display name prints its UID once');
+
+  // Task list rows: an assigned task reads "→ uid @ host".
+  const listNamesHost = await page.evaluate(() =>
+    Array.from(document.querySelectorAll('.task-item .task-meta'))
+      .some(el => el.textContent.includes('ui-test-guest @ ui-test-host'))
+  );
+  if (!listNamesHost) fail('no task list row names the guest host');
+  console.log('PASS: task list rows name the guest host');
+
+  // Drill into a task assigned to that guest — the detail header carries the
+  // same "uid @ host" label.
+  await page.evaluate(() => {
+    const rows = Array.from(document.querySelectorAll('.task-item'));
+    const row = rows.find(item => {
+      const meta = item.querySelector('.task-meta');
+      return meta && meta.textContent.includes('ui-test-guest @ ui-test-host');
+    });
+    if (!row) throw new Error('no task row showing a guest host');
+    row.click();
+  });
+  await page.waitForSelector('.task-detail-meta', { timeout: 10000 });
+  await page.waitForTimeout(500);
+
+  const detailMeta = await page.evaluate(() => {
+    const el = document.querySelector('.task-detail-meta');
+    return el ? el.textContent : null;
+  });
+  if (!detailMeta || !detailMeta.includes('Guest: ui-test-guest @ ui-test-host')) {
+    fail('task detail does not name the guest host: ' + detailMeta);
+  }
+  console.log('PASS: task detail names the guest host');
+
+  // The polling path patches the header meta in place (it must not lose the
+  // host, nor the log count it exists to update).
+  await page.evaluate(async (tid) => { await patchTaskDetailMeta(tid); }, taskId);
+  await page.waitForTimeout(500);
+  const patchedMeta = await page.evaluate(() => {
+    const el = document.querySelector('.task-detail-meta');
+    return el ? el.textContent : null;
+  });
+  if (!patchedMeta || !patchedMeta.includes('ui-test-guest @ ui-test-host')) {
+    fail('polled task detail meta lost the guest host: ' + patchedMeta);
+  }
+  if (!patchedMeta || !/log entries/.test(patchedMeta)) {
+    fail('polled task detail meta lost the log count: ' + patchedMeta);
+  }
+  console.log('PASS: polled task detail meta keeps the guest host');
+
+  await takeScreenshot('13d-guest-host');
 
   // =====================================================================
   // Phase 14: Mobile viewport — mobile-friendly UI (issue #203)

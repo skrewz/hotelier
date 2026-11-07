@@ -350,6 +350,47 @@ func TestFullLifecycle_GuestRegistrationViaREST(t *testing.T) {
 	}
 }
 
+// TestFullLifecycle_GuestHostVisibleViaREST covers issue #238 on the server
+// side: the host a guest reports at registration has to reach the JSON the
+// dashboard reads.
+func TestFullLifecycle_GuestHostVisibleViaREST(t *testing.T) {
+	srv := newTestServer(t)
+	hub := srv.Hub()
+	go hub.Run()
+
+	params, _ := json.Marshal(map[string]interface{}{
+		"id":   "hosted-guest-1",
+		"name": "Hosted Guest",
+		"tags": []string{"business-default"},
+		"host": "build-box-1",
+	})
+	if _, err := hub.Dispatch("guest.register", params); err != nil {
+		t.Fatalf("guest.register: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/guests", nil)
+	w := httptest.NewRecorder()
+	srv.HandleGuests(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+
+	var response struct {
+		Guests []registry.Guest `json:"guests"`
+		Count  int              `json:"count"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &response); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if response.Count != 1 {
+		t.Fatalf("expected 1 guest, got %d", response.Count)
+	}
+	if response.Guests[0].Host != "build-box-1" {
+		t.Errorf("expected host build-box-1 in the guests payload, got %q", response.Guests[0].Host)
+	}
+}
+
 func TestFullLifecycle_TagBasedScheduling(t *testing.T) {
 	srv := newTestServer(t)
 
