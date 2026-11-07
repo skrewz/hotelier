@@ -64,7 +64,35 @@ task_timeout: 3600
 heartbeat_interval: 30
 silence_timeout: 180
 max_guests: 0
+max_concurrent_tasks: 0
 ```
+
+| Field | Description | Default |
+|-------|-------------|--------|
+| `max_concurrent_tasks` | Cap on how many tasks the host is willing to run at any moment (`0` = unlimited). Used when no `concurrency_schedule` is set; the schedule takes precedence otherwise. | `0` |
+| `concurrency_schedule` | Daily schedule of concurrency caps. Each entry (`{ at: "HH:MM", concurrency: N }`) takes effect at that wall-clock time and holds until the next entry; the last entry of the day holds through midnight to the first. In an entry `0` is a real cap and pauses all new work — the opposite of `max_concurrent_tasks: 0`, which means unlimited. The resolver keeps the two apart: it reports "no cap" as `config.ConcurrencyUnlimited` (`-1`), which no configuration can carry, so a returned `0` always means "start nothing". | — |
+| `schedule_timezone` | IANA zone name the schedule's `at` times are interpreted in, so boundaries follow the wall clock across DST. The server binary embeds the tz database (`time/tzdata`), so a zone name resolves even in the scratch container image, which ships no `/usr/share/zoneinfo`. | `"UTC"` |
+
+Worked example — cap of 2 from 07:00 and 4 from 23:00, Sydney time (DST-aware):
+
+```yaml
+max_concurrent_tasks: 0
+schedule_timezone: "Australia/Sydney"
+concurrency_schedule:
+  - at: "07:00"
+    concurrency: 2
+  - at: "23:00"
+    concurrency: 4
+```
+
+Malformed schedules (unparseable zone, malformed or duplicate `at`, negative
+`concurrency`) are reported as configuration errors at load time; a bad edit
+is rejected by the config watcher and the running server keeps the last good
+configuration. A schedule the resolver cannot read falls back to
+`max_concurrent_tasks`, so a deployment that leans on the schedule overnight
+should set that key to a non-zero cap to fail closed rather than open. An `at`
+that falls inside a daylight-saving gap (Sydney has no 02:00–03:00 on the first
+Sunday of October) takes effect at the first instant after the gap.
 
 ### Guest (`config/guest.yaml`)
 

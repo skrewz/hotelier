@@ -9,6 +9,13 @@ import (
 	"syscall"
 	"time"
 
+	// Embed the tz database: the runtime image is "FROM scratch", so there
+	// is no /usr/share/zoneinfo in the container, and schedule_timezone
+	// would otherwise make LoadLocation fail and the server refuse to boot
+	// with the very config the README documents (issue #248). See
+	// https://pkg.go.dev/time/tzdata.
+	_ "time/tzdata"
+
 	"hotelier/internal/server"
 	"hotelier/pkg/config"
 	"hotelier/pkg/fatalwriter"

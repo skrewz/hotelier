@@ -6,8 +6,12 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"regexp"
+	"sort"
+	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"hotelier/pkg/persona"
 
@@ -47,6 +51,22 @@ type ServerConfig struct {
 	TaskSilenceTimeout int `yaml:"task_silence_timeout"`
 	// MaxGuests is the maximum number of guests allowed (0 = unlimited).
 	MaxGuests int `yaml:"max_guests"`
+	// MaxConcurrentTasks is the static cap on how many tasks the server is
+	// willing to run at any moment (0 = unlimited). Used when
+	// ConcurrencySchedule is empty; the schedule takes precedence otherwise
+	// (issue #248). EffectiveConcurrency reports the uncapped case as
+	// ConcurrencyUnlimited rather than as 0, because a schedule entry uses 0
+	// for the opposite: a full pause.
+	MaxConcurrentTasks int `yaml:"max_concurrent_tasks"`
+	// ConcurrencySchedule is a list of daily wall-clock boundaries for the
+	// concurrency cap. Each entry takes effect at its At time (interpreted
+	// in ScheduleTimezone) and holds until the next entry; the last entry
+	// of the day holds through midnight to the first (issue #248).
+	ConcurrencySchedule []ConcurrencyScheduleEntry `yaml:"concurrency_schedule"`
+	// ScheduleTimezone is the IANA zone name ConcurrencySchedule At times
+	// are interpreted in (e.g. "Australia/Sydney"), so boundaries follow
+	// the wall clock across DST. Default: "UTC".
+	ScheduleTimezone string `yaml:"schedule_timezone"`
 	// LogDir is the base directory where task logs are persisted to disk.
 	// When empty, logs are kept in memory only.
 	LogDir string `yaml:"log_dir"`
@@ -60,6 +80,32 @@ type ServerConfig struct {
 	// environment variables and file copies that are applied to a task's
 	// working directory. See pkg/persona for details.
 	Personas []persona.Persona `yaml:"personas"`
+}
+
+// ConcurrencyUnlimited is the value EffectiveConcurrency returns when no cap
+// is in force, so that "unlimited" cannot be mistaken for the 0 a schedule
+// entry uses to pause all work (max_concurrent_tasks itself keeps the
+// max_guests convention, where 0 means unlimited, and the resolver translates
+// it into this sentinel).
+//
+// It is deliberately negative: ValidateConcurrency rejects a negative cap in
+// either key, so no configuration can carry it and a resolver result is never
+// ambiguous. A consumer must compare against ConcurrencyUnlimited before
+// treating the result as a number of tasks; a bare "cap == 0 means unlimited"
+// test would turn a configured overnight pause into no pause at all.
+const ConcurrencyUnlimited = -1
+
+// ConcurrencyScheduleEntry is one boundary of the daily concurrency
+// schedule (issue #248).
+type ConcurrencyScheduleEntry struct {
+	// At is the wall-clock time the entry takes effect, in strict
+	// 24-hour "HH:MM" form, interpreted in the config's schedule_timezone.
+	At string `yaml:"at"`
+	// Concurrency is the cap in force from At until the next entry. Unlike
+	// max_concurrent_tasks, where 0 means unlimited, 0 here is a real cap:
+	// no new work may start. EffectiveConcurrency keeps the two apart by
+	// reporting the uncapped case as ConcurrencyUnlimited.
+	Concurrency int `yaml:"concurrency"`
 }
 
 // GuestConfig holds the configuration for a guest.
@@ -114,6 +160,8 @@ func DefaultServerConfig() ServerConfig {
 		TaskAssignmentTimeout: 90,  // 3 heartbeats missed (3 * 30s)
 		TaskSilenceTimeout:    600, // 10 minutes of silence while running
 		MaxGuests:             0,   // unlimited
+		MaxConcurrentTasks:    0,   // unlimited
+		ScheduleTimezone:      "UTC",
 	}
 }
 
@@ -167,7 +215,177 @@ func LoadServerConfig(path string) (ServerConfig, error) {
 	if err := yaml.Unmarshal(data, &cfg); err != nil {
 		return cfg, err
 	}
+	if err := cfg.ValidateConcurrency(); err != nil {
+		return cfg, err
+	}
 	return cfg, nil
+}
+
+// atRe matches a strict 24-hour "HH:MM" wall-clock time (zero-padded).
+var atRe = regexp.MustCompile(`^([01][0-9]|2[0-3]):([0-5][0-9])$`)
+
+// ValidateConcurrency checks the concurrency schedule keys (issue #248):
+// an unparseable zone, a malformed or duplicate "at", or a negative
+// concurrency is a configuration error, never silently ignored.
+//
+// LoadServerConfig calls it, and so does every path that installs a config
+// into a running server (Server.New / Server.Reload), because a config
+// assembled in code never passes through the loader.
+func (c ServerConfig) ValidateConcurrency() error {
+	if c.MaxConcurrentTasks < 0 {
+		return fmt.Errorf("max_concurrent_tasks must not be negative (got %d)", c.MaxConcurrentTasks)
+	}
+	if c.ScheduleTimezone != "" {
+		if _, err := loadLocation(c.ScheduleTimezone); err != nil {
+			return fmt.Errorf("schedule_timezone %q is not a valid IANA zone: %w", c.ScheduleTimezone, err)
+		}
+	}
+	seen := make(map[int]string, len(c.ConcurrencySchedule))
+	for _, e := range c.ConcurrencySchedule {
+		minutes, err := parseScheduleAt(e.At)
+		if err != nil {
+			return fmt.Errorf("concurrency_schedule: %w", err)
+		}
+		if prev, dup := seen[minutes]; dup {
+			return fmt.Errorf("concurrency_schedule: duplicate at %q", prev)
+		}
+		seen[minutes] = e.At
+		if e.Concurrency < 0 {
+			return fmt.Errorf("concurrency_schedule entry at %q: concurrency must not be negative (got %d)", e.At, e.Concurrency)
+		}
+	}
+	return nil
+}
+
+// parseScheduleAt parses a strict "HH:MM" time into minutes past midnight.
+func parseScheduleAt(at string) (int, error) {
+	m := atRe.FindStringSubmatch(at)
+	if m == nil {
+		return 0, fmt.Errorf("invalid at %q: expected a 24-hour wall-clock time in \"HH:MM\" form", at)
+	}
+	h, err := strconv.Atoi(m[1])
+	if err != nil {
+		return 0, fmt.Errorf("invalid at %q: %w", at, err)
+	}
+	mm, err := strconv.Atoi(m[2])
+	if err != nil {
+		return 0, fmt.Errorf("invalid at %q: %w", at, err)
+	}
+	return h*60 + mm, nil
+}
+
+// EffectiveConcurrency returns the concurrency cap in force at now: the
+// last schedule entry whose "at" is at or before now in schedule_timezone,
+// wrapping to the previous day's last entry before the first one; or
+// max_concurrent_tasks when no schedule is configured. Entries need not be
+// sorted.
+//
+// The result is a cap on how many tasks may start, and the three answers a
+// caller can get mean:
+//
+//   - ConcurrencyUnlimited: no cap is in force, work starts freely. This is
+//     what an unconfigured deployment resolves to, since max_concurrent_tasks
+//     defaults to 0 and 0 means unlimited in that key.
+//   - 0: no new task may start. A schedule entry expresses this overnight
+//     pause with concurrency: 0.
+//   - n > 0: at most n tasks may be in flight.
+//
+// Callers must test ConcurrencyUnlimited first; comparing only for 0 would
+// read an overnight pause as "unlimited".
+//
+// A schedule this function cannot trust (an unparsable "at", an unloadable
+// zone) resolves to the static cap rather than to a guess. ValidateConcurrency
+// rejects such a config at load and reload time, so reaching those branches
+// means the config was built in code without ever being validated.
+func (c ServerConfig) EffectiveConcurrency(now time.Time) int {
+	if len(c.ConcurrencySchedule) == 0 {
+		return c.staticConcurrency()
+	}
+
+	type entry struct {
+		minutes int
+		value   int
+	}
+	entries := make([]entry, 0, len(c.ConcurrencySchedule))
+	for _, e := range c.ConcurrencySchedule {
+		m, err := parseScheduleAt(e.At)
+		if err != nil {
+			// Dropping the entry would silently hand its window to a
+			// neighbouring cap, so fall back to the static cap instead.
+			return c.staticConcurrency()
+		}
+		entries = append(entries, entry{minutes: m, value: e.Concurrency})
+	}
+	if len(entries) == 0 {
+		return c.staticConcurrency()
+	}
+	sort.SliceStable(entries, func(i, j int) bool { return entries[i].minutes < entries[j].minutes })
+
+	// The search below keeps the last entry at or before now, so two entries
+	// for the same minute would otherwise resolve to whichever order the sort
+	// happened to produce. ValidateConcurrency rejects a duplicated "at", but
+	// a config built in code can still carry one (server.New only logs such a
+	// failure), so collapse the duplicates here: the first entry listed for a
+	// minute wins.
+	deduped := make([]entry, 0, len(entries))
+	for i, e := range entries {
+		if i > 0 && entries[i-1].minutes == e.minutes {
+			continue
+		}
+		deduped = append(deduped, e)
+	}
+	entries = deduped
+
+	loc, err := loadLocation(c.ScheduleTimezone)
+	if err != nil {
+		// Evaluating the schedule in UTC would shift every boundary by the
+		// zone's offset; the static cap is the honest answer.
+		return c.staticConcurrency()
+	}
+	local := now.In(loc)
+	cur := local.Hour()*60 + local.Minute()
+
+	// Default: the last entry of the day holds through midnight to the
+	// first entry. Walk forward to the last boundary at or before now.
+	chosen := entries[len(entries)-1]
+	for _, e := range entries {
+		if e.minutes <= cur {
+			chosen = e
+		}
+	}
+	return chosen.value
+}
+
+// staticConcurrency states the static cap in the resolver's vocabulary:
+// max_concurrent_tasks follows the max_guests convention where 0 means
+// unlimited, and ConcurrencyUnlimited is how the resolver says that without
+// colliding with the 0 a schedule entry uses for a full pause.
+func (c ServerConfig) staticConcurrency() int {
+	if c.MaxConcurrentTasks == 0 {
+		return ConcurrencyUnlimited
+	}
+	return c.MaxConcurrentTasks
+}
+
+// zoneLocations memoises resolved *time.Location values by zone name.
+// time.LoadLocation has no cache of its own and re-reads the zone file on
+// every call; the enforcement member calls EffectiveConcurrency on every
+// assignment decision, so without this the resolver would do disk I/O per
+// decision.
+var zoneLocations sync.Map
+
+// loadLocation returns the named zone, caching successful lookups. It keeps
+// the semantics of time.LoadLocation ("" and "Local" included).
+func loadLocation(name string) (*time.Location, error) {
+	if loc, ok := zoneLocations.Load(name); ok {
+		return loc.(*time.Location), nil
+	}
+	loc, err := time.LoadLocation(name)
+	if err != nil {
+		return nil, err
+	}
+	zoneLocations.Store(name, loc)
+	return loc, nil
 }
 
 // LoadGuestConfig reads and parses a guest config file.
