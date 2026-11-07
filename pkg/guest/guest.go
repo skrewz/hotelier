@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"hotelier/pkg/config"
+	"hotelier/pkg/logutil"
 	"hotelier/pkg/persona"
 	"hotelier/pkg/rpc"
 
@@ -466,7 +467,7 @@ func (g *Guest) taskDispatcher(ctx context.Context) {
 					g.DeclineTask(task.TaskID, err.Error())
 				}
 			} else {
-				g.log.Printf("[DISPATCH] task %s finished: success=%v output=%q", task.TaskID, result.Success, result.Output)
+				g.log.Printf("[DISPATCH] task %s finished: success=%v output=%s", task.TaskID, result.Success, logutil.Content(result.Output))
 			}
 		}
 	}
@@ -893,7 +894,8 @@ func (g *Guest) ExecuteTask(task TaskAssignment) (*TaskResult, error) {
 	}
 
 	g.log.Printf("[TASK] executing task %s", task.TaskID)
-	g.log.Printf("[TASK] prompt: %s", task.Prompt)
+	// The journal is not a session log: log the prompt's size, not its text (issue #241).
+	g.log.Printf("[TASK] prompt: %s", logutil.Content(task.Prompt))
 	g.log.Printf("[TASK] tags: %v", task.Tags)
 
 	// Send log that task started

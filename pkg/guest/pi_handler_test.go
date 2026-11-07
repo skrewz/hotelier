@@ -1,7 +1,9 @@
 package guest
 
 import (
+	"bytes"
 	"context"
+	"fmt"
 	"io"
 	"log"
 	"os"
@@ -2250,5 +2252,27 @@ printf '{"type":"agent_settled"}\n'
 	leftovers, _ := filepath.Glob(filepath.Join(baseDir, "tasks", "*"))
 	if len(leftovers) > 0 {
 		t.Errorf("task dir(s) or jail(s) left behind: %v", leftovers)
+	}
+}
+
+// TestPIHandler_logTaskStart_LogsPromptSizeNotPrompt covers issue #241:
+// the handler logged the full prompt of every task into the guest's
+// process log, which lands in the systemd journal.
+func TestPIHandler_logTaskStart_LogsPromptSizeNotPrompt(t *testing.T) {
+	const prompt = "refactor the parser and explain the change"
+	var logBuf bytes.Buffer
+	h := &PIHandler{log: log.New(&logBuf, "", 0)}
+
+	h.logTaskStart("task-1", prompt)
+
+	got := logBuf.String()
+	if strings.Contains(got, prompt) {
+		t.Errorf("process log must not contain the prompt, got:\n%s", got)
+	}
+	if !strings.Contains(got, "[PI] executing task task-1") {
+		t.Errorf("expected the activity line in the process log, got:\n%s", got)
+	}
+	if !strings.Contains(got, fmt.Sprintf("[PI] prompt: %d bytes", len(prompt))) {
+		t.Errorf("expected the prompt size in the process log, got:\n%s", got)
 	}
 }

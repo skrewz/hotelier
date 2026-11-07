@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"hotelier/pkg/jail"
+	"hotelier/pkg/logutil"
 )
 
 // Event represents a pi RPC event streamed to stdout.
@@ -525,7 +526,8 @@ func (c *PiClient) readEvents() {
 
 				var event Event
 				if err := json.Unmarshal([]byte(line), &event); err != nil {
-					c.log.Printf("pi parse error: %v (line: %s)", err, line)
+					// An unparseable line is raw event JSON, so log its size (issue #241).
+					c.log.Printf("pi parse error: %v (%s)", err, logutil.Content(line))
 				} else {
 					// Record event in history for diagnostics
 					c.addEventToHistory(event)

@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"hotelier/pkg/jail"
+	"hotelier/pkg/logutil"
 	"hotelier/pkg/persona"
 	"hotelier/pkg/pi"
 )
@@ -194,6 +195,13 @@ func (h *PIHandler) IsRunning() bool {
 	return h.client != nil && h.client.IsRunning()
 }
 
+// logTaskStart records the start of a task in the guest's process log.
+// The prompt's size is logged rather than its text (issue #241).
+func (h *PIHandler) logTaskStart(taskID, prompt string) {
+	h.log.Printf("[PI] executing task %s", taskID)
+	h.log.Printf("[PI] prompt: %s", logutil.Content(prompt))
+}
+
 // GetClient returns the underlying pi client (for testing).
 func (h *PIHandler) GetClient() *pi.PiClient {
 	h.mu.Lock()
@@ -228,8 +236,7 @@ func (h *PIHandler) ExecuteTask(ctx context.Context, task TaskAssignment, sendLo
 		}
 	}
 
-	h.log.Printf("[PI] executing task %s", task.TaskID)
-	h.log.Printf("[PI] prompt: %s", task.Prompt)
+	h.logTaskStart(task.TaskID, task.Prompt)
 
 	// Send operational log that task execution is starting.
 	if err := sendLog(LogEntry{TaskID: task.TaskID, Line: fmt.Sprintf("Executing task %s", task.TaskID), Level: "system"}); err != nil {

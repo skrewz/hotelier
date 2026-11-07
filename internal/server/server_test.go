@@ -2113,28 +2113,48 @@ func TestLogAccumulator_ThinkingNotLoggedToStdout(t *testing.T) {
 	}
 }
 
-// TestLogAccumulator_NonThinkingStillLoggedToStdout verifies that the
-// issue #194 fix only trims thinking lines: batched text and tool lines
-// are still written to the process log for operational visibility.
-func TestLogAccumulator_NonThinkingStillLoggedToStdout(t *testing.T) {
+// TestLogAccumulator_LogsSizesNotContent verifies that no session content
+// reaches the process log: every emitted line is recorded as its size and
+// activity (task and level) only. The whole content of every agentic session
+// used to land in the systemd journal (issue #241), which issue #194 had
+// already trimmed for thinking deltas alone.
+func TestLogAccumulator_LogsSizesNotContent(t *testing.T) {
 	var logBuf bytes.Buffer
 	logger := log.New(&logBuf, "", 0)
 	acc := NewLogAccumulator(logger)
 
-	emit := func(TaskLogEntry) {}
+	var emitted []TaskLogEntry
+	emit := func(e TaskLogEntry) {
+		emitted = append(emitted, e)
+	}
 
 	acc.Feed("task-1", "Hello ", "text", emit)
 	acc.Feed("task-1", "world", "text", emit)
 	acc.FlushAll(emit)
 
-	acc.Feed("task-1", "[TOOL_START] bash: ls (id: tool-1)", "tool", emit)
+	acc.Feed("task-1", "[TOOL_START] bash: cat /etc/shadow (id: tool-1)", "tool", emit)
+	acc.Feed("task-1", "task started", "system", emit)
+
+	// The UI still receives the content itself.
+	if len(emitted) != 3 {
+		t.Fatalf("expected 3 emitted entries, got %d", len(emitted))
+	}
+	if emitted[1].Line != "[TOOL_START] bash: cat /etc/shadow (id: tool-1)" {
+		t.Errorf("emitted tool line must keep its content, got %q", emitted[1].Line)
+	}
 
 	got := logBuf.String()
-	if !strings.Contains(got, "Hello world") {
-		t.Errorf("expected batched text line in process log, got:\n%s", got)
+	for _, leak := range []string{"Hello world", "cat /etc/shadow", "task started"} {
+		if strings.Contains(got, leak) {
+			t.Errorf("process log must not contain %q, got:\n%s", leak, got)
+		}
 	}
-	if !strings.Contains(got, "[TOOL_START] bash: ls (id: tool-1)") {
-		t.Errorf("expected tool line in process log, got:\n%s", got)
+	// Activity and size remain: one line per emitted entry, tagged by task
+	// and level, stating how much content it carried.
+	for _, want := range []string{"[task:task-1] [text] 11 bytes", "[task:task-1] [tool] 47 bytes", "[task:task-1] [system] 12 bytes"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("expected process log to contain %q, got:\n%s", want, got)
+		}
 	}
 }
 

@@ -19,6 +19,7 @@ import (
 	"hotelier/pkg/config"
 	"hotelier/pkg/fatalwriter"
 	"hotelier/pkg/logstore"
+	"hotelier/pkg/logutil"
 	"hotelier/pkg/orchestrator"
 	"hotelier/pkg/persona"
 	"hotelier/pkg/queue"
@@ -235,11 +236,14 @@ func (a *LogAccumulator) emitNow(taskID, line, level string, emit func(TaskLogEn
 		Level:     level,
 		Timestamp: time.Now(),
 	}
-	// Thinking deltas are emitted per token and are streamed to the UI via
-	// the emit callback; writing them to stdout would flood the process
-	// (podman) logs with model payload (issue #194).
+	// The journal records the activity and its size, never the content: every
+	// agentic session used to land in the systemd journal (issue #241). The
+	// content itself goes to the log store and the UI via the emit callback.
+	//
+	// Thinking deltas are skipped entirely: they arrive per token, so even a
+	// size line would flood the journal (issue #194).
 	if level != "thinking" {
-		a.log.Printf("[task:%s] [%s] %s", taskID, level, line)
+		a.log.Printf("[task:%s] [%s] %s", taskID, level, logutil.Content(line))
 	}
 	emit(entry)
 }
