@@ -6,8 +6,12 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"regexp"
+	"sort"
+	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"hotelier/pkg/persona"
 
@@ -47,6 +51,20 @@ type ServerConfig struct {
 	TaskSilenceTimeout int `yaml:"task_silence_timeout"`
 	// MaxGuests is the maximum number of guests allowed (0 = unlimited).
 	MaxGuests int `yaml:"max_guests"`
+	// MaxConcurrentTasks is the static cap on how many tasks the server is
+	// willing to run at any moment (0 = unlimited). Used when
+	// ConcurrencySchedule is empty; the schedule takes precedence otherwise
+	// (issue #248).
+	MaxConcurrentTasks int `yaml:"max_concurrent_tasks"`
+	// ConcurrencySchedule is a list of daily wall-clock boundaries for the
+	// concurrency cap. Each entry takes effect at its At time (interpreted
+	// in ScheduleTimezone) and holds until the next entry; the last entry
+	// of the day holds through midnight to the first (issue #248).
+	ConcurrencySchedule []ConcurrencyScheduleEntry `yaml:"concurrency_schedule"`
+	// ScheduleTimezone is the IANA zone name ConcurrencySchedule At times
+	// are interpreted in (e.g. "Australia/Sydney"), so boundaries follow
+	// the wall clock across DST. Default: "UTC".
+	ScheduleTimezone string `yaml:"schedule_timezone"`
 	// LogDir is the base directory where task logs are persisted to disk.
 	// When empty, logs are kept in memory only.
 	LogDir string `yaml:"log_dir"`
@@ -60,6 +78,17 @@ type ServerConfig struct {
 	// environment variables and file copies that are applied to a task's
 	// working directory. See pkg/persona for details.
 	Personas []persona.Persona `yaml:"personas"`
+}
+
+// ConcurrencyScheduleEntry is one boundary of the daily concurrency
+// schedule (issue #248).
+type ConcurrencyScheduleEntry struct {
+	// At is the wall-clock time the entry takes effect, in strict
+	// 24-hour "HH:MM" form, interpreted in the config's schedule_timezone.
+	At string `yaml:"at"`
+	// Concurrency is the cap in force from At until the next entry
+	// (0 pauses all work).
+	Concurrency int `yaml:"concurrency"`
 }
 
 // GuestConfig holds the configuration for a guest.
@@ -114,6 +143,8 @@ func DefaultServerConfig() ServerConfig {
 		TaskAssignmentTimeout: 90,  // 3 heartbeats missed (3 * 30s)
 		TaskSilenceTimeout:    600, // 10 minutes of silence while running
 		MaxGuests:             0,   // unlimited
+		MaxConcurrentTasks:    0,   // unlimited
+		ScheduleTimezone:      "UTC",
 	}
 }
 
@@ -167,7 +198,105 @@ func LoadServerConfig(path string) (ServerConfig, error) {
 	if err := yaml.Unmarshal(data, &cfg); err != nil {
 		return cfg, err
 	}
+	if err := validateConcurrency(cfg); err != nil {
+		return cfg, err
+	}
 	return cfg, nil
+}
+
+// atRe matches a strict 24-hour "HH:MM" wall-clock time (zero-padded).
+var atRe = regexp.MustCompile(`^([01][0-9]|2[0-3]):([0-5][0-9])$`)
+
+// validateConcurrency checks the concurrency schedule keys (issue #248):
+// an unparseable zone, a malformed or duplicate "at", or a negative
+// concurrency is a configuration error, never silently ignored.
+func validateConcurrency(cfg ServerConfig) error {
+	if cfg.MaxConcurrentTasks < 0 {
+		return fmt.Errorf("max_concurrent_tasks must not be negative (got %d)", cfg.MaxConcurrentTasks)
+	}
+	if cfg.ScheduleTimezone != "" {
+		if _, err := time.LoadLocation(cfg.ScheduleTimezone); err != nil {
+			return fmt.Errorf("schedule_timezone %q is not a valid IANA zone: %w", cfg.ScheduleTimezone, err)
+		}
+	}
+	seen := make(map[int]string, len(cfg.ConcurrencySchedule))
+	for _, e := range cfg.ConcurrencySchedule {
+		minutes, err := parseScheduleAt(e.At)
+		if err != nil {
+			return fmt.Errorf("concurrency_schedule: %w", err)
+		}
+		if prev, dup := seen[minutes]; dup {
+			return fmt.Errorf("concurrency_schedule: duplicate at %q", prev)
+		}
+		seen[minutes] = e.At
+		if e.Concurrency < 0 {
+			return fmt.Errorf("concurrency_schedule entry at %q: concurrency must not be negative (got %d)", e.At, e.Concurrency)
+		}
+	}
+	return nil
+}
+
+// parseScheduleAt parses a strict "HH:MM" time into minutes past midnight.
+func parseScheduleAt(at string) (int, error) {
+	m := atRe.FindStringSubmatch(at)
+	if m == nil {
+		return 0, fmt.Errorf("invalid at %q: expected a 24-hour wall-clock time in \"HH:MM\" form", at)
+	}
+	h, err := strconv.Atoi(m[1])
+	if err != nil {
+		return 0, fmt.Errorf("invalid at %q: %w", at, err)
+	}
+	mm, err := strconv.Atoi(m[2])
+	if err != nil {
+		return 0, fmt.Errorf("invalid at %q: %w", at, err)
+	}
+	return h*60 + mm, nil
+}
+
+// EffectiveConcurrency returns the concurrency cap in force at now: the
+// last schedule entry whose "at" is at or before now in schedule_timezone,
+// wrapping to the previous day's last entry before the first one; or
+// MaxConcurrentTasks when no schedule is configured. Entries need not be
+// sorted. If the zone cannot be loaded (it would have been rejected at
+// config load time), the comparison falls back to UTC.
+func (c ServerConfig) EffectiveConcurrency(now time.Time) int {
+	if len(c.ConcurrencySchedule) == 0 {
+		return c.MaxConcurrentTasks
+	}
+
+	type entry struct {
+		minutes int
+		value   int
+	}
+	entries := make([]entry, 0, len(c.ConcurrencySchedule))
+	for _, e := range c.ConcurrencySchedule {
+		m, err := parseScheduleAt(e.At)
+		if err != nil {
+			continue // rejected by validateConcurrency at load time
+		}
+		entries = append(entries, entry{minutes: m, value: e.Concurrency})
+	}
+	if len(entries) == 0 {
+		return c.MaxConcurrentTasks
+	}
+	sort.Slice(entries, func(i, j int) bool { return entries[i].minutes < entries[j].minutes })
+
+	loc, err := time.LoadLocation(c.ScheduleTimezone)
+	if err != nil {
+		loc = time.UTC
+	}
+	local := now.In(loc)
+	cur := local.Hour()*60 + local.Minute()
+
+	// Default: the last entry of the day holds through midnight to the
+	// first entry. Walk forward to the last boundary at or before now.
+	chosen := entries[len(entries)-1]
+	for _, e := range entries {
+		if e.minutes <= cur {
+			chosen = e
+		}
+	}
+	return chosen.value
 }
 
 // LoadGuestConfig reads and parses a guest config file.

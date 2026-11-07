@@ -11,6 +11,22 @@ heartbeat_interval: 30
 # 0 disables stale-guest removal.
 silence_timeout: 180
 max_guests: 0
+# Static cap on how many tasks the host is willing to run at any moment
+# (0 = unlimited). Used as-is when no concurrency_schedule is configured;
+# the schedule takes precedence otherwise.
+max_concurrent_tasks: 0
+# IANA timezone the schedule's "at" times are interpreted in, so the
+# boundaries follow the wall clock across DST. Default: "UTC".
+#schedule_timezone: "Australia/Sydney"
+# Daily concurrency schedule: each entry takes effect at its wall-clock
+# time and holds until the next entry; the last entry of the day holds
+# through midnight to the first. Worked day/night example — cap 2 from
+# 07:00 and 4 from 23:00 Sydney time:
+#concurrency_schedule:
+#  - at: "07:00"
+#    concurrency: 2
+#  - at: "23:00"
+#    concurrency: 4
 # log_dir: "/var/log/hotelier"  # Persist task logs to disk (empty = in-memory only)
 # queue_dir: "/var/lib/hotelier/queue"  # Persist unprocessed tasks across restarts (empty = in-memory only)
 

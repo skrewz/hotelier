@@ -267,6 +267,8 @@ type Server struct {
 // Reload updates the server's runtime configuration from a new ServerConfig.
 // It applies changes that can take effect without restarting:
 //   - MaxGuests: updates the registry capacity
+//   - MaxConcurrentTasks, ConcurrencySchedule, ScheduleTimezone: read live
+//     by EffectiveConcurrency, so schedule edits take effect here too
 //   - LogDir: recreates the disk log store if the path changed
 //   - Personas: rebuilds the persona store
 //   - TaskTimeout, HeartbeatInterval, MaxLogSize: stored for future use
@@ -282,6 +284,16 @@ func (s *Server) Reload(cfg config.ServerConfig) {
 	if cfg.MaxGuests != old.MaxGuests {
 		s.orchestrator.SetMaxGuests(cfg.MaxGuests)
 		s.log.Printf("max_guests updated: %d", cfg.MaxGuests)
+	}
+
+	// Concurrency cap changes are picked up live by EffectiveConcurrency
+	// (which reads s.cfg under the lock this Reload holds); log them the
+	// same way max_guests is logged (issue #248).
+	if cfg.MaxConcurrentTasks != old.MaxConcurrentTasks {
+		s.log.Printf("max_concurrent_tasks updated: %d", cfg.MaxConcurrentTasks)
+	}
+	if !reflect.DeepEqual(cfg.ConcurrencySchedule, old.ConcurrencySchedule) || cfg.ScheduleTimezone != old.ScheduleTimezone {
+		s.log.Printf("concurrency_schedule updated: %d entries (timezone %q)", len(cfg.ConcurrencySchedule), cfg.ScheduleTimezone)
 	}
 
 	// Recreate persona store if personas changed (deep comparison catches
@@ -456,6 +468,17 @@ func (s *Server) Stop(ctx context.Context) error {
 // Orchestrator returns the orchestrator (for testing).
 func (s *Server) Orchestrator() *orchestrator.Orchestrator {
 	return s.orchestrator
+}
+
+// EffectiveConcurrency returns the task-concurrency cap in force at now,
+// resolved from the currently loaded configuration (issue #248). It reads
+// the config live, so a Reload carrying new concurrency keys takes effect
+// without a restart. Enforcement of the cap is a separate concern; this is
+// the single source of truth for "what is the cap right now".
+func (s *Server) EffectiveConcurrency(now time.Time) int {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.cfg.EffectiveConcurrency(now)
 }
 
 // Registry returns the guest registry (for testing, migration compat).
