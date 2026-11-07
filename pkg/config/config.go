@@ -319,7 +319,22 @@ func (c ServerConfig) EffectiveConcurrency(now time.Time) int {
 	if len(entries) == 0 {
 		return c.staticConcurrency()
 	}
-	sort.Slice(entries, func(i, j int) bool { return entries[i].minutes < entries[j].minutes })
+	sort.SliceStable(entries, func(i, j int) bool { return entries[i].minutes < entries[j].minutes })
+
+	// The search below keeps the last entry at or before now, so two entries
+	// for the same minute would otherwise resolve to whichever order the sort
+	// happened to produce. ValidateConcurrency rejects a duplicated "at", but
+	// a config built in code can still carry one (server.New only logs such a
+	// failure), so collapse the duplicates here: the first entry listed for a
+	// minute wins.
+	deduped := make([]entry, 0, len(entries))
+	for i, e := range entries {
+		if i > 0 && entries[i-1].minutes == e.minutes {
+			continue
+		}
+		deduped = append(deduped, e)
+	}
+	entries = deduped
 
 	loc, err := loadLocation(c.ScheduleTimezone)
 	if err != nil {

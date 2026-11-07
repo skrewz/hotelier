@@ -379,6 +379,34 @@ func TestEffectiveConcurrency_ScheduleEntryInSpringForwardGap(t *testing.T) {
 // TestLoadLocation_Memoised guards the cache the resolver relies on: the
 // enforcement member calls EffectiveConcurrency on every assignment
 // decision, so a repeated lookup must not re-read the zone file.
+// TestEffectiveConcurrency_DuplicateAtFirstEntryWins: ValidateConcurrency
+// rejects a duplicated "at", but server.New only logs such a failure and
+// installs the config anyway, so the resolver needs a deterministic winner
+// for a config assembled in code. The first entry listed for that minute
+// wins, whatever order the sort happens to produce.
+func TestEffectiveConcurrency_DuplicateAtFirstEntryWins(t *testing.T) {
+	cfg := ServerConfig{
+		ScheduleTimezone: "UTC",
+		ConcurrencySchedule: []ConcurrencyScheduleEntry{
+			{At: "23:00", Concurrency: 4},
+			{At: "07:00", Concurrency: 1},
+			{At: "07:00", Concurrency: 9},
+		},
+	}
+	for i := 0; i < 64; i++ {
+		if got := cfg.EffectiveConcurrency(utc(15, 7, 30)); got != 1 {
+			t.Fatalf("expected the first 07:00 entry (1) to win, got %d", got)
+		}
+	}
+	// The other entries keep their windows.
+	if got := cfg.EffectiveConcurrency(utc(15, 12, 0)); got != 1 {
+		t.Errorf("expected 1 to hold until the 23:00 entry, got %d", got)
+	}
+	if got := cfg.EffectiveConcurrency(utc(15, 3, 0)); got != 4 {
+		t.Errorf("expected 4 from the 23:00 entry through midnight, got %d", got)
+	}
+}
+
 func TestLoadLocation_Memoised(t *testing.T) {
 	first, err := loadLocation("Australia/Sydney")
 	if err != nil {
