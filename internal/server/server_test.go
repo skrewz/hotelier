@@ -3800,10 +3800,11 @@ func TestCheckStuckTasks_Disabled(t *testing.T) {
 }
 
 // TestCheckStuckTasks_TaskAlreadyPending verifies that checkStuckTasks
-// handles the case where the task has already been re-queued to PENDING
-// by another code path (e.g. handleGuestTaskDeclined), but the guest
-// still has a stale TaskID. This should not produce an error - it should
-// just clear the guest's TaskID and move on.
+// tolerates the case where the task has already been re-queued to PENDING
+// by another code path but the guest still has a stale TaskID: no error,
+// and — since issue #251 — no silent state mutation. The stale reference
+// is an assertion failure: it is logged and resolved through the reconcile
+// path, not cleared by bookkeeping that would make a busy guest look free.
 func TestCheckStuckTasks_TaskAlreadyPending(t *testing.T) {
 	srv := newTestServer(t)
 	srv.cfg.TaskAssignmentTimeout = 1 // 1 second timeout
@@ -3853,16 +3854,18 @@ func TestCheckStuckTasks_TaskAlreadyPending(t *testing.T) {
 		t.Errorf("expected task status PENDING, got %s", task.Status)
 	}
 
-	// Guest task should be cleared
+	// The stale reference is surfaced, not corrected (issue #251).
 	guest, _ = srv.Registry().GetGuest("guest-1")
-	if guest.TaskID != "" {
-		t.Errorf("expected guest task cleared, got %s", guest.TaskID)
+	if guest.TaskID != taskID {
+		t.Errorf("expected stale reference to be left for reconciliation, got %s", guest.TaskID)
 	}
 }
 
 // TestCheckStuckTasks_TaskInTerminalState verifies that checkStuckTasks
-// handles the case where the task has already reached a terminal state
-// (COMPLETED, FAILED, CANCELLED), but the guest still has a stale TaskID.
+// tolerates the case where the task has already reached a terminal state
+// (COMPLETED, FAILED, CANCELLED) while the guest still has a stale TaskID:
+// logged as a failed assertion and left alone (issue #251), never cleared
+// by bookkeeping.
 func TestCheckStuckTasks_TaskInTerminalState(t *testing.T) {
 	for _, tc := range []struct {
 		name          string
@@ -3937,10 +3940,10 @@ func TestCheckStuckTasks_TaskInTerminalState(t *testing.T) {
 				t.Errorf("expected task status %s, got %s", tc.name, task.Status)
 			}
 
-			// Guest task should be cleared
+			// The stale reference is surfaced, not corrected (issue #251).
 			guest, _ = srv.Registry().GetGuest("guest-1")
-			if guest.TaskID != "" {
-				t.Errorf("expected guest task cleared, got %s", guest.TaskID)
+			if guest.TaskID != taskID {
+				t.Errorf("expected stale reference to be left for reconciliation, got %s", guest.TaskID)
 			}
 		})
 	}
@@ -4809,5 +4812,57 @@ func TestHandleTaskRerun_PreservesTitleAndURL(t *testing.T) {
 	}
 	if newTask.URL != "https://example.com/s-git/hotelier/pulls/1" {
 		t.Errorf("expected rerun to carry URL 'https://example.com/s-git/hotelier/pulls/1', got %q", newTask.URL)
+	}
+}
+
+// TestHandleGuests_GET_HeartbeatTaskMismatch covers issue #251: the demoted
+// heartbeat keeps reporting what the guest is executing. /api/guests must
+// surface the reported task (heartbeat_task_id) and flag when it differs
+// from the task the server assigned (heartbeat_task_mismatch) — the
+// mismatch is resolved through reconciliation, never by rewriting the
+// assignment.
+func TestHandleGuests_GET_HeartbeatTaskMismatch(t *testing.T) {
+	srv := newTestServer(t)
+
+	if _, err := srv.Registry().Register("hb-guest", "HB Guest", nil); err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	if err := srv.Registry().SetGuestTask("hb-guest", "task-b"); err != nil {
+		t.Fatalf("set task: %v", err)
+	}
+	if err := srv.Registry().TaskHeartbeat("hb-guest", "task-a"); err != nil {
+		t.Fatalf("task heartbeat: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/guests", nil)
+	w := httptest.NewRecorder()
+	srv.HandleGuests(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+
+	var response struct {
+		Guests []struct {
+			registry.Guest
+			HeartbeatTaskMismatch bool `json:"heartbeat_task_mismatch"`
+		} `json:"guests"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &response); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if len(response.Guests) != 1 {
+		t.Fatalf("expected 1 guest, got %d", len(response.Guests))
+	}
+
+	guest := response.Guests[0]
+	if guest.TaskID != "task-b" {
+		t.Errorf("assignment must survive the mismatched heartbeat, task_id=%q", guest.TaskID)
+	}
+	if guest.HeartbeatTaskID != "task-a" {
+		t.Errorf("expected heartbeat_task_id 'task-a', got %q", guest.HeartbeatTaskID)
+	}
+	if !guest.HeartbeatTaskMismatch {
+		t.Error("expected heartbeat_task_mismatch to be true")
 	}
 }

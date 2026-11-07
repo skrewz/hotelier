@@ -655,7 +655,10 @@ func TestTaskHeartbeat_NonExistentGuest(t *testing.T) {
 	}
 }
 
-func TestTaskHeartbeat_UpdatesTaskID(t *testing.T) {
+// TestTaskHeartbeat_DoesNotAssignTask asserts that a heartbeat is a liveness
+// signal only: a guest reporting a task it is running must not create or
+// change an assignment (issue #251). The report lands in HeartbeatTaskID.
+func TestTaskHeartbeat_DoesNotAssignTask(t *testing.T) {
 	reg := newTestRegistry(t)
 
 	reg.Register("guest-1", "Test Guest", []string{"tag1"})
@@ -667,8 +670,146 @@ func TestTaskHeartbeat_UpdatesTaskID(t *testing.T) {
 	}
 
 	guest, _ := reg.GetGuest("guest-1")
-	if guest.TaskID != "task-1" {
-		t.Errorf("expected task_id 'task-1', got %s", guest.TaskID)
+	if guest.TaskID != "" {
+		t.Errorf("heartbeat must not assign a task, got task_id %s", guest.TaskID)
+	}
+	if guest.HeartbeatTaskID != "task-1" {
+		t.Errorf("expected heartbeat_task_id 'task-1', got %s", guest.HeartbeatTaskID)
+	}
+}
+
+// TestTaskHeartbeat_DoesNotReassignGuest covers the fault behind issue #251:
+// a guest running task A that is handed task B must not have the record of B
+// overwritten with A. The assignment stays, the mismatch is logged naming
+// both tasks, and the mismatched heartbeat does not confirm the claim.
+func TestTaskHeartbeat_DoesNotReassignGuest(t *testing.T) {
+	var logged []string
+	reg := NewGuestRegistry(0, func(format string, args ...interface{}) {
+		logged = append(logged, fmt.Sprintf(format, args...))
+	})
+
+	reg.Register("guest-1", "Test Guest", []string{"tag1"})
+	if err := reg.SetGuestTask("guest-1", "task-b"); err != nil {
+		t.Fatalf("set task failed: %v", err)
+	}
+
+	if err := reg.TaskHeartbeat("guest-1", "task-a"); err != nil {
+		t.Fatalf("TaskHeartbeat failed: %v", err)
+	}
+
+	guest, _ := reg.GetGuest("guest-1")
+	if guest.TaskID != "task-b" {
+		t.Errorf("expected assignment task-b to survive heartbeat, got %s", guest.TaskID)
+	}
+	if guest.HeartbeatTaskID != "task-a" {
+		t.Errorf("expected heartbeat_task_id 'task-a', got %s", guest.HeartbeatTaskID)
+	}
+	if !guest.LastTaskHeartbeat.IsZero() {
+		t.Errorf("mismatched heartbeat must not confirm the claim, LastTaskHeartbeat=%v", guest.LastTaskHeartbeat)
+	}
+
+	var mismatch string
+	for _, line := range logged {
+		if strings.Contains(line, "task-a") && strings.Contains(line, "task-b") {
+			mismatch = line
+		}
+	}
+	if mismatch == "" {
+		t.Errorf("expected a log line naming both tasks, got %v", logged)
+	}
+}
+
+// TestTaskHeartbeat_MatchingTaskConfirmsClaim: a heartbeat reporting the
+// assigned task is the confirmation the liveness probe waits for.
+func TestTaskHeartbeat_MatchingTaskConfirmsClaim(t *testing.T) {
+	reg := newTestRegistry(t)
+
+	reg.Register("guest-1", "Test Guest", []string{"tag1"})
+	if err := reg.SetGuestTask("guest-1", "task-1"); err != nil {
+		t.Fatalf("set task failed: %v", err)
+	}
+
+	if err := reg.TaskHeartbeat("guest-1", "task-1"); err != nil {
+		t.Fatalf("TaskHeartbeat failed: %v", err)
+	}
+
+	guest, _ := reg.GetGuest("guest-1")
+	if guest.LastTaskHeartbeat.IsZero() {
+		t.Error("expected matching heartbeat to confirm the claim")
+	}
+	if guest.HeartbeatTaskID != "task-1" {
+		t.Errorf("expected heartbeat_task_id 'task-1', got %s", guest.HeartbeatTaskID)
+	}
+}
+
+// TestHeartbeat_ClearsReportedTask: a plain heartbeat (no task_id) is the
+// guest's report that it is executing nothing, so the reported task clears
+// and the guest becomes available again.
+func TestHeartbeat_ClearsReportedTask(t *testing.T) {
+	reg := newTestRegistry(t)
+
+	reg.Register("guest-1", "Test Guest", []string{"tag1"})
+	if err := reg.SetGuestTask("guest-1", "task-1"); err != nil {
+		t.Fatalf("set task failed: %v", err)
+	}
+	if err := reg.TaskHeartbeat("guest-1", "task-1"); err != nil {
+		t.Fatalf("TaskHeartbeat failed: %v", err)
+	}
+
+	if err := reg.Heartbeat("guest-1"); err != nil {
+		t.Fatalf("Heartbeat failed: %v", err)
+	}
+
+	guest, _ := reg.GetGuest("guest-1")
+	if guest.HeartbeatTaskID != "" {
+		t.Errorf("expected plain heartbeat to clear the reported task, got %s", guest.HeartbeatTaskID)
+	}
+}
+
+func TestAvailableForAssignment(t *testing.T) {
+	tests := []struct {
+		name  string
+		guest *Guest
+		want  bool
+	}{
+		{"idle guest", &Guest{State: GuestStateIdle}, true},
+		{"registered guest", &Guest{State: GuestStateRegistered}, true},
+		{"disconnected guest", &Guest{State: GuestStateDisconnected}, false},
+		{"guest holding a claim", &Guest{State: GuestStateRunning, TaskID: "task-1"}, false},
+		{"guest reporting a running task", &Guest{State: GuestStateIdle, HeartbeatTaskID: "task-1"}, false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := AvailableForAssignment(tt.guest); got != tt.want {
+				t.Errorf("AvailableForAssignment(%+v) = %v, want %v", tt.guest, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestFindAvailableGuests_ExcludesGuestReportingTask: availability is a fact
+// about the guest, not merely the absence of a server-side reference — a
+// guest whose heartbeat reports a running task is never offered for
+// assignment, even when bookkeeping left its TaskID empty (issue #251).
+func TestFindAvailableGuests_ExcludesGuestReportingTask(t *testing.T) {
+	reg := newTestRegistry(t)
+
+	reg.Register("guest-1", "Guest One", []string{"tag1"})
+	reg.Register("guest-2", "Guest Two", []string{"tag1"})
+
+	// guest-1 reports running a task in its heartbeat while holding no
+	// server-side assignment; guest-2 is genuinely idle.
+	if err := reg.TaskHeartbeat("guest-1", "task-x"); err != nil {
+		t.Fatalf("TaskHeartbeat failed: %v", err)
+	}
+
+	guests := reg.FindAvailableGuests([]string{"tag1"})
+	if len(guests) != 1 {
+		t.Fatalf("expected only guest-2 available, got %d guests", len(guests))
+	}
+	if guests[0].ID != "guest-2" {
+		t.Errorf("expected guest-2, got %s", guests[0].ID)
 	}
 }
 
@@ -755,7 +896,8 @@ func TestSetGuestTask_ResetsLastTaskHeartbeat(t *testing.T) {
 
 	reg.Register("guest-1", "Guest 1", []string{"tag1"})
 
-	// Heartbeat with a task
+	// Assign a task and confirm it via heartbeat.
+	reg.SetGuestTask("guest-1", "task-1")
 	reg.TaskHeartbeat("guest-1", "task-1")
 	guest, _ := reg.GetGuest("guest-1")
 	if guest.LastTaskHeartbeat.IsZero() {

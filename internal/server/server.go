@@ -550,8 +550,8 @@ func (s *Server) handleGuestRegister(ctx context.Context, params json.RawMessage
 			s.log.Printf("guest re-registered: %s (reconciled to %s, task: %s)",
 				existing.ID, reconState.Status, reconState.TaskID)
 
-			// If the guest is now IDLE, try to assign a pending task.
-			if existing.State == registry.GuestStateIdle {
+			// If the guest is now available, try to assign a pending task.
+			if registry.AvailableForAssignment(existing) {
 				s.tryAssignTask(req.ID)
 			}
 
@@ -1096,7 +1096,7 @@ func (s *Server) handleGuestDisconnect(connectionID string) {
 // tasks to them. Used after stale guest removal to fill the gap.
 func (s *Server) tryAssignPendingTasks() {
 	for _, guest := range s.orchestrator.GetAllGuests() {
-		if guest.State == registry.GuestStateIdle {
+		if registry.AvailableForAssignment(guest) {
 			s.tryAssignTask(guest.ID)
 		}
 	}
@@ -1173,9 +1173,10 @@ func (s *Server) tryAssignTask(guestID string) {
 		return
 	}
 
-	// Only assign to idle guests — a guest that is already running a task
-	// on the client side should not receive another assignment.
-	if guest.State != registry.GuestStateIdle {
+	// Only assign to available guests — availability is a fact about the
+	// guest (no claim held, no running task reported in its heartbeat), not
+	// merely its nominal state (issue #251).
+	if !registry.AvailableForAssignment(guest) {
 		return
 	}
 
@@ -1717,6 +1718,8 @@ func (s *Server) HandleGuests(w http.ResponseWriter, r *http.Request) {
 			listed[i] = guestWithAge{
 				Guest:               g,
 				HeartbeatAgeSeconds: now.Sub(g.LastHeartbeat).Seconds(),
+				HeartbeatTaskMismatch: g.TaskID != "" && g.HeartbeatTaskID != "" &&
+					g.HeartbeatTaskID != g.TaskID,
 			}
 		}
 		json.NewEncoder(w).Encode(map[string]interface{}{
@@ -1731,10 +1734,14 @@ func (s *Server) HandleGuests(w http.ResponseWriter, r *http.Request) {
 }
 
 // guestWithAge flattens a registry entry for /api/guests and adds the
-// derived heartbeat age (issue #240).
+// derived heartbeat age (issue #240), plus the heartbeat task mismatch flag:
+// the guest's heartbeat reports a running task other than the one assigned
+// — a mismatch to surface and resolve via reconciliation, never by
+// rewriting the assignment (issue #251).
 type guestWithAge struct {
 	*registry.Guest
-	HeartbeatAgeSeconds float64 `json:"heartbeat_age_seconds"`
+	HeartbeatAgeSeconds   float64 `json:"heartbeat_age_seconds"`
+	HeartbeatTaskMismatch bool    `json:"heartbeat_task_mismatch"`
 }
 
 // defaultHeartbeatIntervalSeconds is the heartbeat interval assumed when the

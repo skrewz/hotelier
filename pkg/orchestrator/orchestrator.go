@@ -178,13 +178,15 @@ func (o *Orchestrator) AssignTask(taskID, guestID string) error {
 	o.mu.Lock()
 	defer o.mu.Unlock()
 
-	// Validate guest is IDLE
+	// Validate the guest is available — a fact about the guest, not merely
+	// its nominal state (issue #251).
 	guest, ok := o.registry.GetGuest(guestID)
 	if !ok {
 		return fmt.Errorf("guest %s not found", guestID)
 	}
-	if guest.State != registry.GuestStateIdle {
-		return fmt.Errorf("guest %s is not idle (state: %s)", guestID, guest.State)
+	if !registry.AvailableForAssignment(guest) {
+		return fmt.Errorf("guest %s is not available (state: %s, task: %s, reporting: %s)",
+			guestID, guest.State, guest.TaskID, guest.HeartbeatTaskID)
 	}
 
 	// Validate task is PENDING
@@ -273,7 +275,7 @@ func (o *Orchestrator) CompleteTask(taskID, guestID, result string) error {
 	task.Status = queue.TaskStatusCompleted
 	task.Result = result
 
-	o.clearGuestTaskInternal(guestID)
+	o.releaseGuestInternal(guestID)
 	o.forgetTask(taskID)
 
 	o.logf("task %s completed by guest %s (atomic: →COMPLETED, RUNNING→IDLE)", taskID, guestID)
@@ -307,7 +309,7 @@ func (o *Orchestrator) FailTask(taskID, guestID, errMsg string) error {
 	task.Status = queue.TaskStatusFailed
 	task.Error = errMsg
 
-	o.clearGuestTaskInternal(guestID)
+	o.releaseGuestInternal(guestID)
 	o.forgetTask(taskID)
 
 	o.logf("task %s failed by guest %s (atomic: →FAILED, RUNNING→IDLE): %s", taskID, guestID, errMsg)
@@ -342,7 +344,7 @@ func (o *Orchestrator) CancelTask(taskID, guestID string) error {
 	task.AssignedTo = ""
 
 	if guestID != "" {
-		o.clearGuestTaskInternal(guestID)
+		o.releaseGuestInternal(guestID)
 	}
 	o.forgetTask(taskID)
 
@@ -382,7 +384,7 @@ func (o *Orchestrator) RequeueTask(taskID string) error {
 
 	o.requeueTaskInternal(taskID)
 	if guestID != "" {
-		o.clearGuestTaskInternal(guestID)
+		o.releaseGuestInternal(guestID)
 	}
 
 	return nil
@@ -421,7 +423,7 @@ func (o *Orchestrator) DeclineTask(taskID, guestID string) error {
 		return fmt.Errorf("task %s is not assignable (status: %s)", taskID, task.Status)
 	}
 
-	o.clearGuestTaskInternal(guestID)
+	o.releaseGuestInternal(guestID)
 
 	statusFrom := "ASSIGNED"
 	if task.Status == queue.TaskStatusRunning {
@@ -531,7 +533,10 @@ func (o *Orchestrator) Heartbeat(guestID string) error {
 	return o.registry.Heartbeat(guestID)
 }
 
-// TaskHeartbeat updates the last heartbeat time and records the task_id.
+// TaskHeartbeat records the guest's liveness heartbeat. It never changes
+// the guest's assignment: a report of a task other than the one assigned
+// is a mismatch to surface, resolved through the reconcile path
+// (issue #251).
 func (o *Orchestrator) TaskHeartbeat(guestID, taskID string) error {
 	o.mu.Lock()
 	defer o.mu.Unlock()
@@ -569,7 +574,7 @@ func (o *Orchestrator) ReconcileGuest(guestID string) ReconcileState {
 	task, ok := o.queue.Get(guest.TaskID)
 	if !ok {
 		// Task not found — stale reference.
-		o.clearGuestTaskInternal(guestID)
+		o.releaseGuestInternal(guestID)
 		o.logf("guest %s reconciled: task %s not found, set IDLE", guestID, guest.TaskID)
 		return ReconcileState{Status: queue.TaskStatusPending}
 	}
@@ -583,19 +588,19 @@ func (o *Orchestrator) ReconcileGuest(guestID string) ReconcileState {
 			return ReconcileState{Status: task.Status, TaskID: task.ID}
 		}
 		// Task assigned to another guest — guest was stolen.
-		o.clearGuestTaskInternal(guestID)
+		o.releaseGuestInternal(guestID)
 		o.logf("guest %s reconciled: task %s assigned to %s, set IDLE", guestID, task.ID, task.AssignedTo)
 		return ReconcileState{Status: queue.TaskStatusPending}
 
 	case queue.TaskStatusPending:
 		// Task was re-queued — guest's assignment was revoked.
-		o.clearGuestTaskInternal(guestID)
+		o.releaseGuestInternal(guestID)
 		o.logf("guest %s reconciled: task %s re-queued, set IDLE", guestID, task.ID)
 		return ReconcileState{Status: queue.TaskStatusPending}
 
 	case queue.TaskStatusCompleted, queue.TaskStatusFailed, queue.TaskStatusCancelled:
 		// Task is terminal — guest's work is done.
-		o.clearGuestTaskInternal(guestID)
+		o.releaseGuestInternal(guestID)
 		o.logf("guest %s reconciled: task %s terminal (%s), set IDLE", guestID, task.ID, task.Status)
 		return ReconcileState{Status: task.Status, TaskID: task.ID}
 	}
@@ -613,7 +618,9 @@ type StuckTask struct {
 
 // CheckStuckTasks finds tasks that are ASSIGNED (not acknowledged as RUNNING)
 // and older than the timeout. Re-queues them atomically.
-// Also clears stale guest references for guests still pointing to terminal/PENDING tasks.
+// Guests still holding a reference to a terminal task, or to a task assigned
+// elsewhere, are logged as failed assertions but left untouched — recovery
+// here was the re-queue loop of issue #251; the reconcile path resolves it.
 //
 // Returns the list of re-queued tasks.
 func (o *Orchestrator) CheckStuckTasks(timeout time.Duration) []StuckTask {
@@ -657,7 +664,7 @@ func (o *Orchestrator) CheckStuckTasks(timeout time.Duration) []StuckTask {
 
 			o.requeueTaskInternal(task.ID)
 			if guestID != "" {
-				o.clearGuestTaskInternal(guestID)
+				o.releaseGuestInternal(guestID)
 			}
 
 			dur := now.Sub(task.AssignedAt)
@@ -668,18 +675,25 @@ func (o *Orchestrator) CheckStuckTasks(timeout time.Duration) []StuckTask {
 			continue
 		}
 
-		// For terminal tasks, check if the assigned guest still has a stale reference.
+		// For terminal tasks, check if the assigned guest still has a stale
+		// reference. Once availability is a fact about the guest this must
+		// never happen: it is an assertion, not a recovery heuristic. A
+		// hit is logged and left alone — mutating the state here is what
+		// turned a regression into a re-queue loop (issue #251). The
+		// reference is resolved through the reconcile path instead.
 		if task.AssignedTo != "" && o.isTerminalStatus(task.Status) {
 			if guest, ok := o.registry.GetGuest(task.AssignedTo); ok && guest.TaskID == task.ID {
-				o.clearGuestTaskInternal(guest.ID)
-				o.logf("cleared stale guest reference: %s still pointed to terminal task %s (%s)",
+				o.logf("stale guest reference (assertion failed, not correcting): %s still points to terminal task %s (%s)",
 					guest.ID, task.ID, task.Status)
 			}
 		}
 	}
 
 	// Also check guests that have a stale TaskID pointing to a task that
-	// is no longer assigned to them (e.g. task was cancelled while PENDING).
+	// is not assigned to them (e.g. a heartbeat once again rewriting
+	// assignments). Assertion, not recovery: log and leave the state
+	// alone so a regression shows up as a message rather than as another
+	// loop (issue #251).
 	for _, guest := range o.registry.GetAllGuests() {
 		if guest.TaskID == "" {
 			continue
@@ -688,11 +702,8 @@ func (o *Orchestrator) CheckStuckTasks(timeout time.Duration) []StuckTask {
 		if !ok {
 			continue
 		}
-		// Guest has a TaskID but the task is not assigned to this guest.
-		// Clear the stale reference.
 		if task.AssignedTo != guest.ID {
-			o.clearGuestTaskInternal(guest.ID)
-			o.logf("cleared stale guest reference: %s pointed to task %s (assigned to %s)",
+			o.logf("stale guest reference (assertion failed, not correcting): %s points to task %s (assigned to %s)",
 				guest.ID, task.ID, task.AssignedTo)
 		}
 	}
@@ -737,20 +748,20 @@ func (o *Orchestrator) CheckSilentGuests(timeout time.Duration) []SilentGuest {
 
 		task, ok := o.queue.Get(guest.TaskID)
 		if !ok {
-			// Task not found — stale reference, just clear guest.
-			o.clearGuestTaskInternal(guest.ID)
+			// Task not found — stale reference, release the guest.
+			o.releaseGuestInternal(guest.ID)
 			continue
 		}
 
 		// Skip terminal tasks (already completed/failed/cancelled)
 		if task.Status == queue.TaskStatusCompleted || task.Status == queue.TaskStatusFailed || task.Status == queue.TaskStatusCancelled {
-			o.clearGuestTaskInternal(guest.ID)
+			o.releaseGuestInternal(guest.ID)
 			continue
 		}
 
 		// Skip re-queued tasks (CheckStuckTasks already handled this)
 		if task.Status == queue.TaskStatusPending {
-			o.clearGuestTaskInternal(guest.ID)
+			o.releaseGuestInternal(guest.ID)
 			continue
 		}
 
@@ -758,7 +769,7 @@ func (o *Orchestrator) CheckSilentGuests(timeout time.Duration) []SilentGuest {
 		task.Status = queue.TaskStatusFailed
 		task.Error = fmt.Sprintf("guest %s silent for %v", guest.ID, now.Sub(guest.LastHeartbeat))
 
-		o.clearGuestTaskInternal(guest.ID)
+		o.releaseGuestInternal(guest.ID)
 		o.forgetTask(task.ID)
 		failed = append(failed, SilentGuest{GuestID: guest.ID, TaskID: task.ID})
 
@@ -876,9 +887,38 @@ func (o *Orchestrator) clearGuestTaskInternal(guestID string) {
 		return
 	}
 
+	// The guest's heartbeat report of the very task being cleared is
+	// obsolete only when the task itself reached a terminal state — the
+	// fact that ended the task ended the execution too. A re-queue keeps
+	// the report: the process may still be running, and the report is
+	// what keeps the guest unavailable (issue #251).
+	if ref := guest.TaskID; ref != "" && guest.HeartbeatTaskID == ref {
+		if task, ok := o.queue.Get(ref); ok && o.isTerminalStatus(task.Status) {
+			guest.HeartbeatTaskID = ""
+		}
+	}
+
 	guest.TaskID = ""
-	guest.State = registry.GuestStateIdle
 	guest.LastTaskHeartbeat = time.Time{}
+	// Deliberately does not set the guest's state: availability is a fact
+	// about the guest, never a side effect of this bookkeeping. Paths that
+	// know the guest is finished use releaseGuestInternal.
+}
+
+// releaseGuestInternal clears the guest's task reference and sets it IDLE.
+// Only valid where the guest really is free — it reported completion or
+// failure, declined, had its claim revoked by a re-queue, was reconciled
+// on reconnect, or went silent — i.e. where IDLE is a fact, not a
+// bookkeeping assumption (issue #251). Note that availability still
+// consults the guest's own heartbeat report: a released guest that
+// continues to report a running task is not handed more work.
+func (o *Orchestrator) releaseGuestInternal(guestID string) {
+	guest, ok := o.registry.GetGuest(guestID)
+	if !ok {
+		return
+	}
+	o.clearGuestTaskInternal(guestID)
+	guest.State = registry.GuestStateIdle
 }
 
 // --- Accessors for internal components (testing, migration) ---
