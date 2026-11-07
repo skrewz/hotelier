@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/tls"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"strings"
@@ -13,6 +14,12 @@ import (
 
 	"github.com/gorilla/websocket"
 )
+
+// ErrConnectionClosed is returned by Send when the connection has been torn
+// down. Callers can branch on it with errors.Is to tell a routine teardown
+// race apart from a real back-pressure failure such as a full send buffer
+// (issue #242).
+var ErrConnectionClosed = errors.New("connection closed")
 
 // connectionIDKey is the context key for the current connection ID.
 type connectionIDKey struct{}
@@ -151,12 +158,11 @@ func (c *Connection) Send(msg *JSONRPCMessage) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	// A connection whose send channel has been closed (or that is on its way
-	// out of the hub) must reject sends rather than panic: a Broadcast that
-	// resolved this connection before the unregistration raced in would
-	// otherwise send on a closed channel and crash the process (issue #242).
+	// A connection that is closed, or on its way out of the hub, must refuse
+	// the send rather than queue into a queue nobody drains: before issue
+	// #242 this was a send on a closed channel and a crashed process.
 	if c.closed.Load() {
-		return fmt.Errorf("connection %s is closed", c.id)
+		return fmt.Errorf("%w: %s", ErrConnectionClosed, c.id)
 	}
 
 	data, err := json.Marshal(msg)
@@ -489,7 +495,12 @@ func (h *Hub) Broadcast(role ConnectionRole, msg *JSONRPCMessage) {
 	for _, id := range ids {
 		if c, ok := h.GetConnection(id); ok && c.role == role {
 			if err := h.SendTo(id, msg); err != nil {
-				h.logf("broadcast failed to %s: %v", id, err)
+				// A connection that went away mid-broadcast is expected
+				// teardown noise, not a failure worth a log line; anything
+				// else (a full send buffer) still is.
+				if !errors.Is(err, ErrConnectionClosed) {
+					h.logf("broadcast failed to %s: %v", id, err)
+				}
 			}
 		}
 	}

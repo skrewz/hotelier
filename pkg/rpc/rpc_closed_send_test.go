@@ -2,6 +2,7 @@ package rpc
 
 import (
 	"encoding/json"
+	"errors"
 	"sync"
 	"testing"
 	"time"
@@ -39,8 +40,8 @@ func TestSendAfterUnregisterReturnsError(t *testing.T) {
 	// Broadcast holds no reference here, but SendTo/Send on a stale pointer
 	// (exactly what a racing Broadcast does) must not panic.
 	msg := &JSONRPCMessage{JSONRPC: "2.0", Method: "task.updated"}
-	if err := conn.Send(msg); err == nil {
-		t.Error("expected an error sending on an unregistered connection")
+	if err := conn.Send(msg); !errors.Is(err, ErrConnectionClosed) {
+		t.Errorf("expected ErrConnectionClosed from an unregistered connection, got %v", err)
 	}
 }
 
@@ -80,8 +81,8 @@ func TestHubUnregisterDoesNotCloseSendQueue(t *testing.T) {
 
 	waitConnCount(t, hub, 0)
 
-	if err := conn.Send(&JSONRPCMessage{JSONRPC: "2.0", Method: "task.updated"}); err == nil {
-		t.Error("expected an error sending on an unregistered connection")
+	if err := conn.Send(&JSONRPCMessage{JSONRPC: "2.0", Method: "task.updated"}); !errors.Is(err, ErrConnectionClosed) {
+		t.Errorf("expected ErrConnectionClosed from an unregistered connection, got %v", err)
 	}
 }
 
