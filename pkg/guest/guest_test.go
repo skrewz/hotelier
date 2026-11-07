@@ -2089,3 +2089,81 @@ func TestGuestRegister_ReportsHost(t *testing.T) {
 		t.Errorf("expected host %q, got %q", want, guest.Host)
 	}
 }
+
+// TestGuestExecuteTask_LogsPromptSizeNotPrompt covers issue #241: the guest's
+// own process log (systemd journal) used to carry the full prompt of every
+// task. It must record the size instead.
+func TestGuestExecuteTask_LogsPromptSizeNotPrompt(t *testing.T) {
+	const prompt = "summarise the quarterly figures for me please"
+	_, wsURL, _ := startTestServerWithCapture(t)
+	g := newConnectedGuest(t, wsURL, func(_ context.Context, _ TaskAssignment, _ LogCallback) (*TaskResult, error) {
+		return &TaskResult{TaskID: "task-1", Success: true, Output: "done"}, nil
+	})
+
+	var logBuf bytes.Buffer
+	g.log = log.New(&logBuf, "", 0)
+
+	if _, err := g.ExecuteTask(TaskAssignment{TaskID: "task-1", Prompt: prompt}); err != nil {
+		t.Fatalf("execute task: %v", err)
+	}
+
+	got := logBuf.String()
+	if strings.Contains(got, prompt) {
+		t.Errorf("process log must not contain the prompt, got:\n%s", got)
+	}
+	if !strings.Contains(got, fmt.Sprintf("[TASK] prompt: %d bytes", len(prompt))) {
+		t.Errorf("expected prompt size in process log, got:\n%s", got)
+	}
+}
+
+// TestGuestTaskDispatcher_LogsResultSizeNotOutput also covers issue #241:
+// the dispatcher logged the agent's final output verbatim.
+func TestGuestTaskDispatcher_LogsResultSizeNotOutput(t *testing.T) {
+	const output = "the agent's final answer, in full"
+	done := make(chan struct{})
+	_, wsURL, _ := startTestServerWithCapture(t)
+	g := newConnectedGuest(t, wsURL, func(_ context.Context, task TaskAssignment, _ LogCallback) (*TaskResult, error) {
+		defer close(done)
+		return &TaskResult{TaskID: task.TaskID, Success: true, Output: output}, nil
+	})
+
+	// The dispatcher logs from its own goroutine, so the writer must be
+	// thread-safe (the same reason pkg/pi tests use a logWriter).
+	var mu sync.Mutex
+	var logBuf bytes.Buffer
+	g.log = log.New(&lockedWriter{mu: &mu, buf: &logBuf}, "", 0)
+
+	go g.taskDispatcher(context.Background())
+	g.taskCh <- TaskAssignment{TaskID: "task-1", Prompt: "p"}
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("task never ran")
+	}
+	// The dispatcher logs the result after the handler returns.
+	time.Sleep(100 * time.Millisecond)
+
+	mu.Lock()
+	got := logBuf.String()
+	mu.Unlock()
+	if strings.Contains(got, output) {
+		t.Errorf("process log must not contain the task output, got:\n%s", got)
+	}
+	if !strings.Contains(got, fmt.Sprintf("output=%d bytes", len(output))) {
+		t.Errorf("expected output size in process log, got:\n%s", got)
+	}
+}
+
+// lockedWriter is a thread-safe io.Writer around a bytes.Buffer, for tests
+// that read the log while another goroutine is writing to it.
+type lockedWriter struct {
+	mu  *sync.Mutex
+	buf *bytes.Buffer
+}
+
+func (w *lockedWriter) Write(p []byte) (int, error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.buf.Write(p)
+}

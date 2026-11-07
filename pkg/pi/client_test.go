@@ -3,6 +3,8 @@ package pi
 import (
 	"context"
 	"encoding/json"
+	"fmt"
+	"io"
 	"log"
 	"os"
 	"os/exec"
@@ -833,5 +835,29 @@ func TestPiClient_Start_ExecPathNotFound(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "start pi") {
 		t.Errorf("expected 'start pi' in error, got: %v", err)
+	}
+}
+
+// TestPiClient_ReadEvents_ParseErrorLogsSizeNotLine covers issue #241: an
+// unparseable RPC line is raw session payload (it is the event JSON itself),
+// so the process log must record its size rather than the line.
+func TestPiClient_ReadEvents_ParseErrorLogsSizeNotLine(t *testing.T) {
+	logger, w := newTestLogger()
+	c := NewClient(PiClientConfig{CWD: t.TempDir(), Log: logger})
+
+	const badLine = `{"type":"message_update","delta":"a secret thought that must never be logged"`
+	c.stdout = io.NopCloser(strings.NewReader(badLine + "\n"))
+
+	c.readEvents()
+
+	got := w.String()
+	if !strings.Contains(got, "pi parse error") {
+		t.Fatalf("expected the parse error to be logged, got:\n%s", got)
+	}
+	if strings.Contains(got, "a secret thought") {
+		t.Errorf("process log must not contain the raw RPC line, got:\n%s", got)
+	}
+	if want := fmt.Sprintf("(%d bytes)", len(badLine)); !strings.Contains(got, want) {
+		t.Errorf("expected the line size %q in the process log, got:\n%s", want, got)
 	}
 }
