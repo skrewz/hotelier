@@ -151,6 +151,14 @@ func (c *Connection) Send(msg *JSONRPCMessage) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
+	// A connection whose send channel has been closed (or that is on its way
+	// out of the hub) must reject sends rather than panic: a Broadcast that
+	// resolved this connection before the unregistration raced in would
+	// otherwise send on a closed channel and crash the process (issue #242).
+	if c.closed.Load() {
+		return fmt.Errorf("connection %s is closed", c.id)
+	}
+
 	data, err := json.Marshal(msg)
 	if err != nil {
 		return err
@@ -181,7 +189,12 @@ func (c *Connection) WriteLoop() {
 		select {
 		case <-c.closeCh:
 			return
-		case data := <-c.send:
+		case data, ok := <-c.send:
+			if !ok {
+				// The hub closed the send queue during unregistration;
+				// there is nothing left to write (issue #242).
+				return
+			}
 			c.mu.Lock()
 			err := c.conn.WriteMessage(websocket.TextMessage, data)
 			c.mu.Unlock()
@@ -370,7 +383,15 @@ func (h *Hub) Run() {
 			h.mu.Lock()
 			if _, ok := h.connections[c.id]; ok {
 				delete(h.connections, c.id)
+				// Mark the connection closed and close its send queue
+				// under c.mu, the same lock Send holds: Send must never
+				// observe a closed channel it is about to write to
+				// (issue #242). Lock order is h.mu -> c.mu; no path
+				// takes c.mu before h.mu.
+				c.mu.Lock()
+				c.closed.Store(true)
 				close(c.send)
+				c.mu.Unlock()
 			}
 			onDisconnect := h.onDisconnect
 			h.mu.Unlock()
