@@ -61,6 +61,30 @@ func TestSendToAfterUnregisterReturnsError(t *testing.T) {
 	}
 }
 
+// TestHubUnregisterDoesNotCloseSendQueue mirrors the client-side
+// TestClientHubUnregisterDoesNotCloseClientQueue (issue #217) on the server
+// side. Unregistering a connection twice must not close its send queue twice,
+// and an unregistered connection must keep refusing sends through the closed
+// flag rather than through a closed channel. Nothing needs the queue closed:
+// Close sets closed and closes closeCh before the hub ever sees the
+// connection, so WriteLoop leaves through the closeCh case (issue #242).
+func TestHubUnregisterDoesNotCloseSendQueue(t *testing.T) {
+	hub := newTestHub(t)
+	go hub.Run()
+
+	conn := NewTestConnection("conn-double-unregister", hub)
+	for i := 0; i < 50; i++ {
+		hub.Register(conn)
+		hub.Unregister(conn)
+	}
+
+	waitConnCount(t, hub, 0)
+
+	if err := conn.Send(&JSONRPCMessage{JSONRPC: "2.0", Method: "task.updated"}); err == nil {
+		t.Error("expected an error sending on an unregistered connection")
+	}
+}
+
 // Concurrent broadcast and unregister churn — the pattern from the crash log
 // (broadcastTaskUpdated racing with WriteLoop-triggered Close) — must never
 // panic. A send on a closed channel would kill the test binary outright.

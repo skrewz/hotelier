@@ -191,8 +191,9 @@ func (c *Connection) WriteLoop() {
 			return
 		case data, ok := <-c.send:
 			if !ok {
-				// The hub closed the send queue during unregistration;
-				// there is nothing left to write (issue #242).
+				// Nothing on the live paths closes the queue any more;
+				// this stays as cheap defence so a closed queue ends the
+				// loop instead of writing a nil payload (issue #242).
 				return
 			}
 			c.mu.Lock()
@@ -380,19 +381,18 @@ func (h *Hub) Run() {
 			h.mu.Unlock()
 			h.logf("connection registered: %s (total: %d)", c.id, len(h.connections))
 		case c := <-h.unregister:
+			// Mark the connection closed before touching the map, and
+			// without taking c.mu. c.mu is held by WriteLoop across a
+			// socket write that carries no deadline, so locking it here
+			// could stall this loop — and every h.mu reader with it —
+			// for the duration of that write. The send queue is not
+			// closed either: the closed flag is what makes Send refuse,
+			// and closing it here would panic on a second unregister of
+			// the same connection (issue #217 removed that path on the
+			// client side; issue #242).
+			c.closed.Store(true)
 			h.mu.Lock()
-			if _, ok := h.connections[c.id]; ok {
-				delete(h.connections, c.id)
-				// Mark the connection closed and close its send queue
-				// under c.mu, the same lock Send holds: Send must never
-				// observe a closed channel it is about to write to
-				// (issue #242). Lock order is h.mu -> c.mu; no path
-				// takes c.mu before h.mu.
-				c.mu.Lock()
-				c.closed.Store(true)
-				close(c.send)
-				c.mu.Unlock()
-			}
+			delete(h.connections, c.id)
 			onDisconnect := h.onDisconnect
 			h.mu.Unlock()
 			h.logf("connection unregistered: %s (total: %d)", c.id, len(h.connections))
