@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/tls"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"strings"
@@ -13,6 +14,12 @@ import (
 
 	"github.com/gorilla/websocket"
 )
+
+// ErrConnectionClosed is returned by Send when the connection has been torn
+// down. Callers can branch on it with errors.Is to tell a routine teardown
+// race apart from a real back-pressure failure such as a full send buffer
+// (issue #242).
+var ErrConnectionClosed = errors.New("connection closed")
 
 // connectionIDKey is the context key for the current connection ID.
 type connectionIDKey struct{}
@@ -151,6 +158,13 @@ func (c *Connection) Send(msg *JSONRPCMessage) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
+	// A connection that is closed, or on its way out of the hub, must refuse
+	// the send rather than queue into a queue nobody drains: before issue
+	// #242 this was a send on a closed channel and a crashed process.
+	if c.closed.Load() {
+		return fmt.Errorf("%w: %s", ErrConnectionClosed, c.id)
+	}
+
 	data, err := json.Marshal(msg)
 	if err != nil {
 		return err
@@ -181,7 +195,13 @@ func (c *Connection) WriteLoop() {
 		select {
 		case <-c.closeCh:
 			return
-		case data := <-c.send:
+		case data, ok := <-c.send:
+			if !ok {
+				// Nothing on the live paths closes the queue any more;
+				// this stays as cheap defence so a closed queue ends the
+				// loop instead of writing a nil payload (issue #242).
+				return
+			}
 			c.mu.Lock()
 			err := c.conn.WriteMessage(websocket.TextMessage, data)
 			c.mu.Unlock()
@@ -367,11 +387,18 @@ func (h *Hub) Run() {
 			h.mu.Unlock()
 			h.logf("connection registered: %s (total: %d)", c.id, len(h.connections))
 		case c := <-h.unregister:
+			// Mark the connection closed before touching the map, and
+			// without taking c.mu. c.mu is held by WriteLoop across a
+			// socket write that carries no deadline, so locking it here
+			// could stall this loop — and every h.mu reader with it —
+			// for the duration of that write. The send queue is not
+			// closed either: the closed flag is what makes Send refuse,
+			// and closing it here would panic on a second unregister of
+			// the same connection (issue #217 removed that path on the
+			// client side; issue #242).
+			c.closed.Store(true)
 			h.mu.Lock()
-			if _, ok := h.connections[c.id]; ok {
-				delete(h.connections, c.id)
-				close(c.send)
-			}
+			delete(h.connections, c.id)
 			onDisconnect := h.onDisconnect
 			h.mu.Unlock()
 			h.logf("connection unregistered: %s (total: %d)", c.id, len(h.connections))
@@ -468,7 +495,12 @@ func (h *Hub) Broadcast(role ConnectionRole, msg *JSONRPCMessage) {
 	for _, id := range ids {
 		if c, ok := h.GetConnection(id); ok && c.role == role {
 			if err := h.SendTo(id, msg); err != nil {
-				h.logf("broadcast failed to %s: %v", id, err)
+				// A connection that went away mid-broadcast is expected
+				// teardown noise, not a failure worth a log line; anything
+				// else (a full send buffer) still is.
+				if !errors.Is(err, ErrConnectionClosed) {
+					h.logf("broadcast failed to %s: %v", id, err)
+				}
 			}
 		}
 	}
