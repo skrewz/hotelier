@@ -381,9 +381,16 @@ func New(cfg config.ServerConfig) *Server {
 	// Validate the concurrency configuration at startup the way personas
 	// are; the file path rejects such a config in LoadServerConfig, but a
 	// config built in code would otherwise reach EffectiveConcurrency
-	// unvalidated (issue #248).
+	// unvalidated (issue #248). Unlike Reload, which keeps the previous keys,
+	// this installs the config it was handed, so say which cap the process
+	// is now running under: a schedule the resolver cannot read falls back
+	// to max_concurrent_tasks.
 	if err := cfg.ValidateConcurrency(); err != nil {
-		logger.Printf("invalid concurrency configuration: %v", err)
+		fallback := fmt.Sprintf("%d", cfg.MaxConcurrentTasks)
+		if cfg.MaxConcurrentTasks == 0 {
+			fallback = "0 (unlimited)"
+		}
+		logger.Printf("invalid concurrency configuration: %v (a schedule the resolver cannot read falls back to max_concurrent_tasks=%s)", err, fallback)
 	}
 
 	// Validate persona configuration at startup
