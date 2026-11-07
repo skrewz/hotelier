@@ -71,9 +71,7 @@ func TestServerReload_ConcurrencySchedule_Watcher(t *testing.T) {
 	go w.Run(updateCh)
 
 	updated := initial + "concurrency_schedule:\n  - at: \"06:00\"\n    concurrency: 6\n"
-	if err := os.WriteFile(configPath, []byte(updated), 0o644); err != nil {
-		t.Fatalf("write updated config: %v", err)
-	}
+	replaceFile(t, configPath, updated)
 
 	select {
 	case newCfg := <-updateCh:
@@ -172,9 +170,7 @@ func TestServerReload_ConcurrencyInvalid_WatcherKeepsLastGoodConfig(t *testing.T
 	// A schedule whose "at" is malformed: the watcher must reject the file
 	// rather than hand the bad config to Reload.
 	bad := initial + "concurrency_schedule:\n  - at: \"25:00\"\n    concurrency: 8\n"
-	if err := os.WriteFile(configPath, []byte(bad), 0o644); err != nil {
-		t.Fatalf("write invalid config: %v", err)
-	}
+	replaceFile(t, configPath, bad)
 
 	select {
 	case newCfg := <-updateCh:
@@ -185,6 +181,22 @@ func TestServerReload_ConcurrencyInvalid_WatcherKeepsLastGoodConfig(t *testing.T
 
 	if got := srv.EffectiveConcurrency(time.Now()); got != 3 {
 		t.Errorf("expected the server to keep the last good cap 3, got %d", got)
+	}
+}
+
+// replaceFile edits path by rename, the way the editors the watcher is built
+// for do (it watches the containing directory precisely so that rename-based
+// edits are seen). Writing in place would let the watcher observe the
+// truncated file as an intermediate state, which parses as an empty config
+// and reaches Reload as a valid one.
+func replaceFile(t *testing.T, path, content string) {
+	t.Helper()
+	tmp := filepath.Join(filepath.Dir(path), ".staged-"+filepath.Base(path))
+	if err := os.WriteFile(tmp, []byte(content), 0o644); err != nil {
+		t.Fatalf("write %s: %v", tmp, err)
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		t.Fatalf("rename into %s: %v", path, err)
 	}
 }
 
