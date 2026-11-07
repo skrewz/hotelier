@@ -100,7 +100,7 @@ func TestConcurrentSendAndUnregisterDoesNotPanic(t *testing.T) {
 	hub.Register(conn)
 	waitConnCount(t, hub, 1)
 
-	wg.Add(2)
+	wg.Add(3)
 	go func() {
 		defer wg.Done()
 		msg := &JSONRPCMessage{JSONRPC: "2.0", Method: "task.updated", Params: json.RawMessage(`{}`)}
@@ -116,9 +116,8 @@ func TestConcurrentSendAndUnregisterDoesNotPanic(t *testing.T) {
 		}
 	}()
 
-	done := make(chan struct{})
 	go func() {
-		defer close(done)
+		defer wg.Done()
 		for i := 0; i < rounds; i++ {
 			replacement := NewTestConnection("conn-churn", hub)
 			hub.Register(replacement)
@@ -131,9 +130,11 @@ func TestConcurrentSendAndUnregisterDoesNotPanic(t *testing.T) {
 		wg.Wait()
 		close(finished)
 	}()
+	// All three goroutines are waited for: returning while a sender was still
+	// running would leave it broadcasting into this hub and could attribute a
+	// race report to whichever test happened to run next.
 	select {
 	case <-finished:
-	case <-done:
 	case <-time.After(30 * time.Second):
 		t.Fatal("churn test timed out")
 	}
