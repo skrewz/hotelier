@@ -383,9 +383,10 @@ func (s *Server) revokeClaim(taskID, guestID, reason string) {
 	}
 }
 
-// rememberCancelIntent records the intent of a task.cancel that was
-// successfully sent for a task, so an old guest's intent-less confirmation
-// is resolved against what the host actually asked for.
+// rememberCancelIntent records the intent of a task.cancel about to be sent
+// for a task, so an old guest's intent-less confirmation is resolved against
+// what the host actually asked for. Every sender calls it before the send and
+// pairs it with forgetCancelIntent on the error path.
 func (s *Server) rememberCancelIntent(taskID, intent string) {
 	s.cancelIntentMu.Lock()
 	defer s.cancelIntentMu.Unlock()
@@ -1739,10 +1740,13 @@ func (s *Server) checkSilentGuests() {
 			"reason":  "guest silence timeout",
 			"intent":  cancelIntentCancel,
 		}
+		// The intent is recorded before the send, as every sender of
+		// task.cancel does: a confirmation handled on another goroutine must
+		// never resolve against a record that does not exist yet.
+		s.rememberCancelIntent(sg.TaskID, cancelIntentCancel)
 		if err := s.hub.SendToGuest(sg.GuestID, "task.cancel", cancelParams); err != nil {
+			s.forgetCancelIntent(sg.TaskID)
 			s.log.Printf("failed to send task.cancel to guest %s: %v (guest may be disconnected)", sg.GuestID, err)
-		} else {
-			s.rememberCancelIntent(sg.TaskID, cancelIntentCancel)
 		}
 	}
 }
