@@ -225,6 +225,85 @@ func TestAssignTask_HoldIsLoggedOncePerState(t *testing.T) {
 	}
 }
 
+// TestAssignTask_TwoHeldTasksDedupPerTask: two tasks held at once (two
+// differently-tagged guests polling while the cap is met) must each be
+// deduplicated against their own last-logged state. A single global dedup
+// slot would alternate its key between the two tasks on every attempt and
+// log every poll — the per-heartbeat flood the dedup exists to prevent
+// (issue #249).
+func TestAssignTask_TwoHeldTasksDedupPerTask(t *testing.T) {
+	orch, lines := newCappedOrchestrator(t, 1)
+	_ = orch.RegisterGuest("g1", "G1", nil)
+	_ = orch.RegisterGuest("g2", "G2", nil)
+	_ = orch.RegisterGuest("g3", "G3", nil)
+	addPending(t, orch, "t1")
+	addPending(t, orch, "t2")
+	addPending(t, orch, "t3")
+
+	if err := orch.AssignTask("t1", "g1"); err != nil {
+		t.Fatalf("assign t1: %v", err)
+	}
+	// Alternate the held attempts the way two polling guests would.
+	for i := 0; i < 5; i++ {
+		_ = orch.AssignTask("t2", "g2")
+		_ = orch.AssignTask("t3", "g3")
+	}
+
+	holds := 0
+	for _, l := range *lines {
+		if strings.Contains(l, "concurrency cap") {
+			holds++
+		}
+	}
+	if holds != 2 {
+		t.Fatalf("expected one cap-hold line per held task, got %d (%v)", holds, *lines)
+	}
+}
+
+// TestAdmitsNewWork_CapRiseClearsHeldReason: a task held by the cap that the
+// cap later releases must stop advertising the cap the moment admission is
+// granted, even if it still cannot start because no guest is available.
+// Otherwise /api/tasks keeps saying "concurrency cap N reached" while the log
+// correctly says "no available guest" — the cap-vs-pool misreading, inverted
+// (issue #249).
+func TestAdmitsNewWork_CapRiseClearsHeldReason(t *testing.T) {
+	orch, _ := newCappedOrchestrator(t, 0)
+	_ = orch.RegisterGuest("g1", "G1", nil)
+	addPending(t, orch, "t1")
+
+	if err := orch.AssignTask("t1", "g1"); !errors.Is(err, ErrConcurrencyCapReached) {
+		t.Fatalf("expected t1 held at cap 0, got %v", err)
+	}
+	held, _ := orch.GetTask("t1")
+	if held.HeldReason == "" {
+		t.Fatal("expected t1 to carry a held_reason naming the cap")
+	}
+
+	// The cap rises: admission is granted, so the cap is no longer the reason.
+	orch.SetConcurrencyCap(2)
+	if !orch.AdmitsNewWork("t1") {
+		t.Fatal("expected admission after the cap rose")
+	}
+	after, _ := orch.GetTask("t1")
+	if after.HeldReason != "" {
+		t.Errorf("expected held_reason to clear once the cap admits, got %q", after.HeldReason)
+	}
+
+	// The same holds when the cap becomes unlimited.
+	orch.SetConcurrencyCap(0)
+	addPending(t, orch, "t2")
+	if err := orch.AssignTask("t2", "g1"); !errors.Is(err, ErrConcurrencyCapReached) {
+		t.Fatalf("expected t2 held at cap 0, got %v", err)
+	}
+	orch.SetConcurrencyCap(config.ConcurrencyUnlimited)
+	if !orch.AdmitsNewWork("t2") {
+		t.Fatal("expected admission once the cap is unlimited")
+	}
+	if after, _ := orch.GetTask("t2"); after.HeldReason != "" {
+		t.Errorf("expected held_reason to clear once the cap is unlimited, got %q", after.HeldReason)
+	}
+}
+
 // TestTryAssignNext_AtCap_AssignsNothing: the bulk pass obeys the same rule
 // as the point-to-point assignment.
 func TestTryAssignNext_AtCap_AssignsNothing(t *testing.T) {

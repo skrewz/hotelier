@@ -47,8 +47,10 @@ type Orchestrator struct {
 	concurrencyCap int
 	// lastHoldLog deduplicates the "held by the cap" line: guests poll for
 	// work every heartbeat, so night mode would otherwise repeat the same
-	// sentence thousands of times a night (issue #249).
-	lastHoldLog string
+	// sentence thousands of times a night (issue #249). Keyed by task ID:
+	// a single global slot would alternate its key between two tasks held
+	// at once (two polling guests, say) and log every poll.
+	lastHoldLog map[string]string
 }
 
 // New creates a new Orchestrator wrapping the given queue and registry.
@@ -527,9 +529,9 @@ func (o *Orchestrator) SetConcurrencyCap(newCap int) {
 		return
 	}
 	o.concurrencyCap = newCap
-	// A different cap makes the previous "held" line stale, so the next hold
-	// is worth logging again.
-	o.lastHoldLog = ""
+	// A different cap makes the previous "held" lines stale, so the next
+	// hold of each task is worth logging again.
+	o.lastHoldLog = nil
 }
 
 // ConcurrencyCap returns the cap currently in force. Negative means no cap.
@@ -550,10 +552,11 @@ func (o *Orchestrator) InFlightCount() int {
 }
 
 // AdmitsNewWork reports whether the cap leaves room for a task to start now,
-// recording the hold in the task and the log when it does not (issue #249).
-// Callers use it to answer "why is this still PENDING?" on a path that never
-// reaches AssignTask because no guest looked eligible, and so must not report
-// a cap hold it did not attempt.
+// recording the hold in the task and the log when it does not, and clearing
+// any stale hold reason when it does (issue #249). Callers use it to answer
+// "why is this still PENDING?" on a path that never reaches AssignTask because
+// no guest looked eligible, and so must not report a cap hold it did not
+// attempt.
 func (o *Orchestrator) AdmitsNewWork(taskID string) bool {
 	o.mu.Lock()
 	defer o.mu.Unlock()
@@ -574,17 +577,29 @@ func (o *Orchestrator) inFlightCountInternal() int {
 }
 
 // admitsNewWorkInternal reports whether a new task may start now, and records
-// the refusal in the task and the log when it may not. The caller must hold
-// o.mu, which is what makes the count and the assignment atomic.
+// the refusal in the task and the log when it may not. An admitted task has
+// nothing left to be held back by, so any reason recorded by an earlier,
+// stricter cap is cleared — otherwise a task that goes on to wait on guest
+// availability would keep advertising the released cap (issue #249). The
+// caller must hold o.mu, which is what makes the count and the assignment
+// atomic.
 func (o *Orchestrator) admitsNewWorkInternal(taskID string) bool {
+	clearHeldReason := func() {
+		if task, ok := o.queue.Get(taskID); ok {
+			task.HeldReason = ""
+		}
+	}
+
 	// Negative is config.ConcurrencyUnlimited: no cap in force, so work
 	// starts exactly as it did before the cap existed (issue #249).
 	if o.concurrencyCap < 0 {
+		clearHeldReason()
 		return true
 	}
 
 	inFlight := o.inFlightCountInternal()
 	if inFlight < o.concurrencyCap {
+		clearHeldReason()
 		return true
 	}
 
@@ -594,10 +609,15 @@ func (o *Orchestrator) admitsNewWorkInternal(taskID string) bool {
 		task.HeldReason = fmt.Sprintf("concurrency cap %d reached (%d in flight)", o.concurrencyCap, inFlight)
 	}
 
-	// Legible in the log, once per distinct state rather than once per poll.
-	key := fmt.Sprintf("%s:%d:%d", taskID, o.concurrencyCap, inFlight)
-	if key != o.lastHoldLog {
-		o.lastHoldLog = key
+	// Legible in the log, once per distinct (task, cap, in-flight) state
+	// rather than once per poll. Keyed per task so tasks held at once cannot
+	// alternate a single global key past the dedup and log every poll.
+	key := fmt.Sprintf("%d:%d", o.concurrencyCap, inFlight)
+	if o.lastHoldLog == nil {
+		o.lastHoldLog = map[string]string{}
+	}
+	if o.lastHoldLog[taskID] != key {
+		o.lastHoldLog[taskID] = key
 		o.logf("task %s held back by the concurrency cap: %d in flight, cap %d (queue is waiting on the schedule, not on guest availability)",
 			taskID, inFlight, o.concurrencyCap)
 	}
