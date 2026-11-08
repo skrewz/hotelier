@@ -341,9 +341,12 @@ transport hiccup: the guest logs that the claim was not honoured and drops
 it rather than running work the host has closed. The transport case is the
 retry and reconnect work's.
 
-The three outcomes are counted and served on `/api/guests` as `stats`
-(`cancelled_while_running`, `cancelled_before_start`, `ack_refusals`), so a
-recurrence is one number rather than a log trawl. See issue #252.
+The outcomes are counted and served on `/api/guests` as `stats`
+(`cancelled_while_running`, `cancelled_before_start`, `ack_refusals`). The two
+action counters cover every `task.cancel` the guest confirms — revocations and
+host-requested cancels together, since the guest answers the same way either
+way — so `ack_refusals` is the number that signals a recurrence of #252: a guest
+running work the host has already closed.
 
 ---
 

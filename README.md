@@ -241,10 +241,12 @@ curl -X POST http://localhost:8080/api/tasks \
 | `GET` | `/api/health` | Health check |
 | `WS` | `/ws` | WebSocket (JSON-RPC) |
 
-`/api/guests` also carries a `stats` object counting claim revocations —
-`cancelled_while_running`, `cancelled_before_start` and `ack_refusals` — so a
-guest running work the host has already closed is one number rather than a log
-trawl.
+`/api/guests` also carries a `stats` object. The two action counters,
+`cancelled_while_running` and `cancelled_before_start`, cover every `task.cancel`
+the guest confirms — revocations of re-queued claims and host-requested cancels
+alike — while `ack_refusals` is the recurrence signal for a guest running work
+the host has already closed (issue #252), so a non-zero action counter on a busy
+host is ordinary cancellation rather than a regression.
 
 ## Tags
 
