@@ -88,7 +88,52 @@ type TaskAssignment struct {
 type TaskCancel struct {
 	TaskID string `json:"task_id"`
 	Reason string `json:"reason,omitempty"`
+	// Intent distinguishes why the host is revoking: "cancel" ends the task
+	// (the user cancelled it, or it was failed), "revoke" only takes the
+	// claim back because the host is re-queuing the task elsewhere. The
+	// guest echoes it in its guest.cancelled confirmation so the host does
+	// not treat a revocation as a request to cancel a task that is already
+	// back in the queue. See issue #252.
+	Intent string `json:"intent,omitempty"`
 }
+
+// cancelIntentRevoke is the task.cancel intent that takes the claim back
+// without deciding the task's fate: the host re-queues the task elsewhere.
+// The other intent, cancel, ends the task and is what task.cancel meant
+// before the field existed (issue #252).
+const cancelIntentRevoke = "revoke"
+
+// What a guest did with a task.cancel it received, reported back to the host
+// in the guest.cancelled confirmation. A cancel is resolved against the task
+// it names — never against "whatever is running" (issue #252).
+const (
+	// cancelActionRunning: the named task was executing and its context was
+	// aborted.
+	cancelActionRunning = "cancelled_while_running"
+	// cancelActionBeforeStart: the guest held the task but had not started
+	// it; the claim is dropped and the task will never run here.
+	cancelActionBeforeStart = "cancelled_before_start"
+	// cancelActionNotHeld: the guest does not hold the named task, so the
+	// cancel changed nothing. It is a no-op, not an error, so the host may
+	// retry the notification safely.
+	cancelActionNotHeld = "not_held"
+)
+
+// claimCounters are the guest's own counters for claims it gave up without
+// executing them. They are logged rather than reported: the host counts the
+// same events on its side, where they can be read without a live guest.
+type claimCounters struct {
+	AckRefusals int
+}
+
+// errClaimRevoked and errClaimRefused report a task the dispatcher must not
+// run and must not decline either: the host has already taken the claim back
+// (revoked) or refused it (a rejected task.acknowledge). Declining would hand
+// the host a task it has already dealt with. See issue #252.
+var (
+	errClaimRevoked = errors.New("claim revoked before start")
+	errClaimRefused = errors.New("claim refused by host")
+)
 
 // LogCallback is a function that sends a log entry to the host.
 // For tool call events, the entry should include structured fields
@@ -112,7 +157,28 @@ type Guest struct {
 	mu      sync.Mutex
 	running bool
 	cancel  context.CancelFunc // cancels the current task's context
-	stopCh  chan struct{}
+	// claims holds the task IDs this guest has accepted and not yet started
+	// or abandoned. The buffer on taskCh is invisible to a cancel, so the
+	// set is what lets a task.cancel decide whether the guest holds the task
+	// it names (issue #252).
+	claims map[string]struct{}
+	// revoked marks claims the host took back before they started. The
+	// dispatcher drops the assignment when it reaches it instead of running
+	// work the host has already closed.
+	revoked map[string]struct{}
+	// givenUp marks running tasks the host revoked mid-flight (a revoke-
+	// intent task.cancel naming the in-flight task). The abort makes the
+	// handler return an error, but that error is not the task's fate: the
+	// host re-queued the task elsewhere and ExecuteTask must not report a
+	// result for it, or the guest the host took the claim back from would
+	// decide the fate after all (issue #252 review). The record belongs to
+	// the run that was aborted: claimRevokedWhileRunning consumes it as that
+	// handler unwinds, and a run starting clears any earlier one for the
+	// same task, so a re-assignment of a given-up task is neither filed as a
+	// duplicate nor silenced by a stale marker.
+	givenUp  map[string]struct{}
+	counters claimCounters
+	stopCh   chan struct{}
 	// connMu guards connLost alone. It is deliberately not g.mu: g.mu is
 	// held across blocking RPC calls (see ExecuteTask), and the
 	// connection-lost signal must never queue behind an in-flight call.
@@ -168,6 +234,9 @@ func New(cfg config.GuestConfig, handler Handler) *Guest {
 		connLost: make(chan struct{}),
 		callResp: make(chan *rpc.JSONRPCMessage, 1),
 		taskCh:   make(chan TaskAssignment, 16),
+		claims:   make(map[string]struct{}),
+		revoked:  make(map[string]struct{}),
+		givenUp:  make(map[string]struct{}),
 		// The machine this guest runs on, reported at registration so the
 		// dashboard can say where a task is executing (issue #238). A failure
 		// here just leaves the host unknown, which the UI renders as no host.
@@ -212,15 +281,40 @@ func (g *Guest) registerNotificationHandlers() {
 			return
 		}
 
-		// Deduplicate: if the guest is already running this exact task,
-		// ignore the duplicate assignment. This can happen when the guest
-		// reconnects and the server re-sends an assignment it already has.
+		// Record the claim before the dispatcher can pick it up: a cancel
+		// that arrives while the assignment sits in the buffer must find it
+		// (issue #252). A fresh assignment also clears any earlier
+		// revocation of the same task, so a re-queue back to this guest
+		// runs instead of being dropped on a stale marker. The record must
+		// exist before the channel send below, because the send is the
+		// moment the dispatcher can take the assignment: recording
+		// afterwards left a window in which a cancel answered not_held for
+		// a task the guest did hold.
 		g.mu.Lock()
-		if g.currentTaskID == task.TaskID {
+		_, alreadyHeld := g.claims[task.TaskID]
+		_, givenUp := g.givenUp[task.TaskID]
+		if (g.currentTaskID == task.TaskID && !givenUp) || alreadyHeld {
+			// Deduplicate: the guest already holds this exact task, running
+			// or queued. This can happen when the guest reconnects and the
+			// server re-sends an assignment it already has. The claims map is
+			// the test for the queued half: keying only on currentTaskID
+			// buffered a re-sent assignment twice, and the dispatcher's
+			// "already running" decline for the second copy handed back work
+			// that was in flight (#252 review).
+			//
+			// A task the guest has given up mid-flight is not one it holds:
+			// the revoke-abort is still unwinding and the host has re-queued
+			// the work, so the re-assignment must be queued and run after the
+			// unwind. The give-up record stays untouched for the aborted run
+			// to consume — clearing it here is what let that run report a
+			// result for a task this guest no longer owns (#252 review).
+			delete(g.revoked, task.TaskID)
 			g.mu.Unlock()
-			g.log.Printf("[RPC] ignoring duplicate task.assign for %s (already running)", task.TaskID)
+			g.log.Printf("[RPC] ignoring duplicate task.assign for %s (already held)", task.TaskID)
 			return
 		}
+		g.claims[task.TaskID] = struct{}{}
+		delete(g.revoked, task.TaskID)
 		g.mu.Unlock()
 
 		g.log.Printf("[RPC] dispatching task %s to execution", task.TaskID)
@@ -228,6 +322,14 @@ func (g *Guest) registerNotificationHandlers() {
 		case g.taskCh <- task:
 			g.log.Printf("[RPC] task %s queued on guest for execution", task.TaskID)
 		default:
+			// The queue is full, so the task is not held here after all:
+			// undo the claim record, including any revocation a cancel may
+			// have attached to it inside the send window, so neither map
+			// keeps a task this guest never took.
+			g.mu.Lock()
+			delete(g.claims, task.TaskID)
+			delete(g.revoked, task.TaskID)
+			g.mu.Unlock()
 			g.log.Printf("[RPC] task queue full, dropping task %s", task.TaskID)
 		}
 	})
@@ -240,33 +342,90 @@ func (g *Guest) registerNotificationHandlers() {
 			g.log.Printf("[RPC] failed to parse task.cancel params: %v", err)
 			return
 		}
-		g.log.Printf("[RPC] task %s cancelled: %s", cancel.TaskID, cancel.Reason)
 
-		// Cancel the running task's context, which will abort the pi subprocess.
-		// This is the mechanism the server uses to kill a silent guest's task.
-		g.mu.Lock()
-		if g.cancel != nil {
-			g.cancel()
-			g.cancel = nil
-		}
-		g.mu.Unlock()
+		action := g.revokeClaim(cancel.TaskID, cancel.Reason, cancel.Intent)
 
-		// Confirm cancellation to the server. The guest is the authority on
-		// whether the task was actually stopped. The client may be nil while
-		// no connection exists (the handlers now live from construction
-		// time); skip the confirmation rather than panic. The accessor
-		// makes the check-then-use atomic with the reconnect loop clearing
-		// the client (issue #72).
+		// Confirm to the server, naming the task the guest acted on and what
+		// it did with it. The guest is the authority on whether the task was
+		// actually stopped; the host decides what the task's fate is, guided
+		// by the intent it sent (issue #252). The client may be nil while no
+		// connection exists (the handlers now live from construction time);
+		// skip the confirmation rather than panic. The accessor makes the
+		// check-then-use atomic with the reconnect loop clearing the client
+		// (issue #72).
 		if c := g.rpcClient(); c != nil {
 			_, _ = c.Call("guest.cancelled", map[string]interface{}{
 				"task_id":  cancel.TaskID,
 				"guest_id": g.id,
 				"reason":   cancel.Reason,
+				"action":   action,
+				"intent":   cancel.Intent,
 			})
 		} else {
 			g.log.Printf("[RPC] no connection, skipping guest.cancelled confirmation for %s", cancel.TaskID)
 		}
 	})
+}
+
+// revokeClaim resolves a task.cancel against the task it names: the running
+// task is aborted, a claim held but not started is dropped so it never runs,
+// and a task the guest does not hold changes nothing (issue #252).
+//
+// Cancelling "whatever is running" was the original defect: a cancel for task
+// X tore down whichever task happened to be in flight, and the confirmation
+// then told the host about a task the guest had never seen.
+//
+// A revoke of the running task is also recorded in givenUp: the host has
+// taken the claim back and re-queued the task elsewhere, so the aborted
+// handler's error is not the task's fate and ExecuteTask reports no result
+// for it, exactly as the drop paths report nothing for a revoked queue entry.
+// A cancel-intent abort keeps reporting its result: there the task's fate is
+// what the host's cancel asks for, and the result path is unchanged.
+func (g *Guest) revokeClaim(taskID, reason, intent string) string {
+	g.mu.Lock()
+	switch {
+	case taskID != "" && g.currentTaskID == taskID:
+		// The task this cancel names is the one in flight. Its context may
+		// already be gone (it is winding down), which is why the abort is
+		// conditional and the action is not.
+		if g.cancel != nil {
+			g.cancel()
+			g.cancel = nil
+		}
+		delete(g.claims, taskID)
+		if intent == cancelIntentRevoke {
+			g.givenUp[taskID] = struct{}{}
+		}
+		g.mu.Unlock()
+		g.log.Printf("[CANCEL] task %s cancelled while running: %s", taskID, reason)
+		return cancelActionRunning
+	default:
+		if _, held := g.claims[taskID]; !held {
+			g.mu.Unlock()
+			g.log.Printf("[CANCEL] task %s not running and not held here; ignoring cancel (does not hold the claim)", taskID)
+			return cancelActionNotHeld
+		}
+		delete(g.claims, taskID)
+		g.revoked[taskID] = struct{}{}
+		g.mu.Unlock()
+		g.log.Printf("[CANCEL] task %s cancelled before start (will not run): %s", taskID, reason)
+		return cancelActionBeforeStart
+	}
+}
+
+// claimRevokedWhileRunning reports whether the named task's claim was taken
+// back while it was in flight, consuming the record. The aborted handler
+// returns an error like any other failure, but a revocation is not a task
+// failure: the host re-queued the task and its own acknowledgement owns the
+// fate, so ExecuteTask must not send a result for it (issue #252 review).
+func (g *Guest) claimRevokedWhileRunning(taskID string) bool {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if _, givenUp := g.givenUp[taskID]; !givenUp {
+		return false
+	}
+	delete(g.givenUp, taskID)
+	return true
 }
 
 // Connect connects the guest to the Check-In Host.
@@ -423,6 +582,25 @@ func (g *Guest) ID() string {
 	return g.id
 }
 
+// holdsClaim reports whether the guest holds an assignment for taskID that it
+// has accepted but not started — the state a task.cancel has to be able to
+// reach (issue #252).
+func (g *Guest) holdsClaim(taskID string) bool {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	_, ok := g.claims[taskID]
+	return ok
+}
+
+// ackRefusals is how many times the host refused this guest's
+// task.acknowledge — the claims the guest dropped rather than executed
+// (issue #252).
+func (g *Guest) ackRefusals() int {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return g.counters.AckRefusals
+}
+
 // hasRegistered reports whether this process has registered before.
 func (g *Guest) hasRegistered() bool {
 	g.mu.Lock()
@@ -493,8 +671,10 @@ func (g *Guest) taskDispatcher(ctx context.Context) {
 	for {
 		select {
 		case <-ctx.Done():
+			g.dropBufferedClaims("connection lost")
 			return
 		case <-g.stopCh:
+			g.dropBufferedClaims("guest stopping")
 			return
 		case task := <-g.taskCh:
 			g.log.Printf("[DISPATCH] starting task %s", task.TaskID)
@@ -508,9 +688,19 @@ func (g *Guest) taskDispatcher(ctx context.Context) {
 			// after the current one completes is safe: the server's liveness
 			// probe keys off the guest's heartbeat, not the exact task ID.
 			if !g.waitForIdle(ctx) {
+				// Exiting with this task in hand and possibly more queued:
+				// prune their claim records so they do not outlive the
+				// dispatcher (issue #252 review).
+				g.dropBufferedClaims("dispatcher exiting", task.TaskID)
 				return
 			}
 			result, err := g.ExecuteTask(task)
+			if errors.Is(err, errClaimRevoked) || errors.Is(err, errClaimRefused) {
+				// The host took the claim back, or refused it, while the task
+				// waited. ExecuteTask logged which; do not decline — the host
+				// has already dealt with the task (issue #252).
+				continue
+			}
 			if err != nil {
 				g.log.Printf("[DISPATCH] task %s error: %v", task.TaskID, err)
 				// Defensive fallback: the guest became busy between the idle
@@ -546,6 +736,38 @@ func (g *Guest) waitForIdle(ctx context.Context) bool {
 		case <-g.stopCh:
 			return false
 		case <-time.After(50 * time.Millisecond):
+		}
+	}
+}
+
+// dropBufferedClaims prunes the claim bookkeeping for the named tasks and
+// for assignments still sitting in the queue when the dispatcher exits, and
+// removes the queued ones from the queue with it. The host re-queues a
+// disconnected guest's tasks when the connection drops (and revokes their
+// claims), so a buffered assignment is a stale copy of a task the host has
+// already dealt with; leaving its claim recorded would tell a later cancel
+// that this guest still has something to drop, and leaving it queued hands
+// it to the next dispatcher — which is how revoked claims outlived their
+// assignments in issue #252.
+func (g *Guest) dropBufferedClaims(why string, ids ...string) {
+	g.mu.Lock()
+	for _, id := range ids {
+		delete(g.claims, id)
+		delete(g.revoked, id)
+		delete(g.givenUp, id)
+	}
+	g.mu.Unlock()
+	for {
+		select {
+		case task := <-g.taskCh:
+			g.mu.Lock()
+			delete(g.claims, task.TaskID)
+			delete(g.revoked, task.TaskID)
+			delete(g.givenUp, task.TaskID)
+			g.mu.Unlock()
+			g.log.Printf("[DISPATCH] dropped queued task %s (%s)", task.TaskID, why)
+		default:
+			return
 		}
 	}
 }
@@ -888,8 +1110,25 @@ func (g *Guest) heartbeatLoop(ctx context.Context) {
 func (g *Guest) ExecuteTask(task TaskAssignment) (*TaskResult, error) {
 	g.mu.Lock()
 	if g.running {
+		// The decline that follows this error hands the task back to the
+		// host, so this guest holds nothing: drop the claim record with it,
+		// or a later cancel would answer cancelled_before_start for a task
+		// that was never in the queue.
+		delete(g.claims, task.TaskID)
+		delete(g.revoked, task.TaskID)
 		g.mu.Unlock()
 		return nil, fmt.Errorf("guest is already running a task")
+	}
+
+	// A claim the host revoked while this task waited in the queue is
+	// dropped here, never started: the host has already re-queued the task
+	// and any work done now would be duplicated side effects (issue #252).
+	if _, revoked := g.revoked[task.TaskID]; revoked {
+		delete(g.revoked, task.TaskID)
+		delete(g.claims, task.TaskID)
+		g.mu.Unlock()
+		g.log.Printf("[DISPATCH] claim for task %s was revoked before start; dropping it", task.TaskID)
+		return nil, errClaimRevoked
 	}
 
 	// Signal the server that we're about to execute this task so the
@@ -906,6 +1145,21 @@ func (g *Guest) ExecuteTask(task TaskAssignment) (*TaskResult, error) {
 			"guest_id": g.id,
 		})
 		if err != nil {
+			// A refusal is the host saying "this is not yours": the task has
+			// completed, failed or gone to another guest. Running it anyway
+			// — the old "continue anyway" behaviour — is what produced
+			// comments, commits and pull requests raised twice (issue #252).
+			// Any other failure says nothing about the claim: the transport
+			// case is already covered by the retry and reconnect work, so
+			// carry on and let the heartbeat inform the server.
+			if rpc.IsClaimRefused(err) {
+				g.counters.AckRefusals++
+				delete(g.claims, task.TaskID)
+				delete(g.revoked, task.TaskID)
+				g.mu.Unlock()
+				g.log.Printf("[DISPATCH] claim for task %s not honoured: %v — not executing", task.TaskID, err)
+				return nil, errClaimRefused
+			}
 			g.log.Printf("[DISPATCH] failed to acknowledge task %s: %v",
 				task.TaskID, err)
 			// Continue anyway — the server may already know via heartbeat.
@@ -914,6 +1168,12 @@ func (g *Guest) ExecuteTask(task TaskAssignment) (*TaskResult, error) {
 		g.log.Printf("[DISPATCH] no connection, skipping task.acknowledge for %s", task.TaskID)
 	}
 
+	delete(g.claims, task.TaskID)
+	// The run that starts here is not one the host revoked: a give-up left
+	// over from an earlier run of the same task must not silence this one's
+	// result. The aborted run consumes its own record as it unwinds, before
+	// the dispatcher can reach this point again.
+	delete(g.givenUp, task.TaskID)
 	g.running = true
 	g.currentTaskID = task.TaskID
 	g.mu.Unlock()
@@ -960,6 +1220,10 @@ func (g *Guest) ExecuteTask(task TaskAssignment) (*TaskResult, error) {
 
 	// Execute the task using the handler
 	result, err := g.handler(ctx, task, g.SendLog)
+	// Consume the revocation record before the deferred cleanup below runs:
+	// a revoke that aborted this task takes its fate with it, and neither
+	// outcome below may report a result for it (issue #252 review).
+	revokedWhileRunning := g.claimRevokedWhileRunning(task.TaskID)
 	if err != nil {
 		g.log.Printf("task %s failed: %v", task.TaskID, err)
 		if g.isStopping() {
@@ -975,6 +1239,14 @@ func (g *Guest) ExecuteTask(task TaskAssignment) (*TaskResult, error) {
 			TaskID:  task.TaskID,
 			Success: false,
 			Error:   err.Error(),
+		}
+		if revokedWhileRunning {
+			// The host took this claim back mid-flight and re-queued the
+			// task; the abort error is not a task failure. Reporting it
+			// would fail a task another guest may already be running — the
+			// revoked guest reports nothing, as the drop paths already do.
+			g.log.Printf("[TASK] claim for task %s was revoked while running; not reporting the result", task.TaskID)
+			return nil, err
 		}
 		if sendErr := g.SendResult(failureResult); sendErr != nil {
 			g.log.Printf("failed to send failure result: %v", sendErr)
@@ -1004,6 +1276,14 @@ func (g *Guest) ExecuteTask(task TaskAssignment) (*TaskResult, error) {
 		if err := g.SendLog(LogEntry{TaskID: task.TaskID, Line: fmt.Sprintf("Task failed: %s", result.Error), Level: "error"}); err != nil {
 			g.log.Printf("failed to send task failure log: %v", err)
 		}
+	}
+
+	if revokedWhileRunning {
+		// A successful handler says nothing about a claim the host already
+		// took back: the side effects are done, but a result would decide a
+		// fate this guest no longer owns.
+		g.log.Printf("[TASK] claim for task %s was revoked while running; not reporting the result", task.TaskID)
+		return result, nil
 	}
 
 	if err := g.SendResult(*result); err != nil {

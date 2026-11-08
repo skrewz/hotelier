@@ -236,10 +236,17 @@ curl -X POST http://localhost:8080/api/tasks \
 | `POST` | `/api/tasks` | Submit a new task |
 | `GET` | `/api/tasks/:id` | Get task details |
 | `GET` | `/api/tasks/:id/download` | Download the task's whole log trace as JSONL |
-| `GET` | `/api/guests` | List connected guests (UID, host, state, tags) |
+| `GET` | `/api/guests` | List connected guests (UID, host, state, tags) and the claim counters |
 | `GET` | `/api/guests/:id` | Get guest details |
 | `GET` | `/api/health` | Health check |
 | `WS` | `/ws` | WebSocket (JSON-RPC) |
+
+`/api/guests` also carries a `stats` object. The two action counters,
+`cancelled_while_running` and `cancelled_before_start`, cover every `task.cancel`
+the guest confirms — revocations of re-queued claims and host-requested cancels
+alike — while `ack_refusals` is the recurrence signal for a guest running work
+the host has already closed (issue #252), so a non-zero action counter on a busy
+host is ordinary cancellation rather than a regression.
 
 ## Tags
 

@@ -198,6 +198,7 @@ The Check-In Host exposes JSON-RPC methods for guest communication.
 | `guest.heartbeat`   | Guest→Host  | Liveness ping.                           |
 | `guest.log`         | Guest→Host  | Push a log entry (chunk).                |
 | `guest.result`      | Guest→Host  | Submit final task result.                |
+| `guest.cancelled`   | Guest→Host  | Report what a `task.cancel` acted on.    |
 
 `resumed` (issue #253) tells the host whether the process registering has
 done so before. With a configured guest `id` an id the registry already holds
@@ -205,12 +206,18 @@ can be a brand-new process, and only the process knows that: a reconnect is
 reconciled against the task queue, a fresh registration has its stale task
 reference dropped.
 
+`task.cancel` carries `task_id`, a human `reason`, and an `intent`: `cancel`
+(the default) ends the task, `revoke` only takes the claim back because the
+host is re-queuing the task (issue #252). The guest's `guest.cancelled`
+confirmation names the task it acted on, echoes that intent, and reports the
+`action` it took — see Claim Revocation below.
+
 ### Host → Guest Methods
 
 | Method              | Direction   | Description                              |
 |---------------------|-------------|------------------------------------------|
 | `task.assign`       | Host→Guest  | Push a task to the guest.                |
-| `task.cancel`       | Host→Guest  | Cancel an assigned task.                 |
+| `task.cancel`       | Host→Guest  | Cancel a task, or revoke its claim.      |
 
 ### Host → Client (UI) Methods
 
@@ -294,6 +301,52 @@ issue #251.
 PENDING → ASSIGNED → RUNNING → COMPLETED
                          └── FAILED
 ```
+
+### Claim Revocation
+
+A task that moves from `ASSIGNED`/`RUNNING` back to `PENDING` has to take its
+claim with it. Every such transition — the stuck-task probe, a lost
+connection, an assignment that failed to be delivered — sends `task.cancel`
+to the holder first, carrying the task ID, a reason and `intent: "revoke"`.
+The notification is a no-op on a guest that does not hold the task, so it is
+safe to send on every path and safe to retry.
+
+The guest resolves a cancel against the task **it names**, never against
+whatever happens to be running: the named task running is aborted
+(`cancelled_while_running`), a claim held but not started is dropped and will
+never run there (`cancelled_before_start`), and a task the guest does not hold
+changes nothing (`not_held`). Its `guest.cancelled` confirmation names the
+task it acted on and echoes the intent, so a revocation never cancels a task
+that is already back in the queue, and a confirmation from a guest that holds
+nothing never ends another guest's task.
+
+The intent is resolved host-side even when the guest cannot echo it: a guest
+that predates the field sends neither `action` nor `intent`, so the host
+remembers the intent of the last `task.cancel` it sent for a task and
+resolves an intent-less confirmation against that record rather than
+defaulting it to a cancel. Only two revocation reasons exist — `re-queued`
+and `connection lost` — because every re-queue revokes the claim from its
+holder at the moment it re-queues: a revocation is never still in flight
+when the task lands elsewhere, so a `reassigned` reason would have no path
+able to send it.
+
+The guest's reply stays the authority on whether it stopped; the host's
+acknowledgement is the authority on whether the work is still its own. A
+revocation of a task that is already running is therefore reported as
+`cancelled_while_running`, but the aborted guest sends no `guest.result` for
+it: the abort is not a task failure, and a result would let the guest the
+host just took the claim from decide the fate of a task another guest may
+already be running. A refused `task.acknowledge` is a decision, not a
+transport hiccup: the guest logs that the claim was not honoured and drops
+it rather than running work the host has closed. The transport case is the
+retry and reconnect work's.
+
+The outcomes are counted and served on `/api/guests` as `stats`
+(`cancelled_while_running`, `cancelled_before_start`, `ack_refusals`). The two
+action counters cover every `task.cancel` the guest confirms — revocations and
+host-requested cancels together, since the guest answers the same way either
+way — so `ack_refusals` is the number that signals a recurrence of #252: a guest
+running work the host has already closed.
 
 ---
 

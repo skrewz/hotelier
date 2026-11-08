@@ -68,6 +68,14 @@ const (
 	CodeMethodNotFound = -32601
 	CodeInvalidParams  = -32602
 	CodeInternalError  = -32603
+
+	// CodeClaimRefused is an application-defined error (JSON-RPC reserves
+	// -32000 to -32099 for server errors) meaning "the claim you are
+	// asserting is not yours": the task has moved on — completed, failed,
+	// re-queued, or assigned to another guest. It is a decision about the
+	// claim, not a transport failure, which is what distinguishes it from
+	// CodeInternalError. See issue #252.
+	CodeClaimRefused = -32004
 )
 
 // ParseError creates a parse error.
@@ -93,6 +101,21 @@ func InvalidParamsError(msg string) *RPCError {
 // InternalError creates an internal error.
 func InternalError(msg string) *RPCError {
 	return &RPCError{Code: CodeInternalError, Message: msg}
+}
+
+// ClaimRefusedError creates an error stating that the claim the caller
+// asserts is no longer its own — the task has moved on.
+func ClaimRefusedError(msg string) *RPCError {
+	return &RPCError{Code: CodeClaimRefused, Message: msg}
+}
+
+// IsClaimRefused reports whether err is (or wraps) a claim refusal: an
+// explicit statement from the host that the task is not the caller's to
+// execute. Anything else — a transport error, a method the server does not
+// implement, an internal error — says nothing about the claim.
+func IsClaimRefused(err error) bool {
+	var rpcErr *RPCError
+	return errors.As(err, &rpcErr) && rpcErr.Code == CodeClaimRefused
 }
 
 // Handler is a function that handles a JSON-RPC method call.
