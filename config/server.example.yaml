@@ -13,7 +13,10 @@ silence_timeout: 180
 max_guests: 0
 # Static cap on how many tasks the host is willing to run at any moment
 # (0 = unlimited). Used as-is when no concurrency_schedule is configured;
-# the schedule takes precedence otherwise.
+# the schedule takes precedence otherwise. The cap gates starting work: a
+# pending task is admitted only while fewer tasks are ASSIGNED or RUNNING than
+# the cap, tasks already running are left alone when it drops, and a queue held
+# back says so in the log, in the task's held_reason and in /api/health.
 max_concurrent_tasks: 0
 # IANA timezone the schedule's "at" times are interpreted in, so the
 # boundaries follow the wall clock across DST. Default: "UTC".

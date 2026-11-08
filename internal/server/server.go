@@ -268,14 +268,27 @@ type Server struct {
 // It applies changes that can take effect without restarting:
 //   - MaxGuests: updates the registry capacity
 //   - MaxConcurrentTasks, ConcurrencySchedule, ScheduleTimezone: validated
-//     here and read live by EffectiveConcurrency, so schedule edits take
-//     effect here too; an invalid set of keys is rejected and the previous
-//     values are kept
+//     here and pushed to the orchestrator, so a cap edit — including one that
+//     raises the cap and frees the queue — takes effect here too; an invalid
+//     set of keys is rejected and the previous values are kept
 //   - LogDir: recreates the disk log store if the path changed
 //   - Personas: rebuilds the persona store
 //   - TaskTimeout, HeartbeatInterval, MaxLogSize: stored for future use
 //   - SilenceTimeout, TaskSilenceTimeout, TaskAssignmentTimeout: read live by the cleanup loop
 func (s *Server) Reload(cfg config.ServerConfig) {
+	if s.reload(cfg) {
+		// The cap rose. A raised cap is itself the event the queue was
+		// waiting on, so drain it here rather than waiting for a guest to
+		// poll (issue #249). Outside the lock: the assignment pass talks to
+		// guests and must not hold the config open.
+		s.tryAssignPendingTasks()
+	}
+}
+
+// reload applies cfg and reports whether the concurrency cap rose, which the
+// caller turns into an assignment pass. It takes s.mu; the drain pass must not
+// run under it.
+func (s *Server) reload(cfg config.ServerConfig) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -301,15 +314,17 @@ func (s *Server) Reload(cfg config.ServerConfig) {
 		s.log.Printf("max_guests updated: %d", cfg.MaxGuests)
 	}
 
-	// Concurrency cap changes are picked up live by EffectiveConcurrency
-	// (which reads s.cfg under the lock this Reload holds); log them the
-	// same way max_guests is logged (issue #248).
+	// Concurrency cap changes are pushed to the orchestrator, which is where
+	// assignments are decided: EffectiveConcurrency is the source of truth for
+	// "what is the cap right now", and enforcement reads the value it holds
+	// (issue #249). Log them the same way max_guests is logged.
 	if cfg.MaxConcurrentTasks != old.MaxConcurrentTasks {
 		s.log.Printf("max_concurrent_tasks updated: %d", cfg.MaxConcurrentTasks)
 	}
 	if !reflect.DeepEqual(cfg.ConcurrencySchedule, old.ConcurrencySchedule) || cfg.ScheduleTimezone != old.ScheduleTimezone {
 		s.log.Printf("concurrency_schedule updated: %d entries (timezone %q)", len(cfg.ConcurrencySchedule), cfg.ScheduleTimezone)
 	}
+	drain := s.pushConcurrencyCapLocked(cfg, time.Now())
 
 	// Recreate persona store if personas changed (deep comparison catches
 	// edits to existing personas, not just additions/removals).
@@ -355,6 +370,72 @@ func (s *Server) Reload(cfg config.ServerConfig) {
 	if cfg.MaxLogSize != old.MaxLogSize {
 		s.log.Printf("max_log_size updated: %d bytes", cfg.MaxLogSize)
 	}
+
+	return drain
+}
+
+// concurrencySyncInterval is how often the server re-reads the concurrency
+// schedule to see whether a boundary has been crossed (issue #249). Schedule
+// entries are minute-granular "HH:MM" values, so a tick this short bounds the
+// lag between a boundary and the queue draining to the new cap — without the
+// enforcement side re-implementing the boundary arithmetic config owns.
+const concurrencySyncInterval = 15 * time.Second
+
+// pushConcurrencyCapLocked resolves the cap for cfg at now and hands it to the
+// orchestrator. The caller must hold s.mu. It reports whether the cap rose —
+// unlimited outranking any number — which means work the schedule was holding
+// back may now start.
+func (s *Server) pushConcurrencyCapLocked(cfg config.ServerConfig, now time.Time) bool {
+	effective := cfg.EffectiveConcurrency(now)
+	rose := capIsGreater(effective, s.orchestrator.ConcurrencyCap())
+	s.orchestrator.SetConcurrencyCap(effective)
+	return rose
+}
+
+// syncConcurrencyCap re-resolves the cap against the schedule at now and
+// pushes it into the orchestrator. It reports whether the cap rose, so the
+// caller can drain the queue (issue #249). Crossing a 07:00 boundary is not an
+// event the server receives from anyone; this is how the schedule is noticed.
+func (s *Server) syncConcurrencyCap(now time.Time) bool {
+	s.mu.RLock()
+	rose := s.pushConcurrencyCapLocked(s.cfg, now)
+	s.mu.RUnlock()
+	return rose
+}
+
+// refreshConcurrency re-resolves the cap at now and, when that raised the cap,
+// runs an assignment pass: work the previous cap held back may start now, and
+// nothing else is going to tell the server so (issue #249).
+func (s *Server) refreshConcurrency(now time.Time) {
+	if s.syncConcurrencyCap(now) {
+		s.tryAssignPendingTasks()
+	}
+}
+
+// concurrencySyncLoop watches the schedule so a cap that rises at a boundary
+// drains the queue without waiting for a new task or a guest poll.
+func (s *Server) concurrencySyncLoop() {
+	ticker := time.NewTicker(concurrencySyncInterval)
+	defer ticker.Stop()
+
+	for range ticker.C {
+		s.refreshConcurrency(time.Now())
+	}
+}
+
+// capIsGreater orders caps by how much work they admit. The unlimited
+// sentinel outranks every number and two equal caps are not "greater".
+func capIsGreater(a, b int) bool {
+	if a == b {
+		return false
+	}
+	if a == config.ConcurrencyUnlimited {
+		return true
+	}
+	if b == config.ConcurrencyUnlimited {
+		return false
+	}
+	return a > b
 }
 
 // New creates a new Server instance.
@@ -377,6 +458,11 @@ func New(cfg config.ServerConfig) *Server {
 
 	// Set max guests on orchestrator
 	s.orchestrator.SetMaxGuests(cfg.MaxGuests)
+
+	// Hand the cap to the orchestrator, the one place that decides
+	// assignments, so the deployment starts under the cap its config states
+	// (issue #249).
+	s.orchestrator.SetConcurrencyCap(cfg.EffectiveConcurrency(time.Now()))
 
 	// Validate the concurrency configuration at startup the way personas
 	// are; the file path rejects such a config in LoadServerConfig, but a
@@ -464,6 +550,10 @@ func (s *Server) Start() error {
 
 	// Start stale guest cleanup
 	go s.staleGuestCleanup()
+
+	// Watch the concurrency schedule so a cap that rises at a boundary drains
+	// the queue without waiting for an event (issue #249).
+	go s.concurrencySyncLoop()
 
 	// Set up HTTP routes
 	mux := http.NewServeMux()
@@ -1179,6 +1269,18 @@ func (s *Server) tryAssignPendingTasks() {
 	}
 }
 
+// noteWhyNotAssigned records why a task that could not be handed out is still
+// PENDING. The cap is asked first and wins: when it has no room, the
+// orchestrator has already written the reason into the task and logged it, and
+// saying "no available guest" there would send an operator looking for a dead
+// pool while night mode is holding the queue (issue #249).
+func (s *Server) noteWhyNotAssigned(task *queue.Task) {
+	if !s.orchestrator.AdmitsNewWork(task.ID) {
+		return
+	}
+	s.log.Printf("task %s pending: no available guest with tags %v", task.ID, task.Tags)
+}
+
 // tryAssignTaskToEligible finds an idle guest that matches the given task's
 // tags and assigns the task to that guest. It is used when a previously-
 // assigned guest declines the task. The skipGuestID parameter identifies
@@ -1192,6 +1294,7 @@ func (s *Server) tryAssignTaskToEligible(taskID, skipGuestID string) {
 
 	guests := s.orchestrator.FindAvailableGuests(task.Tags)
 	if len(guests) == 0 {
+		s.noteWhyNotAssigned(task)
 		return
 	}
 
@@ -1203,7 +1306,12 @@ func (s *Server) tryAssignTaskToEligible(taskID, skipGuestID string) {
 		}
 
 		if err := s.orchestrator.AssignTask(task.ID, guest.ID); err != nil {
-			s.log.Printf("failed to assign task %s to guest %s: %v", task.ID, guest.ID, err)
+			// A cap hold is already in the log, deduplicated, from the
+			// orchestrator; repeating it per attempt would read like a
+			// malfunction (issue #249).
+			if !errors.Is(err, orchestrator.ErrConcurrencyCapReached) {
+				s.log.Printf("failed to assign task %s to guest %s: %v", task.ID, guest.ID, err)
+			}
 			continue
 		}
 
@@ -1278,7 +1386,11 @@ func (s *Server) tryAssignTask(guestID string) {
 
 	// Assign atomically: task→ASSIGNED, guest→RUNNING
 	if err := s.orchestrator.AssignTask(matchedTask.ID, guestID); err != nil {
-		s.log.Printf("failed to assign task %s to guest %s: %v", matchedTask.ID, guestID, err)
+		// The cap already said so once, at the orchestrator, in its own
+		// words; logging it again on every poll would bury the log (issue #249).
+		if !errors.Is(err, orchestrator.ErrConcurrencyCapReached) {
+			s.log.Printf("failed to assign task %s to guest %s: %v", matchedTask.ID, guestID, err)
+		}
 		return
 	}
 
@@ -1479,11 +1591,22 @@ func (s *Server) HandleWebUI(w http.ResponseWriter, r *http.Request) {
 // handleHealth returns the server health status.
 // HandleHealth returns the server health status.
 func (s *Server) HandleHealth(w http.ResponseWriter, r *http.Request) {
+	currentCap := s.orchestrator.ConcurrencyCap()
+	// State the unlimited case in words: a bare -1 in JSON would read as a
+	// broken number rather than as "no cap" (issue #249).
+	var capLabel interface{} = currentCap
+	if currentCap == config.ConcurrencyUnlimited {
+		capLabel = "unlimited"
+	}
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]interface{}{
 		"status": "healthy",
 		"guests": s.orchestrator.Registry().Count(),
 		"tasks":  s.orchestrator.Queue().Count(),
+		// The cap and what is in flight against it, so "nothing is moving"
+		// can be read as night mode rather than guessed at (issue #249).
+		"in_flight":       s.orchestrator.InFlightCount(),
+		"concurrency_cap": capLabel,
 	})
 }
 
@@ -1524,6 +1647,7 @@ func (s *Server) handleGetTasks(w http.ResponseWriter, r *http.Request) {
 			"result":      t.Result,
 			"error":       t.Error,
 			"dedup_key":   t.DedupKey,
+			"held_reason": t.HeldReason,
 			"log_count":   s.logStore.Count(t.ID),
 		}
 		taskList[i] = taskMap
@@ -1603,6 +1727,9 @@ func (s *Server) handleCreateTask(w http.ResponseWriter, r *http.Request) {
 	guests := s.orchestrator.FindAvailableGuests(task.Tags)
 	if len(guests) > 0 {
 		s.tryAssignTask(guests[0].ID)
+	} else {
+		// Say why the task is waiting, cap or pool (issue #249).
+		s.noteWhyNotAssigned(&task)
 	}
 
 	w.Header().Set("Content-Type", "application/json")
@@ -1700,6 +1827,8 @@ func (s *Server) handleTaskRerun(w http.ResponseWriter, r *http.Request, taskID 
 	guests := s.orchestrator.FindAvailableGuests(newTask.Tags)
 	if len(guests) > 0 {
 		s.tryAssignTask(guests[0].ID)
+	} else {
+		s.noteWhyNotAssigned(newTask)
 	}
 
 	w.Header().Set("Content-Type", "application/json")

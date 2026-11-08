@@ -136,6 +136,12 @@ type Task struct {
 	Result     string     `json:"result,omitempty"`
 	Error      string     `json:"error,omitempty"`
 	DedupKey   string     `json:"dedup_key,omitempty"` // optional dedup key: submissions matching a PENDING task's key are squelched
+	// HeldReason states why a PENDING task was last refused an assignment
+	// because of the concurrency cap (issue #249), so an operator can tell a
+	// queue the schedule is holding back from a pool with no matching guest.
+	// It is in-memory only — it describes the decision just made, not the
+	// task — and is cleared whenever the task is assigned, added or restored.
+	HeldReason string `json:"held_reason,omitempty"`
 }
 
 // TaskQueue manages pending and active tasks.
@@ -199,6 +205,10 @@ func (q *TaskQueue) addLocked(task *Task) error {
 
 	task.Status = TaskStatusPending
 	task.CreatedAt = time.Now()
+	// A submission carries no hold: the reason belongs to the queue's next
+	// assignment decision, and a client-supplied held_reason must not survive
+	// into a task that is about to be assigned (issue #249).
+	task.HeldReason = ""
 	// Default priority to orangutan if not set or invalid
 	if task.Priority == "" || !ValidatePriority(task.Priority) {
 		task.Priority = PriorityOrangutan
@@ -225,6 +235,9 @@ func (q *TaskQueue) Restore(task *Task) error {
 	task.Status = TaskStatusPending
 	task.AssignedTo = ""
 	task.AssignedAt = time.Time{}
+	// The hold that was true when the process stopped is not necessarily true
+	// after the restart: the cap follows the schedule (issue #249).
+	task.HeldReason = ""
 	if task.CreatedAt.IsZero() {
 		task.CreatedAt = time.Now()
 	}
