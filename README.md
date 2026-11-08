@@ -94,6 +94,31 @@ should set that key to a non-zero cap to fail closed rather than open. An `at`
 that falls inside a daylight-saving gap (Sydney has no 02:00–03:00 on the first
 Sunday of October) takes effect at the first instant after the gap.
 
+**How the cap is enforced.** A task is admitted only while fewer tasks are in
+flight (`ASSIGNED` or `RUNNING`) than the cap in force. The check happens where
+assignments are decided, so every path that can hand out work — a guest polling
+for a task, a new submission, a rerun, a reconcile — obeys the same rule. The
+cap gates *starting* work only: when it drops, tasks already running finish
+normally; nothing is cancelled or paused. When it rises — on a reload, or at a
+schedule boundary, which the server notices within seconds with no new task and
+no guest poll — the queue drains to the new cap on its own.
+
+A queue the cap is holding back looks different from a pool with no matching
+guest, in all three places an operator reads:
+
+- the log: `task <id> held back by the concurrency cap: 2 in flight, cap 2
+  (queue is waiting on the schedule, not on guest availability)`, stated once
+  per change of state rather than once per poll; a pool problem instead logs
+  `task <id> pending: no available guest with tags [...]`
+- the task: `held_reason` on a pending task names the cap and what is in
+  flight, and clears as soon as the task is assigned
+- `/api/health`: `in_flight` and `concurrency_cap` (the latter `"unlimited"`
+  when no cap is configured) say the same thing at a glance
+
+With neither `max_concurrent_tasks` nor a schedule set — the default, and every
+deployment that predates this feature — there is no cap and assignment behaves
+exactly as it did before.
+
 ### Guest (`config/guest.yaml`)
 
 ```yaml

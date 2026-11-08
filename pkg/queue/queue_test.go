@@ -1400,3 +1400,34 @@ func TestTaskQueue_TitleAndURLRoundTrip(t *testing.T) {
 		t.Error("expected url key to be omitted when empty")
 	}
 }
+
+// TestAddClearsHeldReason: held_reason is the queue's statement about why a
+// task is waiting, never a field a submission can set for itself (issue #249).
+func TestAddClearsHeldReason(t *testing.T) {
+	q := NewTaskQueue(func(format string, args ...interface{}) {})
+
+	task := &Task{ID: "task-1", Prompt: "p", HeldReason: "concurrency cap 0 reached (0 in flight)"}
+	if err := q.Add(task); err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+	if task.HeldReason != "" {
+		t.Errorf("expected a submitted task to carry no hold, got %q", task.HeldReason)
+	}
+}
+
+// TestRestoreClearsHeldReason: the cap that held a task before the restart is
+// not necessarily the cap after it, so a restored task starts with no reason.
+func TestRestoreClearsHeldReason(t *testing.T) {
+	q := NewTaskQueue(func(format string, args ...interface{}) {})
+
+	task := &Task{ID: "task-1", Prompt: "p", HeldReason: "concurrency cap 1 reached (1 in flight)"}
+	if err := q.Restore(task); err != nil {
+		t.Fatalf("Restore: %v", err)
+	}
+	if task.HeldReason != "" {
+		t.Errorf("expected a restored task to carry no hold, got %q", task.HeldReason)
+	}
+	if task.Status != TaskStatusPending {
+		t.Errorf("expected a restored task to be PENDING, got %s", task.Status)
+	}
+}

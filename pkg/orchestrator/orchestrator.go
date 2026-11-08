@@ -1,13 +1,22 @@
 package orchestrator
 
 import (
+	"errors"
 	"fmt"
 	"sync"
 	"time"
 
+	"hotelier/pkg/config"
 	"hotelier/pkg/queue"
 	"hotelier/pkg/registry"
 )
+
+// ErrConcurrencyCapReached is returned by AssignTask when the concurrency cap
+// already covers everything in flight (issue #249). It is a distinct error so
+// that "held back by the schedule" never reads like "no guest with the right
+// tags is available": one is night mode resolving as designed, the other is a
+// dead pool an operator has to fix.
+var ErrConcurrencyCapReached = errors.New("concurrency cap reached")
 
 // Orchestrator is the single source of truth for task/guest lifecycle state.
 //
@@ -25,6 +34,21 @@ type Orchestrator struct {
 	store    *queue.Store // optional: persists non-terminal tasks to disk (issue #190)
 	mu       sync.Mutex   // single lock for all compound mutations
 	logf     func(format string, args ...interface{})
+	// concurrencyCap is the cap on how many tasks may be in flight, pushed in
+	// by the server whenever the schedule or the config says it changed
+	// (issue #249). Negative means unlimited, in the vocabulary
+	// config.EffectiveConcurrency uses (config.ConcurrencyUnlimited), and the
+	// constructors start there, so an orchestrator nobody configures assigns
+	// exactly as it did before the cap existed.
+	//
+	// The cap is a value rather than a callback on purpose: the server takes
+	// its own lock before the orchestrator's (see Server.Reload), so pulling
+	// the cap through a closure here would invert that order and deadlock.
+	concurrencyCap int
+	// lastHoldLog deduplicates the "held by the cap" line: guests poll for
+	// work every heartbeat, so night mode would otherwise repeat the same
+	// sentence thousands of times a night (issue #249).
+	lastHoldLog string
 }
 
 // New creates a new Orchestrator wrapping the given queue and registry.
@@ -35,6 +59,8 @@ func New(logf func(format string, args ...interface{})) *Orchestrator {
 		queue:    q,
 		registry: r,
 		logf:     logf,
+		// Uncapped until the server pushes a cap in (issue #249).
+		concurrencyCap: config.ConcurrencyUnlimited,
 	}
 }
 
@@ -45,6 +71,8 @@ func NewWithExisting(q *queue.TaskQueue, r *registry.GuestRegistry, logf func(fo
 		queue:    q,
 		registry: r,
 		logf:     logf,
+		// Uncapped until the server pushes a cap in (issue #249).
+		concurrencyCap: config.ConcurrencyUnlimited,
 	}
 }
 
@@ -174,6 +202,10 @@ func (o *Orchestrator) GetGuest(guestID string) (*registry.Guest, bool) {
 //
 // Task: PENDING → ASSIGNED (with AssignedTo, AssignedAt)
 // Guest: IDLE → RUNNING (with TaskID)
+//
+// It is the choke point every assignment path runs through, which is where the
+// concurrency cap is enforced: with as many tasks in flight as the cap allows,
+// the task stays PENDING and ErrConcurrencyCapReached is returned (issue #249).
 func (o *Orchestrator) AssignTask(taskID, guestID string) error {
 	o.mu.Lock()
 	defer o.mu.Unlock()
@@ -198,10 +230,18 @@ func (o *Orchestrator) AssignTask(taskID, guestID string) error {
 		return fmt.Errorf("task %s is not pending (status: %s)", taskID, task.Status)
 	}
 
+	// The cap is checked here, under the same lock that flips the task and
+	// the guest, so the count and the assignment are one atomic step and no
+	// caller path can slip past it (issue #249).
+	if !o.admitsNewWorkInternal(taskID) {
+		return o.capErrorInternal(taskID)
+	}
+
 	// Atomic update: task + guest
 	task.Status = queue.TaskStatusAssigned
 	task.AssignedTo = guestID
 	task.AssignedAt = time.Now()
+	task.HeldReason = ""
 
 	guest.TaskID = taskID
 	guest.State = registry.GuestStateRunning
@@ -449,12 +489,18 @@ func (o *Orchestrator) TryAssignNext() bool {
 		return false
 	}
 
+	// Same gate as AssignTask, under the same lock (issue #249).
+	if !o.admitsNewWorkInternal(task.ID) {
+		return false
+	}
+
 	guest := guests[0]
 
 	// Atomic assign (internal, lock already held)
 	task.Status = queue.TaskStatusAssigned
 	task.AssignedTo = guest.ID
 	task.AssignedAt = time.Now()
+	task.HeldReason = ""
 
 	guest.TaskID = task.ID
 	guest.State = registry.GuestStateRunning
@@ -463,6 +509,106 @@ func (o *Orchestrator) TryAssignNext() bool {
 	o.persistTask(task)
 	o.logf("task %s auto-assigned to guest %s", task.ID, guest.ID)
 	return true
+}
+
+// SetConcurrencyCap sets the cap on how many tasks may be in flight at once
+// (issue #249). A negative value (config.ConcurrencyUnlimited) means no cap;
+// 0 means start nothing, which is how an overnight schedule entry pauses the
+// queue. It gates *starting* work only: tasks already ASSIGNED or RUNNING
+// finish normally whatever the cap says now.
+//
+// The caller — the server — is responsible for re-resolving the cap against
+// the schedule and pushing it here on reload and on every schedule boundary.
+func (o *Orchestrator) SetConcurrencyCap(newCap int) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+
+	if o.concurrencyCap == newCap {
+		return
+	}
+	o.concurrencyCap = newCap
+	// A different cap makes the previous "held" line stale, so the next hold
+	// is worth logging again.
+	o.lastHoldLog = ""
+}
+
+// ConcurrencyCap returns the cap currently in force. Negative means no cap.
+func (o *Orchestrator) ConcurrencyCap() int {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+
+	return o.concurrencyCap
+}
+
+// InFlightCount returns the number of tasks in flight: ASSIGNED or RUNNING.
+// That is the number the concurrency cap is compared against (issue #249).
+func (o *Orchestrator) InFlightCount() int {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+
+	return o.inFlightCountInternal()
+}
+
+// AdmitsNewWork reports whether the cap leaves room for a task to start now,
+// recording the hold in the task and the log when it does not (issue #249).
+// Callers use it to answer "why is this still PENDING?" on a path that never
+// reaches AssignTask because no guest looked eligible, and so must not report
+// a cap hold it did not attempt.
+func (o *Orchestrator) AdmitsNewWork(taskID string) bool {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+
+	return o.admitsNewWorkInternal(taskID)
+}
+
+// inFlightCountInternal counts the tasks the cap must leave room for. The
+// caller must hold o.mu.
+func (o *Orchestrator) inFlightCountInternal() int {
+	n := 0
+	for _, task := range o.queue.GetAllTasks() {
+		if task.Status == queue.TaskStatusAssigned || task.Status == queue.TaskStatusRunning {
+			n++
+		}
+	}
+	return n
+}
+
+// admitsNewWorkInternal reports whether a new task may start now, and records
+// the refusal in the task and the log when it may not. The caller must hold
+// o.mu, which is what makes the count and the assignment atomic.
+func (o *Orchestrator) admitsNewWorkInternal(taskID string) bool {
+	// Negative is config.ConcurrencyUnlimited: no cap in force, so work
+	// starts exactly as it did before the cap existed (issue #249).
+	if o.concurrencyCap < 0 {
+		return true
+	}
+
+	inFlight := o.inFlightCountInternal()
+	if inFlight < o.concurrencyCap {
+		return true
+	}
+
+	// Legible in state, so "waiting on the schedule" is distinguishable from
+	// "no guest with the right tags", which leaves the field empty.
+	if task, ok := o.queue.Get(taskID); ok {
+		task.HeldReason = fmt.Sprintf("concurrency cap %d reached (%d in flight)", o.concurrencyCap, inFlight)
+	}
+
+	// Legible in the log, once per distinct state rather than once per poll.
+	key := fmt.Sprintf("%s:%d:%d", taskID, o.concurrencyCap, inFlight)
+	if key != o.lastHoldLog {
+		o.lastHoldLog = key
+		o.logf("task %s held back by the concurrency cap: %d in flight, cap %d (queue is waiting on the schedule, not on guest availability)",
+			taskID, inFlight, o.concurrencyCap)
+	}
+	return false
+}
+
+// capErrorInternal states the refusal for a specific task. The caller must
+// hold o.mu.
+func (o *Orchestrator) capErrorInternal(taskID string) error {
+	return fmt.Errorf("%w: task %s, %d in flight, cap %d", ErrConcurrencyCapReached,
+		taskID, o.inFlightCountInternal(), o.concurrencyCap)
 }
 
 // --- Read-Only Delegation ---
