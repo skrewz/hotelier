@@ -92,6 +92,50 @@ func waitForTaskRunning(t *testing.T, g *Guest, taskID string) {
 	}
 }
 
+// waitFor blocks until cond holds, failing the test after a generous deadline.
+// It replaces the sleeps that used to stand between an action and a positive
+// assertion: the check is made as soon as the state arrives, not after an
+// arbitrary pause (issue #252 review).
+func waitFor(t *testing.T, what string, cond func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(3 * time.Second)
+	for !cond() {
+		if time.Now().After(deadline) {
+			t.Fatalf("%s never happened", what)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// neverWindow is how long a negative assertion watches for something that must
+// not happen. Unlike the fixed sleeps it replaces it is not a guess at how long
+// "never" takes: the condition is polled throughout the window, so the test
+// fails the instant the forbidden state appears and passes only once the whole
+// window has passed without it — the shape a select on a channel gives, which a
+// sync.Map offers no handle on (issue #252 review; the class of flake a7abc90
+// fixed).
+const neverWindow = 2 * time.Second
+
+func assertNever(t *testing.T, what string, within time.Duration, appeared func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(within)
+	for {
+		if appeared() {
+			t.Errorf("%s happened within %s, but must never happen", what, within)
+			return
+		}
+		remaining := time.Until(deadline)
+		if remaining <= 0 {
+			return
+		}
+		if remaining < 10*time.Millisecond {
+			time.Sleep(remaining)
+		} else {
+			time.Sleep(10 * time.Millisecond)
+		}
+	}
+}
+
 func assignParams(t *testing.T, task TaskAssignment) json.RawMessage {
 	t.Helper()
 	params, err := json.Marshal(task)
@@ -154,12 +198,10 @@ func TestGuest_RevokedQueuedClaimNeverStarts(t *testing.T) {
 	}
 
 	close(release1)
-	// Give the dispatcher time to (incorrectly) pick task-2 up.
-	time.Sleep(300 * time.Millisecond)
-
-	if _, ok := started.Load("task-2"); ok {
-		t.Error("revoked task-2 was executed — the claim outlived the re-queue (issue #252)")
-	}
+	assertNever(t, "revoked task-2", neverWindow, func() bool {
+		_, ok := started.Load("task-2")
+		return ok
+	})
 	if !logs.contains("cancelled before start") {
 		t.Errorf("expected the drop to be logged as 'cancelled before start', got:\n%s", logs.String())
 	}
@@ -252,11 +294,10 @@ func TestGuest_CancelTaskTheGuestDoesNotHoldIsANoOp(t *testing.T) {
 	if !g.hub.InvokeNotificationHandler("task.cancel", cancelParams(t, TaskCancel{TaskID: "task-never-assigned", Reason: "re-queued"})) {
 		t.Fatal("no task.cancel handler registered")
 	}
-	time.Sleep(100 * time.Millisecond)
-
-	if _, ok := ran.Load("task-never-assigned"); ok {
-		t.Error("a cancel for a task the guest does not hold must not start it")
-	}
+	assertNever(t, "the unheld task", neverWindow, func() bool {
+		_, ok := ran.Load("task-never-assigned")
+		return ok
+	})
 	calls := cap.all()
 	if len(calls) != 1 || calls[0]["action"] != cancelActionNotHeld {
 		t.Errorf("expected a single not_held confirmation, got %v", calls)
@@ -439,7 +480,10 @@ func TestGuest_TwoGuestsOneTask_ExactlyOneExecutes(t *testing.T) {
 	if _, ok := executed.Load("shared-1"); !ok {
 		t.Fatal("the task was never executed by either guest")
 	}
-	time.Sleep(300 * time.Millisecond)
+	assertNever(t, "guest B's acknowledgement of the revoked claim", neverWindow, func() bool {
+		_, ok := acked.Load(guestB.ID() + "/shared-1")
+		return ok
+	})
 
 	if _, ok := acked.Load(guestB.ID() + "/shared-1"); ok {
 		t.Error("guest B acknowledged a claim the host had revoked — the ack-failure counter would climb")
@@ -577,12 +621,12 @@ func TestGuest_RevokeAbortsRunningTask_ReportsNoResult(t *testing.T) {
 		time.Sleep(10 * time.Millisecond)
 	}
 
-	// Give any (incorrect) guest.result time to arrive, then assert none
-	// did: the revoked guest reports nothing and leaves the fate to the
-	// host.
-	time.Sleep(300 * time.Millisecond)
-	if got := results.capturedResults(); len(got) != 0 {
-		t.Errorf("a revoked-while-running task must not report a result, got %+v", got)
+	// No guest.result may arrive: the revoked guest reports nothing and
+	// leaves the fate to the host. waitForResults fails the check the moment
+	// one does rather than after a fixed pause.
+	if results.waitForResults(1, neverWindow) {
+		t.Errorf("a revoked-while-running task must not report a result, got %+v",
+			results.capturedResults())
 	}
 	if !logs.contains("revoked while running; not reporting the result") {
 		t.Errorf("expected the suppressed result to be logged, got:\n%s", logs.String())
@@ -647,11 +691,11 @@ func TestGuest_DuplicateAssignForQueuedTaskIsDropped(t *testing.T) {
 		t.Fatal("the queued task never ran")
 	}
 	// The single held copy ran exactly once: nothing was buffered twice for
-	// the dispatcher to decline and re-queue.
-	time.Sleep(200 * time.Millisecond)
-	if g.holdsClaim("task-2") {
-		t.Error("task-2's claim outlived its completion")
-	}
+	// the dispatcher to decline and re-queue, and no second claim record
+	// appeared for it either.
+	assertNever(t, "task-2's claim record reappearing", neverWindow, func() bool {
+		return g.holdsClaim("task-2")
+	})
 }
 
 // TestGuest_QueuedClaimIsHeldTheMomentAssignIsHandled closes the window the
@@ -699,10 +743,10 @@ func TestGuest_QueuedClaimIsHeldTheMomentAssignIsHandled(t *testing.T) {
 	}
 
 	close(release1)
-	time.Sleep(200 * time.Millisecond)
-	if _, ok := started.Load("task-2"); ok {
-		t.Error("the revoked task-2 was executed despite the cancelled_before_start confirmation")
-	}
+	assertNever(t, "task-2 after a cancelled_before_start confirmation", neverWindow, func() bool {
+		_, ok := started.Load("task-2")
+		return ok
+	})
 }
 
 // TestGuest_QueueFullAssignmentLeavesNoClaim asserts the undo half of the
@@ -778,19 +822,17 @@ func TestGuest_DispatcherExitPrunesQueuedClaims(t *testing.T) {
 	}
 
 	cancelDispatcher()
-	time.Sleep(200 * time.Millisecond)
+	waitFor(t, "the exited dispatcher to prune the queued claim", func() bool {
+		return !g.holdsClaim("task-pending")
+	})
 
 	g.mu.Lock()
 	g.running = false
 	g.mu.Unlock()
-	time.Sleep(100 * time.Millisecond)
-
-	if g.holdsClaim("task-pending") {
-		t.Error("the claim survived the dispatcher's exit")
-	}
-	if _, ok := started.Load("task-pending"); ok {
-		t.Error("the dropped task ran anyway after the dispatcher exited")
-	}
+	assertNever(t, "the dropped task", neverWindow, func() bool {
+		_, ok := started.Load("task-pending")
+		return ok
+	})
 }
 
 // TestGuest_AlreadyRunningDeclinePrunesClaims is the second pruning hole:

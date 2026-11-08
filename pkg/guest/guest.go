@@ -171,8 +171,11 @@ type Guest struct {
 	// handler return an error, but that error is not the task's fate: the
 	// host re-queued the task elsewhere and ExecuteTask must not report a
 	// result for it, or the guest the host took the claim back from would
-	// decide the fate after all (issue #252 review). Consumed by
-	// claimRevokedWhileRunning when the aborted handler unwinds.
+	// decide the fate after all (issue #252 review). The record belongs to
+	// the run that was aborted: claimRevokedWhileRunning consumes it as that
+	// handler unwinds, and a run starting clears any earlier one for the
+	// same task, so a re-assignment of a given-up task is neither filed as a
+	// duplicate nor silenced by a stale marker.
 	givenUp  map[string]struct{}
 	counters claimCounters
 	stopCh   chan struct{}
@@ -289,7 +292,8 @@ func (g *Guest) registerNotificationHandlers() {
 		// a task the guest did hold.
 		g.mu.Lock()
 		_, alreadyHeld := g.claims[task.TaskID]
-		if g.currentTaskID == task.TaskID || alreadyHeld {
+		_, givenUp := g.givenUp[task.TaskID]
+		if (g.currentTaskID == task.TaskID && !givenUp) || alreadyHeld {
 			// Deduplicate: the guest already holds this exact task, running
 			// or queued. This can happen when the guest reconnects and the
 			// server re-sends an assignment it already has. The claims map is
@@ -297,15 +301,20 @@ func (g *Guest) registerNotificationHandlers() {
 			// buffered a re-sent assignment twice, and the dispatcher's
 			// "already running" decline for the second copy handed back work
 			// that was in flight (#252 review).
+			//
+			// A task the guest has given up mid-flight is not one it holds:
+			// the revoke-abort is still unwinding and the host has re-queued
+			// the work, so the re-assignment must be queued and run after the
+			// unwind. The give-up record stays untouched for the aborted run
+			// to consume — clearing it here is what let that run report a
+			// result for a task this guest no longer owns (#252 review).
 			delete(g.revoked, task.TaskID)
-			delete(g.givenUp, task.TaskID)
 			g.mu.Unlock()
 			g.log.Printf("[RPC] ignoring duplicate task.assign for %s (already held)", task.TaskID)
 			return
 		}
 		g.claims[task.TaskID] = struct{}{}
 		delete(g.revoked, task.TaskID)
-		delete(g.givenUp, task.TaskID)
 		g.mu.Unlock()
 
 		g.log.Printf("[RPC] dispatching task %s to execution", task.TaskID)
@@ -1160,6 +1169,11 @@ func (g *Guest) ExecuteTask(task TaskAssignment) (*TaskResult, error) {
 	}
 
 	delete(g.claims, task.TaskID)
+	// The run that starts here is not one the host revoked: a give-up left
+	// over from an earlier run of the same task must not silence this one's
+	// result. The aborted run consumes its own record as it unwinds, before
+	// the dispatcher can reach this point again.
+	delete(g.givenUp, task.TaskID)
 	g.running = true
 	g.currentTaskID = task.TaskID
 	g.mu.Unlock()
