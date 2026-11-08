@@ -511,6 +511,14 @@ func TestGuest_CancelNamesTheRunningTask_AbortsItAndConfirms(t *testing.T) {
 	// resolves the confirmation as a cancel and the result lands on a
 	// task it has already ended. Only a revoke suppresses the result
 	// (#252 review).
+	//
+	// The confirmation is sent by the cancel handler while this task's
+	// handler is still unwinding, so it can arrive before the result it
+	// does not suppress — wait for the result rather than reading it at
+	// the moment the confirmation is seen.
+	if !results.waitForResults(1, 3*time.Second) {
+		t.Fatal("the cancelled task never reported its result")
+	}
 	if got := results.capturedResults(); len(got) != 1 || got[0].TaskID != "task-run" {
 		t.Errorf("expected one guest.result for the cancelled task, got %+v", got)
 	}
