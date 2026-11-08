@@ -8,6 +8,7 @@ import (
 	"log"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -869,4 +870,79 @@ func TestGuest_AlreadyRunningDeclinePrunesClaims(t *testing.T) {
 	g.running = false
 	g.currentTaskID = ""
 	g.mu.Unlock()
+}
+
+// TestGuest_ReassignmentDuringRevokeAbort_RunsOnce closes the dedup hole the
+// abort leaves open: a given-up record only exists while the aborted run is
+// current, so a re-assignment of the re-queued task arriving while that run is
+// still unwinding looks exactly like a duplicate assignment. Filing it as one
+// drops the work the host just handed back and clears the record that keeps
+// the aborted run quiet — the stray result the revocation is meant to
+// suppress, back through a narrower door (issue #252 review).
+func TestGuest_ReassignmentDuringRevokeAbort_RunsOnce(t *testing.T) {
+	srv, wsURL, results := startTestServerWithCapture(t)
+	cap := &cancelCapture{}
+	captureCancels(srv.Hub(), cap)
+
+	var runs atomic.Int64
+	aborted := make(chan struct{})
+	release := make(chan struct{})
+	g := newConnectedGuest(t, wsURL, func(ctx context.Context, task TaskAssignment, _ LogCallback) (*TaskResult, error) {
+		if runs.Add(1) == 1 {
+			// First run: aborted by the revoke, and slow to unwind — the
+			// re-assignment lands while this handler is still returning.
+			<-ctx.Done()
+			close(aborted)
+			<-release
+			return nil, ctx.Err()
+		}
+		return &TaskResult{TaskID: task.TaskID, Success: true}, nil
+	})
+	logs := &logRecorder{}
+	g.log = log.New(logs, "", 0)
+	go g.taskDispatcher(context.Background())
+
+	if !g.hub.InvokeNotificationHandler("task.assign", assignParams(t, TaskAssignment{TaskID: "task-run", Prompt: "p"})) {
+		t.Fatal("no task.assign handler registered")
+	}
+	waitForTaskRunning(t, g, "task-run")
+
+	if !g.hub.InvokeNotificationHandler("task.cancel", cancelParams(t, TaskCancel{TaskID: "task-run", Reason: "re-queued", Intent: "revoke"})) {
+		t.Fatal("no task.cancel handler registered")
+	}
+	select {
+	case <-aborted:
+	case <-time.After(3 * time.Second):
+		t.Fatal("the running task was not aborted by the revoke")
+	}
+
+	// The host re-queued the task and the next heartbeat hands it back to
+	// this same guest — the common single-guest case — before the aborted
+	// handler has returned.
+	if !g.hub.InvokeNotificationHandler("task.assign", assignParams(t, TaskAssignment{TaskID: "task-run", Prompt: "p"})) {
+		t.Fatal("no task.assign handler registered")
+	}
+	if logs.contains("ignoring duplicate task.assign") {
+		t.Errorf("a task whose claim the guest gave up is not one it holds; the re-assignment must be queued, got:\n%s", logs.String())
+	}
+
+	close(release)
+
+	deadline := time.Now().Add(3 * time.Second)
+	for runs.Load() < 2 {
+		if time.Now().After(deadline) {
+			t.Fatalf("the re-assigned task never ran after the abort unwound (runs=%d)", runs.Load())
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	// Exactly one result — the second run's. The aborted run must stay
+	// silent: its error is a revoked claim, not the task's fate, and the
+	// task is running again here.
+	if !results.waitForResults(1, 3*time.Second) {
+		t.Fatal("the re-assigned task never reported its result")
+	}
+	if got := results.capturedResults(); len(got) != 1 || !got[0].Success || got[0].Error != "" {
+		t.Errorf("expected one successful result from the re-assigned run and silence from the aborted one, got %+v", got)
+	}
 }
