@@ -354,3 +354,50 @@ func TestSetConcurrencyCap_DefaultsToUnlimited(t *testing.T) {
 		t.Fatalf("a fresh orchestrator must be uncapped: %v", err)
 	}
 }
+
+// TestPendingHeldByCapCount pins the distinction issue #250 exists to make:
+// work the cap cannot start must be countable separately from work the pool
+// could take. The count follows the cap and the queue, not the holds the last
+// assignment pass happened to record.
+func TestPendingHeldByCapCount(t *testing.T) {
+	// The cap has room for everything the queue holds, so nothing in it is
+	// waiting on the cap.
+	roomy, _ := newCappedOrchestrator(t, 3)
+	for _, id := range []string{"a1", "a2"} {
+		addPending(t, roomy, id)
+	}
+	if got := roomy.PendingHeldByCapCount(); got != 0 {
+		t.Errorf("expected 0 with room in the cap, got %d", got)
+	}
+
+	// A cap of 1 with nothing in flight still lets one task start, so two of
+	// the three are waiting on the cap rather than on guest matching.
+	full, _ := newCappedOrchestrator(t, 1)
+	_ = full.RegisterGuest("g1", "G1", nil)
+	for _, id := range []string{"b1", "b2", "b3"} {
+		addPending(t, full, id)
+	}
+	if got := full.PendingHeldByCapCount(); got != 2 {
+		t.Errorf("expected 2 waiting on the cap with the slot free, got %d", got)
+	}
+
+	// The slot fills: now none of the queue can start, whatever the pool does.
+	if err := full.AssignTask("b1", "g1"); err != nil {
+		t.Fatalf("AssignTask b1: %v", err)
+	}
+	if got := full.PendingHeldByCapCount(); got != 2 {
+		t.Errorf("expected 2 waiting on a full cap, got %d", got)
+	}
+
+	// An overnight cap of 0 holds the whole queue.
+	full.SetConcurrencyCap(0)
+	if got := full.PendingHeldByCapCount(); got != 3 {
+		t.Errorf("expected all 3 pending tasks held by a cap of 0, got %d", got)
+	}
+
+	// An unlimited cap holds nothing, however long the queue is.
+	full.SetConcurrencyCap(config.ConcurrencyUnlimited)
+	if got := full.PendingHeldByCapCount(); got != 0 {
+		t.Errorf("expected an unlimited cap to hold nothing back, got %d", got)
+	}
+}

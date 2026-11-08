@@ -2330,9 +2330,57 @@ func (s *Server) HandleGuests(w http.ResponseWriter, r *http.Request) {
 			"heartbeat_interval": s.effectiveHeartbeatInterval(),
 			"silence_timeout":    s.cfg.SilenceTimeout,
 			"stats":              s.claimStats(),
+			// The concurrency picture rides along on the poll the dashboard
+			// already makes, so the cap is visible without a second request
+			// (issue #250).
+			"concurrency": s.concurrencyStatus(now),
 		})
 	default:
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+// concurrencyStatus is the concurrency picture for the status surface
+// (issue #250): the cap in force right now, the entry of the schedule that
+// produced it, how much work is in flight against it, how much more the cap
+// is holding back, and the next boundary at which the number changes.
+//
+// The cap comes from the config resolver — the same source of truth
+// enforcement reads — so the number an operator sees is the number the next
+// assignment decision will obey. The counts come from the orchestrator, which
+// is where they are decided.
+func (s *Server) concurrencyStatus(now time.Time) map[string]interface{} {
+	s.mu.RLock()
+	status := s.cfg.ConcurrencyStatus(now)
+	s.mu.RUnlock()
+
+	// Say the unlimited case in words: a bare -1 would read as a broken
+	// number rather than as "no cap" (the same wording /api/health uses).
+	var capLabel interface{} = status.Cap
+	if status.Cap == config.ConcurrencyUnlimited {
+		capLabel = "unlimited"
+	}
+
+	var next interface{}
+	if status.HasNextChange() {
+		next = map[string]interface{}{
+			"at":       status.NextAt,
+			"time":     status.NextChangeAt,
+			"cap":      status.NextCap,
+			"timezone": status.Timezone,
+		}
+	}
+
+	return map[string]interface{}{
+		"cap":    capLabel,
+		"source": status.Source,
+		// "in_flight" is the ASSIGNED or RUNNING count the cap is measured
+		// against; "waiting_on_cap" is the pending work there is no room for.
+		// Idle guests alongside a non-zero waiting_on_cap mean the schedule,
+		// not the pool, is what the queue is stuck on.
+		"in_flight":      s.orchestrator.InFlightCount(),
+		"waiting_on_cap": s.orchestrator.PendingHeldByCapCount(),
+		"next_change":    next,
 	}
 }
 

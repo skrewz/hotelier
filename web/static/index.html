@@ -423,6 +423,13 @@
                 <div class="stat-value" id="running-count">0</div>
                 <div class="stat-label">Running</div>
             </div>
+            <!-- The live concurrency cap and what is held behind it (issue #250).
+                 The value is "in flight / cap"; the label carries the next
+                 scheduled change and any queue the cap is holding back. -->
+            <div class="stat">
+                <div class="stat-value" id="concurrency-count">—</div>
+                <div class="stat-label" id="concurrency-label">Concurrency</div>
+            </div>
         </div>
         <!-- Draw-down control for the sidebar panels (issue #234). Shown only
              at narrow viewports, where the sidebar is collapsed by default. -->
@@ -657,6 +664,32 @@
             document.getElementById('task-count').textContent = tasks.count || 0;
             document.getElementById('idle-count').textContent = (guests.guests || []).filter(a => a.state === 'IDLE').length;
             document.getElementById('running-count').textContent = (guests.guests || []).filter(a => a.state === 'RUNNING').length;
+            renderConcurrency(guests.concurrency);
+        }
+
+        // renderConcurrency draws the one-line concurrency picture (issue #250):
+        // "2/4" in flight against the cap in force, and in the label where that
+        // cap came from next ("next 23:00 → 4") and how much pending work the
+        // cap itself is holding back. A non-zero "waiting on cap" next to idle
+        // guests is the signal that the schedule, not the pool, is what the
+        // queue is stuck on.
+        function renderConcurrency(c) {
+            const value = document.getElementById('concurrency-count');
+            const label = document.getElementById('concurrency-label');
+            if (!c || c.cap === undefined || c.cap === null) {
+                value.textContent = '—';
+                label.textContent = 'Concurrency';
+                return;
+            }
+            value.textContent = (c.in_flight || 0) + '/' + c.cap;
+            const bits = ['Concurrency'];
+            if (c.next_change && c.next_change.at) {
+                bits.push('next ' + c.next_change.at + ' → ' + c.next_change.cap);
+            }
+            if (c.waiting_on_cap > 0) {
+                bits.push(c.waiting_on_cap + ' waiting on cap');
+            }
+            label.textContent = bits.join(' · ');
         }
 
         // indexGuestHosts records the host each guest reported at registration

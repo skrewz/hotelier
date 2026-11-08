@@ -435,3 +435,171 @@ func TestValidateConcurrency_Method(t *testing.T) {
 		t.Error("expected a negative static cap to be rejected")
 	}
 }
+
+// --- ConcurrencyStatus (issue #250): the cap, where it came from, what is next ---
+
+func TestConcurrencyStatus_NamesScheduleEntryInForce(t *testing.T) {
+	cfg := dayNightSchedule("UTC")
+
+	status := cfg.ConcurrencyStatus(utc(15, 12, 0))
+
+	if status.Cap != 2 {
+		t.Errorf("expected cap 2 from the 07:00 entry, got %d", status.Cap)
+	}
+	if status.Source != `concurrency_schedule at "07:00"` {
+		t.Errorf("expected the source to name the 07:00 entry, got %q", status.Source)
+	}
+	if status.NextAt != "23:00" || status.NextCap != 4 {
+		t.Errorf("expected the next change at 23:00 to 4, got %q -> %d", status.NextAt, status.NextCap)
+	}
+	if want := utc(15, 23, 0); !status.NextChangeAt.Equal(want) {
+		t.Errorf("expected the next change at %s, got %s", want, status.NextChangeAt)
+	}
+	if status.Timezone != "UTC" {
+		t.Errorf("expected the timezone to be reported, got %q", status.Timezone)
+	}
+}
+
+func TestConcurrencyStatus_NextChangeWrapsPastMidnight(t *testing.T) {
+	cfg := dayNightSchedule("UTC")
+
+	// 23:30 is past the last entry, so the next change is tomorrow's first.
+	status := cfg.ConcurrencyStatus(utc(15, 23, 30))
+
+	if status.Cap != 4 {
+		t.Errorf("expected cap 4 after 23:00, got %d", status.Cap)
+	}
+	if want := utc(16, 7, 0); !status.NextChangeAt.Equal(want) {
+		t.Errorf("expected the next change to be tomorrow's 07:00 (%s), got %s", want, status.NextChangeAt)
+	}
+	if status.NextAt != "07:00" || status.NextCap != 2 {
+		t.Errorf("expected the next change to be 07:00 -> 2, got %q -> %d", status.NextAt, status.NextCap)
+	}
+}
+
+func TestConcurrencyStatus_StaticCapHasNoNextChange(t *testing.T) {
+	status := (ServerConfig{MaxConcurrentTasks: 7}).ConcurrencyStatus(utc(15, 12, 0))
+
+	if status.Cap != 7 {
+		t.Errorf("expected the static cap 7, got %d", status.Cap)
+	}
+	if status.Source != "max_concurrent_tasks" {
+		t.Errorf("expected the source to be max_concurrent_tasks, got %q", status.Source)
+	}
+	if !status.NextChangeAt.IsZero() {
+		t.Errorf("expected no scheduled change without a schedule, got %s", status.NextChangeAt)
+	}
+}
+
+func TestConcurrencyStatus_UnlimitedIsReportedAsUnlimited(t *testing.T) {
+	status := (ServerConfig{}).ConcurrencyStatus(utc(15, 12, 0))
+
+	if status.Cap != ConcurrencyUnlimited {
+		t.Errorf("expected ConcurrencyUnlimited, got %d", status.Cap)
+	}
+	if status.Source != "max_concurrent_tasks" {
+		t.Errorf("expected the source to be max_concurrent_tasks, got %q", status.Source)
+	}
+}
+
+// TestConcurrencyStatus_BoundaryThatChangesNothingIsNotAChange: the "next
+// scheduled change" is a change in the number, not a tick of the clock. A
+// schedule whose next entry repeats the current cap must not be reported as a
+// change, or the dashboard would keep promising a boundary that does nothing.
+func TestConcurrencyStatus_BoundaryThatChangesNothingIsNotAChange(t *testing.T) {
+	cfg := ServerConfig{
+		ScheduleTimezone: "UTC",
+		ConcurrencySchedule: []ConcurrencyScheduleEntry{
+			{At: "07:00", Concurrency: 2},
+			{At: "23:00", Concurrency: 2},
+		},
+	}
+
+	status := cfg.ConcurrencyStatus(utc(15, 12, 0))
+
+	if status.Cap != 2 {
+		t.Fatalf("expected cap 2, got %d", status.Cap)
+	}
+	if !status.NextChangeAt.IsZero() {
+		t.Errorf("expected no change while every entry carries the same cap, got %s", status.NextChangeAt)
+	}
+}
+
+func TestConcurrencyStatus_InZoneAcrossDST(t *testing.T) {
+	cfg := dayNightSchedule("Australia/Sydney")
+
+	// 20:30Z is 06:30 AEST: the 23:00 entry still holds, and the 07:00
+	// boundary is half an hour away in local time.
+	status := cfg.ConcurrencyStatus(time.Date(2026, 7, 6, 20, 30, 0, 0, time.UTC))
+
+	if status.Cap != 4 {
+		t.Errorf("expected cap 4 at 06:30 AEST, got %d", status.Cap)
+	}
+	if want := time.Date(2026, 7, 6, 21, 0, 0, 0, time.UTC); !status.NextChangeAt.Equal(want) {
+		t.Errorf("expected the 07:00 AEST boundary at %s, got %s", want, status.NextChangeAt)
+	}
+	if status.NextAt != "07:00" || status.NextCap != 2 {
+		t.Errorf("expected 07:00 -> 2, got %q -> %d", status.NextAt, status.NextCap)
+	}
+	if status.Timezone != "Australia/Sydney" {
+		t.Errorf("expected the reported timezone to be Australia/Sydney, got %q", status.Timezone)
+	}
+}
+
+// TestConcurrencyStatus_FallsBackLikeEffectiveConcurrency: a schedule the
+// resolver cannot trust reports the static cap and no change, exactly as
+// EffectiveConcurrency does — the two must never disagree.
+func TestConcurrencyStatus_FallsBackLikeEffectiveConcurrency(t *testing.T) {
+	for _, cfg := range []ServerConfig{
+		{MaxConcurrentTasks: 5, ScheduleTimezone: "Not/AZone", ConcurrencySchedule: []ConcurrencyScheduleEntry{{At: "07:00", Concurrency: 1}}},
+		{MaxConcurrentTasks: 5, ConcurrencySchedule: []ConcurrencyScheduleEntry{{At: "7am", Concurrency: 1}}},
+	} {
+		status := cfg.ConcurrencyStatus(utc(15, 12, 0))
+		if status.Cap != cfg.EffectiveConcurrency(utc(15, 12, 0)) {
+			t.Errorf("status cap %d disagrees with EffectiveConcurrency %d for %+v",
+				status.Cap, cfg.EffectiveConcurrency(utc(15, 12, 0)), cfg)
+		}
+		if !status.NextChangeAt.IsZero() {
+			t.Errorf("expected no scheduled change from an untrusted schedule, got %s", status.NextChangeAt)
+		}
+	}
+}
+
+// TestConcurrencyStatus_AgreesWithEffectiveConcurrencyAcrossTheDay: one
+// resolution, two readers. The status surface and the enforcement path must
+// never state different caps.
+func TestConcurrencyStatus_AgreesWithEffectiveConcurrencyAcrossTheDay(t *testing.T) {
+	cfg := dayNightSchedule("Australia/Sydney")
+
+	start := time.Date(2026, 7, 6, 0, 0, 0, 0, time.UTC)
+	for minute := 0; minute < 24*60; minute++ {
+		now := start.Add(time.Duration(minute) * time.Minute)
+		if got, want := cfg.ConcurrencyStatus(now).Cap, cfg.EffectiveConcurrency(now); got != want {
+			t.Fatalf("at %s: status cap %d, EffectiveConcurrency %d", now, got, want)
+		}
+	}
+}
+
+// TestConcurrencyStatus_NextChangeIsAlwaysInTheFuture is the property the
+// dashboard depends on: a reported boundary must lie ahead of the reading it
+// came from, on a day whose wall clock repeats an hour. Sydney's autumn
+// transition (2026-04-05, 03:00 AEDT back to 02:00 AEST) is the day where
+// finding the next boundary by minute alone would point at the past.
+func TestConcurrencyStatus_NextChangeIsAlwaysInTheFuture(t *testing.T) {
+	cfg := dayNightSchedule("Australia/Sydney")
+
+	start := time.Date(2026, 4, 4, 20, 0, 0, 0, time.UTC) // 06:00 AEDT on the 5th
+	for minute := 0; minute < 26*60; minute++ {
+		now := start.Add(time.Duration(minute) * time.Minute)
+		status := cfg.ConcurrencyStatus(now)
+		if !status.HasNextChange() {
+			continue
+		}
+		if !status.NextChangeAt.After(now) {
+			t.Fatalf("at %s: reported a next change in the past (%s)", now, status.NextChangeAt)
+		}
+		if status.NextCap == status.Cap {
+			t.Fatalf("at %s: reported a change to the cap already in force (%d)", now, status.NextCap)
+		}
+	}
+}

@@ -105,7 +105,7 @@ schedule boundary, which the server notices within seconds with no new task and
 no guest poll — the queue drains to the new cap on its own.
 
 A queue the cap is holding back looks different from a pool with no matching
-guest, in all three places an operator reads:
+guest, in the four places an operator reads:
 
 - the log: `task <id> held back by the concurrency cap: 2 in flight, cap 2
   (queue is waiting on the schedule, not on guest availability)`, stated once
@@ -115,6 +115,34 @@ guest, in all three places an operator reads:
   flight, and clears as soon as the task is assigned
 - `/api/health`: `in_flight` and `concurrency_cap` (the latter `"unlimited"`
   when no cap is configured) say the same thing at a glance
+- the dashboard: a concurrency stat in the header, `2/4 · next 23:00 → 4`, so
+  night mode reads as night mode rather than as an idle system
+
+The same picture is served on the endpoint the dashboard polls, as
+`concurrency` on `/api/guests`:
+
+```json
+{
+  "cap": 2,
+  "source": "concurrency_schedule at \"07:00\"",
+  "in_flight": 2,
+  "waiting_on_cap": 3,
+  "next_change": {"at": "23:00", "time": "2026-11-07T23:00:00+11:00",
+                   "cap": 4, "timezone": "Australia/Sydney"}
+}
+```
+
+`cap` is the number the resolver reports for this instant (`"unlimited"` when
+no cap is in force) and `source` names the schedule entry — or
+`max_concurrent_tasks` — it came from, so the value is traceable to the config
+without opening the file. `in_flight` counts the `ASSIGNED` and `RUNNING` tasks
+the cap is measured against, and `waiting_on_cap` the pending tasks there is no
+room for — the queue beyond whatever room the cap has left. `waiting_on_cap`
+above zero with idle guests means the queue is held behind the cap, which is
+the case a flat "nothing is running" cannot tell apart from a dead pool. A task
+waiting only for a guest with matching tags is not counted, and says so in its
+own `held_reason` instead. `next_change` is `null` while the cap will not move
+— no schedule, or a schedule whose entries all carry the same cap.
 
 With neither `max_concurrent_tasks` nor a schedule set — the default, and every
 deployment that predates this feature — there is no cap and assignment behaves
@@ -239,7 +267,7 @@ curl -X POST http://localhost:8080/api/tasks \
 | `POST` | `/api/tasks/:id/priority` | Change a PENDING task's priority; body `{"priority": "firefighter\|teacher\|orangutan"}` |
 | `GET` | `/api/tasks/:id/download` | Download the task's whole log trace as JSONL |
 | `GET` | `/api/tasks/search` | Search task output text: `q` (required), `status` (optional), window via `days=N` or `from`/`to` dates |
-| `GET` | `/api/guests` | List connected guests (UID, host, state, tags) and the claim counters |
+| `GET` | `/api/guests` | List connected guests (UID, host, state, tags), the claim counters and the live concurrency picture |
 | `GET` | `/api/guests/:id` | Get guest details |
 | `GET` | `/api/health` | Health check |
 | `GET` | `/metrics` | Prometheus scrape endpoint: live server state as gauges, plus task-transition counters and histograms |

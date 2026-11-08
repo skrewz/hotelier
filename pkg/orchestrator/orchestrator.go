@@ -769,7 +769,7 @@ func (o *Orchestrator) admitsNewWorkInternal(taskID string) bool {
 	// Legible in state, so "waiting on the schedule" is distinguishable from
 	// "no guest with the right tags", which leaves the field empty.
 	if task, ok := o.queue.Get(taskID); ok {
-		task.HeldReason = fmt.Sprintf("concurrency cap %d reached (%d in flight)", o.concurrencyCap, inFlight)
+		task.HeldReason = capHoldReason(o.concurrencyCap, inFlight)
 	}
 
 	// Legible in the log, once per distinct (task, cap, in-flight) state
@@ -792,6 +792,42 @@ func (o *Orchestrator) admitsNewWorkInternal(taskID string) bool {
 func (o *Orchestrator) capErrorInternal(taskID string) error {
 	return fmt.Errorf("%w: task %s, %d in flight, cap %d", ErrConcurrencyCapReached,
 		taskID, o.inFlightCountInternal(), o.concurrencyCap)
+}
+
+// capHoldReason words the refusal a pending task carries when the cap has no
+// room for it. The wording is the one an operator reads in the task view and
+// in the log; the count of such work is PendingHeldByCapCount.
+func capHoldReason(cap, inFlight int) string {
+	return fmt.Sprintf("concurrency cap %d reached (%d in flight)", cap, inFlight)
+}
+
+// PendingHeldByCapCount reports how many PENDING tasks the cap cannot start at
+// this instant (issue #250). It is the number that tells an operator "the
+// queue is held behind the cap" apart from "the queue is empty": with the cap
+// full, the queue beyond the room it leaves cannot start however many matching
+// guests join, so a non-zero count next to idle guests means the schedule, not
+// the pool, is what work is stuck on.
+//
+// The count is derived from the cap and the live in-flight and pending counts
+// rather than from the holds the last assignment pass recorded. Holds are
+// written when a task is refused, so they would report nothing about a queue
+// that filled its slot afterwards — and the queue is exactly what this number
+// exists to show.
+func (o *Orchestrator) PendingHeldByCapCount() int {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+
+	// An unlimited cap holds nothing back, whatever the queue looks like.
+	if o.concurrencyCap < 0 {
+		return 0
+	}
+
+	pending := len(o.queue.GetPendingTasks())
+	room := o.concurrencyCap - o.inFlightCountInternal()
+	if room >= pending {
+		return 0
+	}
+	return pending - room
 }
 
 // --- Read-Only Delegation ---
