@@ -334,7 +334,15 @@ type Server struct {
 	// of the last task.cancel sent for each task. A guest that predates the
 	// intent field cannot echo it back, so its confirmation is resolved
 	// against what the host sent rather than against a default (issue #252
-	// review). Entries are consumed when the confirmation arrives.
+	// review). Entries are written *before* the send (so a confirmation
+	// handled on another goroutine can never resolve against a record that
+	// does not exist yet) and removed when the confirmation arrives, when a
+	// later send for the same task overwrites it, or when the send fails.
+	// A confirmation that never arrives — a guest with no connection skips
+	// it, a socket dying between write and handling loses it — leaves the
+	// entry behind: its lifetime is bounded by the task's, and since task
+	// IDs are never reused the residue is a per-task entry at most, not a
+	// growing set.
 	cancelIntentMu     sync.Mutex
 	cancelIntentByTask map[string]string
 	webDir             string
@@ -356,17 +364,23 @@ func (s *Server) revokeClaim(taskID, guestID, reason string) {
 		return
 	}
 	s.log.Printf("revoking claim on task %s from guest %s: %s", taskID, guestID, reason)
+	// Remember what we are about to ask for before the send: the
+	// confirmation this send provokes may not carry the intent (an old
+	// guest cannot echo it), and it can be handled on another goroutine
+	// before the statement after the send would have run (#252 review).
+	s.rememberCancelIntent(taskID, cancelIntentRevoke)
 	if err := s.hub.SendToGuest(guestID, "task.cancel", map[string]interface{}{
 		"task_id": taskID,
 		"reason":  reason,
 		"intent":  cancelIntentRevoke,
 	}); err != nil {
+		// Nothing was sent, so nothing is owed a resolution — drop the
+		// record rather than leaving a revocation on file for a cancel no
+		// guest was ever told about.
+		s.forgetCancelIntent(taskID)
 		s.log.Printf("failed to send task.cancel to guest %s: %v (guest may be disconnected)", guestID, err)
 		return
 	}
-	// Remember what we asked for: the confirmation this send provokes may
-	// not carry the intent (an old guest cannot echo it).
-	s.rememberCancelIntent(taskID, cancelIntentRevoke)
 }
 
 // rememberCancelIntent records the intent of a task.cancel that was
@@ -379,6 +393,15 @@ func (s *Server) rememberCancelIntent(taskID, intent string) {
 		s.cancelIntentByTask = make(map[string]string)
 	}
 	s.cancelIntentByTask[taskID] = intent
+}
+
+// forgetCancelIntent drops the remembered intent for a task — used when the
+// send it was recorded for failed, so the record never outlives the request
+// it stands for.
+func (s *Server) forgetCancelIntent(taskID string) {
+	s.cancelIntentMu.Lock()
+	defer s.cancelIntentMu.Unlock()
+	delete(s.cancelIntentByTask, taskID)
 }
 
 // resolveCancelIntent decides what a guest.cancelled confirmation means:
@@ -2098,16 +2121,20 @@ func (s *Server) handleTaskCancelHTTP(w http.ResponseWriter, r *http.Request, ta
 			return
 		}
 
+		// Recorded before the send so a confirmation handled concurrently
+		// can always resolve against it; dropped again if the send fails
+		// (#252 review).
+		s.rememberCancelIntent(taskID, cancelIntentCancel)
 		if err := s.hub.SendToGuest(task.AssignedTo, "task.cancel", map[string]interface{}{
 			"task_id": taskID,
 			"reason":  "user requested cancellation",
 			"intent":  cancelIntentCancel,
 		}); err != nil {
+			s.forgetCancelIntent(taskID)
 			s.log.Printf("failed to send task.cancel to guest %s: %v", task.AssignedTo, err)
 			http.Error(w, fmt.Sprintf("failed to notify guest: %v", err), http.StatusServiceUnavailable)
 			return
 		}
-		s.rememberCancelIntent(taskID, cancelIntentCancel)
 	}
 
 	// Broadcast task.updated to browsers

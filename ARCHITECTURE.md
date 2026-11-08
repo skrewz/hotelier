@@ -332,9 +332,14 @@ able to send it.
 
 The guest's reply stays the authority on whether it stopped; the host's
 acknowledgement is the authority on whether the work is still its own. A
-refused `task.acknowledge` is a decision, not a transport hiccup: the guest
-logs that the claim was not honoured and drops it rather than running work
-the host has closed. The transport case is the retry and reconnect work's.
+revocation of a task that is already running is therefore reported as
+`cancelled_while_running`, but the aborted guest sends no `guest.result` for
+it: the abort is not a task failure, and a result would let the guest the
+host just took the claim from decide the fate of a task another guest may
+already be running. A refused `task.acknowledge` is a decision, not a
+transport hiccup: the guest logs that the claim was not honoured and drops
+it rather than running work the host has closed. The transport case is the
+retry and reconnect work's.
 
 The three outcomes are counted and served on `/api/guests` as `stats`
 (`cancelled_while_running`, `cancelled_before_start`, `ack_refusals`), so a

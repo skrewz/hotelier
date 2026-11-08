@@ -460,7 +460,7 @@ func TestGuest_TwoGuestsOneTask_ExactlyOneExecutes(t *testing.T) {
 // rather than "whatever is running": the named task is aborted and the
 // confirmation says so (issue #252).
 func TestGuest_CancelNamesTheRunningTask_AbortsItAndConfirms(t *testing.T) {
-	srv, wsURL := startTestServer(t)
+	srv, wsURL, results := startTestServerWithCapture(t)
 	cap := &cancelCapture{}
 	captureCancels(srv.Hub(), cap)
 
@@ -505,6 +505,144 @@ func TestGuest_CancelNamesTheRunningTask_AbortsItAndConfirms(t *testing.T) {
 	}
 	if !logs.contains("cancelled while running") {
 		t.Errorf("expected the abort to be logged as 'cancelled while running', got:\n%s", logs.String())
+	}
+	// The cancel carried no intent — the pre-existing "end the task"
+	// meaning — so the aborted task still reports its result: the host
+	// resolves the confirmation as a cancel and the result lands on a
+	// task it has already ended. Only a revoke suppresses the result
+	// (#252 review).
+	if got := results.capturedResults(); len(got) != 1 || got[0].TaskID != "task-run" {
+		t.Errorf("expected one guest.result for the cancelled task, got %+v", got)
+	}
+}
+
+// TestGuest_RevokeAbortsRunningTask_ReportsNoResult is the revoke half of
+// the same path. A revocation takes the claim back and hands the task's
+// fate to the host — which has already re-queued it, possibly onto another
+// guest. If the aborted guest still reported its failure, the host's
+// FailTask would end a task another guest may be executing: the fate rule
+// ("the host's acknowledgement is the authority on whether the work is
+// still its own") not carried through to the abort path (issue #252
+// review).
+func TestGuest_RevokeAbortsRunningTask_ReportsNoResult(t *testing.T) {
+	srv, wsURL, results := startTestServerWithCapture(t)
+	cap := &cancelCapture{}
+	captureCancels(srv.Hub(), cap)
+
+	aborted := make(chan bool, 1)
+	g := newConnectedGuest(t, wsURL, func(ctx context.Context, task TaskAssignment, _ LogCallback) (*TaskResult, error) {
+		<-ctx.Done()
+		aborted <- true
+		return &TaskResult{TaskID: task.TaskID, Success: false, Error: "context canceled"}, ctx.Err()
+	})
+	logs := &logRecorder{}
+	g.log = log.New(logs, "", 0)
+	go g.taskDispatcher(context.Background())
+
+	if !g.hub.InvokeNotificationHandler("task.assign", assignParams(t, TaskAssignment{TaskID: "task-run", Prompt: "p"})) {
+		t.Fatal("no task.assign handler registered")
+	}
+	waitForTaskRunning(t, g, "task-run")
+
+	if !g.hub.InvokeNotificationHandler("task.cancel", cancelParams(t, TaskCancel{TaskID: "task-run", Reason: "re-queued", Intent: "revoke"})) {
+		t.Fatal("no task.cancel handler registered")
+	}
+
+	select {
+	case <-aborted:
+	case <-time.After(3 * time.Second):
+		t.Fatal("the running task was not aborted by a revoke naming it")
+	}
+
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		calls := cap.all()
+		if len(calls) > 0 {
+			if calls[0]["action"] != cancelActionRunning {
+				t.Errorf("expected action %q, got %v", cancelActionRunning, calls[0]["action"])
+			}
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("no guest.cancelled confirmation arrived")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	// Give any (incorrect) guest.result time to arrive, then assert none
+	// did: the revoked guest reports nothing and leaves the fate to the
+	// host.
+	time.Sleep(300 * time.Millisecond)
+	if got := results.capturedResults(); len(got) != 0 {
+		t.Errorf("a revoked-while-running task must not report a result, got %+v", got)
+	}
+	if !logs.contains("revoked while running; not reporting the result") {
+		t.Errorf("expected the suppressed result to be logged, got:\n%s", logs.String())
+	}
+	g.mu.Lock()
+	_, stillMarked := g.givenUp["task-run"]
+	g.mu.Unlock()
+	if stillMarked {
+		t.Error("the given-up record survived the aborted task")
+	}
+}
+
+// TestGuest_DuplicateAssignForQueuedTaskIsDropped covers the re-send half
+// of the deduplication guard: before the claims map existed the guard keyed
+// on the running task alone, so a re-sent assignment for a task that was
+// queued but not yet started was buffered twice — the dispatcher ran one
+// copy and the "already running" decline for the other handed the host a
+// re-queue of work that was in flight (#252 review).
+func TestGuest_DuplicateAssignForQueuedTaskIsDropped(t *testing.T) {
+	_, wsURL := startTestServer(t)
+
+	release1 := make(chan struct{})
+	var started sync.Map
+	g := newConnectedGuest(t, wsURL, func(_ context.Context, task TaskAssignment, _ LogCallback) (*TaskResult, error) {
+		started.Store(task.TaskID, true)
+		if task.TaskID == "task-1" {
+			<-release1
+		}
+		return &TaskResult{TaskID: task.TaskID, Success: true}, nil
+	})
+	logs := &logRecorder{}
+	g.log = log.New(logs, "", 0)
+	go g.taskDispatcher(context.Background())
+
+	// task-1 holds the dispatcher; task-2 sits in the queue, unstarted.
+	if !g.hub.InvokeNotificationHandler("task.assign", assignParams(t, TaskAssignment{TaskID: "task-1", Prompt: "long task"})) {
+		t.Fatal("no task.assign handler registered")
+	}
+	waitForTaskRunning(t, g, "task-1")
+	if !g.hub.InvokeNotificationHandler("task.assign", assignParams(t, TaskAssignment{TaskID: "task-2", Prompt: "queued task"})) {
+		t.Fatal("no task.assign handler registered")
+	}
+
+	// The host re-sends the assignment for the queued task — a reconnect
+	// replay of what this guest already holds.
+	if !g.hub.InvokeNotificationHandler("task.assign", assignParams(t, TaskAssignment{TaskID: "task-2", Prompt: "queued task"})) {
+		t.Fatal("no task.assign handler registered")
+	}
+	if !logs.contains("ignoring duplicate task.assign for task-2") {
+		t.Errorf("expected the re-sent queued assignment to be ignored, got:\n%s", logs.String())
+	}
+
+	close(release1)
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		if _, ok := started.Load("task-2"); ok {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if _, ok := started.Load("task-2"); !ok {
+		t.Fatal("the queued task never ran")
+	}
+	// The single held copy ran exactly once: nothing was buffered twice for
+	// the dispatcher to decline and re-queue.
+	time.Sleep(200 * time.Millisecond)
+	if g.holdsClaim("task-2") {
+		t.Error("task-2's claim outlived its completion")
 	}
 }
 
