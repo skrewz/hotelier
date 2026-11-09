@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"strings"
 	"testing"
@@ -86,6 +87,53 @@ func addQueueTask(t *testing.T, srv *Server, id, title string, status queue.Task
 	stored.Status = status
 }
 
+// TestParseSearchWindowAnchorsOnTheHostCalendar pins the window to the same
+// calendar the store partitions by. The store names its date directories
+// after the entry timestamp's own date (logstore.dirForDate), which is
+// host-local, so anchoring the window at the UTC day puts today's partition
+// outside "to" on any host east of UTC and a default search silently finds
+// none of today's output — the same anchoring PruneOlderThan already uses.
+func TestParseSearchWindowAnchorsOnTheHostCalendar(t *testing.T) {
+	east := time.FixedZone("utc+11", 11*60*60)
+	now := time.Date(2026, 11, 10, 9, 0, 0, 0, east) // 2026-11-09T22:00Z
+
+	from, to, err := parseSearchWindow(url.Values{}, now)
+	if err != nil {
+		t.Fatalf("default window: %v", err)
+	}
+	if got := to.Format("2006-01-02"); got != "2026-11-10" {
+		t.Errorf("expected the host-local day as the upper bound, got %s", got)
+	}
+	if got := from.Format("2006-01-02"); got != "2026-11-06" {
+		t.Errorf("expected a 5-day default window, got %s..%s", got, to.Format("2006-01-02"))
+	}
+}
+
+// TestSearchAPI_DefaultWindowIncludesTodaysPartition is the user-visible face
+// of the anchoring above: output appended a moment ago must come back from a
+// search with no window, whatever calendar the host runs on. The store names
+// that partition after the host-local day, so the response's "to" has to be
+// that same day.
+func TestSearchAPI_DefaultWindowIncludesTodaysPartition(t *testing.T) {
+	srv := newSearchServer(t)
+	now := time.Now()
+	if err := srv.diskLogStore.Append(logEntryWithTime("task-now", "needle today", now)); err != nil {
+		t.Fatalf("append: %v", err)
+	}
+
+	w := doSearch(t, srv, "/api/tasks/search?q=needle")
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d (body %q)", w.Code, w.Body.String())
+	}
+	resp := decodeSearch(t, w)
+	if resp.Count != 1 {
+		t.Fatalf("expected today's output within the default window, got %d matches (%q)", resp.Count, w.Body.String())
+	}
+	if want := now.Format("2006-01-02"); resp.To != want {
+		t.Errorf("expected the window to reach the store's newest partition %s, got %s", want, resp.To)
+	}
+}
+
 // TestSearchAPI_MatchesWithContext verifies a hit comes back with the task's
 // title and status, the matched line and context lines from the same trace.
 func TestSearchAPI_MatchesWithContext(t *testing.T) {
@@ -144,7 +192,7 @@ func TestSearchAPI_CaseInsensitive(t *testing.T) {
 // found, a ten-day-old hit is not — but days=14 reaches it.
 func TestSearchAPI_DefaultWindowIsFiveDays(t *testing.T) {
 	srv := newSearchServer(t)
-	now := time.Now().UTC()
+	now := time.Now()
 	recent := now
 	older := now.AddDate(0, 0, -10)
 	for _, ts := range []time.Time{recent, older} {
@@ -189,8 +237,8 @@ func TestSearchAPI_WiderThan14DaysRejected(t *testing.T) {
 		t.Errorf("error body should explain the 14-day cap, got %q", body)
 	}
 
-	from := time.Now().UTC().AddDate(0, 0, -20).Format("2006-01-02")
-	to := time.Now().UTC().Format("2006-01-02")
+	from := time.Now().AddDate(0, 0, -20).Format("2006-01-02")
+	to := time.Now().Format("2006-01-02")
 	w = doSearch(t, srv, "/api/tasks/search?q=x&from="+from+"&to="+to)
 	if w.Code != http.StatusBadRequest {
 		t.Fatalf("expected 400 for a 21-day from/to window, got %d", w.Code)

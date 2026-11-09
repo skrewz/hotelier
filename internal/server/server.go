@@ -2615,7 +2615,11 @@ func (s *Server) HandleTaskSearch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	from, to, err := parseSearchWindow(r.URL.Query(), time.Now().UTC())
+	// The store partitions by the entry timestamp's own date, which is the
+	// host's calendar, so the window must be anchored there too — a UTC
+	// anchor would leave today's partition out of the search on any host
+	// east of UTC. PruneOlderThan anchors the same way.
+	from, to, err := parseSearchWindow(r.URL.Query(), time.Now())
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
@@ -2656,13 +2660,8 @@ func (s *Server) HandleTaskSearch(w http.ResponseWriter, r *http.Request) {
 		Status string `json:"status"`
 	}
 	results := make([]decoratedMatch, 0, len(matches))
-	seen := make(map[string]*queue.Task)
 	for _, m := range matches {
-		task, ok := seen[m.TaskID]
-		if !ok {
-			task, ok = s.orchestrator.GetTask(m.TaskID)
-			seen[m.TaskID] = task
-		}
+		task, ok := s.orchestrator.GetTask(m.TaskID)
 		var title, status string
 		if ok && task != nil {
 			title, status = task.Title, task.Status.String()
@@ -2687,10 +2686,16 @@ func (s *Server) HandleTaskSearch(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// parseSearchWindow resolves the lookback window to an inclusive UTC date
-// range, enforcing the cap server-side. It returns a descriptive error for
-// any malformed, ambiguous or over-wide window, which the handler turns
-// into a 400.
+// parseSearchWindow resolves the lookback window to an inclusive date range,
+// enforcing the cap server-side. It returns a descriptive error for any
+// malformed, ambiguous or over-wide window, which the handler turns into a 400.
+//
+// The window is anchored at `now`'s own calendar date, exactly as
+// LogStore.PruneOlderThan anchors its cutoff: the store names its date
+// directories after the entry timestamp's date, which is host-local, so a
+// UTC anchor would put the newest partition outside the window on any host
+// east of UTC. The day is then built in UTC so the comparison against the
+// parsed directory names stays a comparison of calendar days, not instants.
 func parseSearchWindow(values url.Values, now time.Time) (from, to time.Time, err error) {
 	y, mo, d := now.Date()
 	today := time.Date(y, mo, d, 0, 0, 0, 0, time.UTC)
