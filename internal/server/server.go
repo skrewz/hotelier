@@ -751,11 +751,18 @@ func (s *Server) Start() error {
 	// Prometheus scrape endpoint. Like /api/health it is unauthenticated, and
 	// it publishes only fixed-label gauges — no task IDs, guest IDs, personas
 	// or repository URLs — so there is nothing private in it (issue #260).
+	// One scrape at a time is exactly the semantics Prometheus wants anyway,
+	// and a failed gather lands in the server log rather than only in a 500
+	// nobody watches.
 	metricsRegistry, err := metrics.NewRegistry(s.orchestrator)
 	if err != nil {
 		return fmt.Errorf("register metrics collector: %w", err)
 	}
-	mux.Handle("/metrics", promhttp.HandlerFor(metricsRegistry, promhttp.HandlerOpts{}))
+	mux.Handle("/metrics", quietScrapes(promhttp.HandlerFor(metricsRegistry, promhttp.HandlerOpts{
+		ErrorLog:            s.log,
+		MaxRequestsInFlight: 1,
+		Timeout:             10 * time.Second,
+	})))
 
 	// Web UI
 	mux.HandleFunc("/", s.HandleWebUI)

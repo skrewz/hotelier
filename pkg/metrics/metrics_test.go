@@ -197,6 +197,29 @@ func TestScrapePublishesEveryFamily(t *testing.T) {
 	}
 }
 
+// The decision to leave /metrics unauthenticated rests on the exposition
+// carrying no identifiers at all. That negative is what this test defends:
+// were a task, guest or persona label ever added "to make the dashboard
+// more useful", CI fails here rather than quietly publishing identifiers
+// to anonymous scrapers (issue #260 review).
+func TestScrapePublishesNoIdentifiers(t *testing.T) {
+	o := newFixture(t)
+	addTasks(t, o, "pending", 1, nil)
+	for _, id := range []string{"guest-a", "guest-b"} {
+		if err := o.RegisterGuest(id, id, []string{"default"}); err != nil {
+			t.Fatalf("RegisterGuest %s: %v", id, err)
+		}
+	}
+
+	_, body := scrape(t, serveState(t, o))
+
+	for _, forbidden := range []string{"pending-0", "guest-a", "guest-b", "do the thing"} {
+		if strings.Contains(body, forbidden) {
+			t.Errorf("scrape published %q to an anonymous caller:\n%s", forbidden, body)
+		}
+	}
+}
+
 // The cap sentinel is negative by design so it can never be mistaken for a
 // count. Prometheus cannot say "no limit" as a number, so the gauge must read
 // +Inf — and must never read -1.
