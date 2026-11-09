@@ -30,8 +30,10 @@ import (
 const namespace = "hotelier"
 
 // taskStatuses and guestStates are the complete label sets. Both lists are
-// derived from the enumerations the state machines actually use, so a new
-// status or state is a one-line change here rather than a cardinality surprise.
+// derived from the enumerations the state machines actually use, and
+// TestLabelSetsCoverEnumerations walks the enumerations themselves to fail
+// the day either list goes stale — a new status or state must not become a
+// cardinality surprise that only shows up as a silently missing series.
 var (
 	taskStatuses = []queue.TaskStatus{
 		queue.TaskStatusPending,
@@ -49,10 +51,11 @@ var (
 	}
 )
 
-// Collector publishes the live server state as Prometheus gauges. It holds only
+// collector publishes the live server state as Prometheus gauges. It holds only
 // a pointer to the orchestrator: every value is read when Prometheus scrapes,
-// so the endpoint can never disagree with /api/health.
-type Collector struct {
+// so the endpoint can never disagree with /api/health. The package exports
+// NewRegistry alone (issue #260): nothing outside it builds one by hand.
+type collector struct {
 	orchestrator *orchestrator.Orchestrator
 
 	tasksDesc    *prometheus.Desc
@@ -62,9 +65,9 @@ type Collector struct {
 	heldDesc     *prometheus.Desc
 }
 
-// NewCollector builds a Collector over the given orchestrator.
-func NewCollector(o *orchestrator.Orchestrator) *Collector {
-	return &Collector{
+// newCollector builds a collector over the given orchestrator.
+func newCollector(o *orchestrator.Orchestrator) *collector {
+	return &collector{
 		orchestrator: o,
 		tasksDesc: prometheus.NewDesc(
 			prometheus.BuildFQName(namespace, "", "tasks"),
@@ -88,14 +91,14 @@ func NewCollector(o *orchestrator.Orchestrator) *Collector {
 		),
 		heldDesc: prometheus.NewDesc(
 			prometheus.BuildFQName(namespace, "", "tasks_held_by_cap"),
-			"PENDING tasks carrying a hold reason, i.e. tasks the concurrency cap is holding back.",
+			"PENDING tasks whose last assignment attempt was refused, i.e. tasks carrying a hold reason. The reason records the last refusal, so a task released by a rising cap stays counted until the next poll considers it.",
 			nil, nil,
 		),
 	}
 }
 
-// Describe reports the families the Collector can produce.
-func (c *Collector) Describe(ch chan<- *prometheus.Desc) {
+// Describe reports the families the collector can produce.
+func (c *collector) Describe(ch chan<- *prometheus.Desc) {
 	ch <- c.tasksDesc
 	ch <- c.guestsDesc
 	ch <- c.inFlightDesc
@@ -106,7 +109,7 @@ func (c *Collector) Describe(ch chan<- *prometheus.Desc) {
 // Collect reads the live state and emits one gauge per series. The guest list
 // includes the zero counts so a scrape always carries the whole fixed label
 // set and a state dropping to zero reads as a flat line rather than a gap.
-func (c *Collector) Collect(ch chan<- prometheus.Metric) {
+func (c *collector) Collect(ch chan<- prometheus.Metric) {
 	q := c.orchestrator.Queue()
 	r := c.orchestrator.Registry()
 
@@ -135,20 +138,20 @@ func (c *Collector) Collect(ch chan<- prometheus.Metric) {
 // any negative value as "no cap". Prometheus has no way to say "no limit" as a
 // number except +Inf, which is also what a graph of the cap should read as: a
 // line pinned at the top of the panel means nothing is being held back.
-func capValue(cap int) float64 {
-	if cap < 0 {
+func capValue(limit int) float64 {
+	if limit < 0 {
 		return math.Inf(1)
 	}
-	return float64(cap)
+	return float64(limit)
 }
 
 // NewRegistry returns a dedicated registry holding only Hotelier's gauges, so
 // the exposed set is a known list rather than whatever a dependency happened to
 // register on the process-global one.
 func NewRegistry(o *orchestrator.Orchestrator) (*prometheus.Registry, error) {
-	registry := prometheus.NewRegistry()
-	if err := registry.Register(NewCollector(o)); err != nil {
+	reg := prometheus.NewRegistry()
+	if err := reg.Register(newCollector(o)); err != nil {
 		return nil, err
 	}
-	return registry, nil
+	return reg, nil
 }

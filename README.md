@@ -241,7 +241,7 @@ curl -X POST http://localhost:8080/api/tasks \
 | `GET` | `/api/guests` | List connected guests (UID, host, state, tags) and the claim counters |
 | `GET` | `/api/guests/:id` | Get guest details |
 | `GET` | `/api/health` | Health check |
-| `GET` | `/metrics` | Prometheus text exposition of the live server state |
+| `GET` | `/metrics` | Prometheus scrape endpoint: live server state as gauges |
 | `WS` | `/ws` | WebSocket (JSON-RPC) |
 
 `/api/guests` also carries a `stats` object. The two action counters,
@@ -253,10 +253,14 @@ host is ordinary cancellation rather than a regression.
 
 ### Metrics
 
-`GET /metrics` answers in the [Prometheus text exposition
+`GET /metrics` answers scrapes in the [Prometheus exposition
 format](https://prometheus.io/docs/instrumenting/exposition_formats/), gathered
 from the live state at scrape time — no background goroutine, and no second copy
-of a number another package owns. Like `/api/health` it is unauthenticated.
+of a number another package owns. The exact encoding is negotiated from the
+scraper's `Accept` header; Prometheus defaults and plain `curl` get the text
+format. Like `/api/health` it is unauthenticated, and a scrape that fails to
+gather is logged on the server and answered with a generic 500 rather than an
+error dump.
 
 | Metric | Type | Labels | Meaning |
 |--------|------|--------|---------|
@@ -264,7 +268,7 @@ of a number another package owns. Like `/api/health` it is unauthenticated.
 | `hotelier_guests` | gauge | `state` = `DISCONNECTED`, `REGISTERED`, `IDLE`, `RUNNING` | Guests connected to this server, by state |
 | `hotelier_tasks_in_flight` | gauge | — | Tasks in flight: `ASSIGNED` or `RUNNING` |
 | `hotelier_concurrency_cap` | gauge | — | Maximum number of tasks allowed in flight; `+Inf` when no cap is in force |
-| `hotelier_tasks_held_by_cap` | gauge | — | `PENDING` tasks the concurrency cap is holding back |
+| `hotelier_tasks_held_by_cap` | gauge | — | `PENDING` tasks whose last assignment attempt was refused, i.e. carrying a hold reason (the count lags a rising cap until the next poll considers each task) |
 
 Label values are the strings the state machines use internally (`TaskStatus.String`
 and `GuestState.String`), and every label is a fixed enumeration: no task ID,
@@ -283,7 +287,7 @@ These gauges describe **the process that is answering the scrape**. The queue
 keeps terminal tasks until the process restarts, so `hotelier_tasks{status="COMPLETED"}`
 and friends return to zero on a restart while the on-disk queue carries the work
 itself. Counting transitions and their durations — a number that survives a
-restart being counted — is a separate piece of this forest (issue [#262](https://forgejo.skrewz.net/s-git/hotelier/issues/262)).
+restart being counted — is a separate piece of this forest (issue #262).
 
 Scrape config sample:
 

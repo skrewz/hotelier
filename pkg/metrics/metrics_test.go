@@ -195,6 +195,74 @@ func TestScrapePublishesEveryFamily(t *testing.T) {
 			t.Errorf("%s = %s, want %s", series, got, expected)
 		}
 	}
+
+	// The labelled families must sum to the whole population: if a status or
+	// state is ever added to the state machines and the metrics lists fall
+	// behind, work in it would vanish from every graph silently, with every
+	// per-series expectation above still green (issue #260 review).
+	if got := sumSeries(t, body, "hotelier_tasks"); got != o.Queue().Count() {
+		t.Errorf("hotelier_tasks sums to %d, want the queue size %d", got, o.Queue().Count())
+	}
+	if got := sumSeries(t, body, "hotelier_guests"); got != o.Registry().Count() {
+		t.Errorf("hotelier_guests sums to %d, want the registry size %d", got, o.Registry().Count())
+	}
+	if strings.Contains(body, `status="UNKNOWN"`) || strings.Contains(body, `state="UNKNOWN"`) {
+		t.Errorf("a label fell through to the String() UNKNOWN fallback:\n%s", body)
+	}
+}
+
+// sumSeries adds the values of every series of one family (the metric name
+// with any label set).
+func sumSeries(t *testing.T, body, family string) int {
+	t.Helper()
+	total := 0
+	for _, line := range strings.Split(body, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		name, value, ok := strings.Cut(line, " ")
+		if !ok {
+			continue
+		}
+		if name == family || strings.HasPrefix(name, family+"{") {
+			var n int
+			if _, err := fmt.Sscanf(strings.TrimSpace(value), "%d", &n); err != nil {
+				t.Fatalf("parse %q: %v", line, err)
+			}
+			total += n
+		}
+	}
+	return total
+}
+
+// The label sets are maintained by hand beside the enumerations, so a new
+// queue.TaskStatus or registry.GuestState can go unlisted there. Deriving
+// the enumerations here — walking each type until String() hits its UNKNOWN
+// fallback — makes that miss fail in CI instead of opening a gap in every
+// graph (issue #260 review).
+func TestLabelSetsCoverEnumerations(t *testing.T) {
+	o := newFixture(t)
+	_, body := scrape(t, serveState(t, o))
+
+	for s := queue.TaskStatus(0); ; s++ {
+		name := s.String()
+		if name == "UNKNOWN" {
+			break
+		}
+		if !strings.Contains(body, `hotelier_tasks{status="`+name+`"}`) {
+			t.Errorf("task status %s has no hotelier_tasks series; the label set is stale", name)
+		}
+	}
+	for s := registry.GuestState(0); ; s++ {
+		name := s.String()
+		if name == "UNKNOWN" {
+			break
+		}
+		if !strings.Contains(body, `hotelier_guests{state="`+name+`"}`) {
+			t.Errorf("guest state %s has no hotelier_guests series; the label set is stale", name)
+		}
+	}
 }
 
 // The decision to leave /metrics unauthenticated rests on the exposition
