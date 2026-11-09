@@ -975,6 +975,52 @@ const { chromium } = require('playwright');
   if (!statsOk) fail('Header stats should show non-zero values');
   console.log('PASS: Header stats populated');
 
+  // =====================================================================
+  // Phase 1b: Concurrency header stat (issue #250)
+  // =====================================================================
+  console.log('=== Phase 1b: Concurrency stat ===');
+
+  // The dashboard polls /api/guests on load, so the concurrency stat must
+  // have moved off its placeholder by now (the same style of assertion as
+  // the header stats above).
+  const concurrencyLive = await page.evaluate(() => ({
+    value: document.getElementById('concurrency-count').textContent,
+    label: document.getElementById('concurrency-label').textContent,
+  }));
+  if (concurrencyLive.value === '—') fail('Concurrency stat should be populated from the /api/guests poll');
+  if (!concurrencyLive.label.startsWith('Concurrency')) fail('Concurrency label should start with "Concurrency", got: ' + concurrencyLive.label);
+  console.log('PASS: concurrency stat reads', concurrencyLive.value, '\u00b7', concurrencyLive.label);
+
+  // renderConcurrency's three branches, pinned with fixtures: the
+  // next_change and waiting_on_cap segments, the unlimited cap, and the
+  // absent-payload fallback. The Go tests assert the JSON; only these
+  // assertions can fail if the line the operator reads stops composing.
+  const concurrencyFixtures = await page.evaluate(() => {
+    const read = () => ({
+      value: document.getElementById('concurrency-count').textContent,
+      label: document.getElementById('concurrency-label').textContent,
+    });
+    const out = [];
+    renderConcurrency({ cap: 2, in_flight: 1, waiting_on_cap: 3, next_change: { at: '23:00', cap: 4 } });
+    out.push(read());
+    renderConcurrency({ cap: 'unlimited', in_flight: 0, waiting_on_cap: 0, next_change: null });
+    out.push(read());
+    renderConcurrency(undefined);
+    out.push(read());
+    return out;
+  });
+  const expectStat = (fixture, value, label, what) => {
+    if (fixture.value !== value) fail(what + ': expected value "' + value + '", got "' + fixture.value + '"');
+    if (fixture.label !== label) fail(what + ': expected label "' + label + '", got "' + fixture.label + '"');
+  };
+  expectStat(concurrencyFixtures[0], '1/2', 'Concurrency \u00b7 next 23:00 \u2192 4 \u00b7 3 waiting on cap', 'scheduled fixture');
+  expectStat(concurrencyFixtures[1], '0/unlimited', 'Concurrency', 'unlimited fixture');
+  expectStat(concurrencyFixtures[2], '\u2014', 'Concurrency', 'absent-payload fixture');
+  console.log('PASS: renderConcurrency pins all three branches');
+
+  // Restore the live picture before any later screenshots.
+  await page.evaluate(async () => { await refresh(); });
+
   // Verify only 2 tabs exist (Tasks + Logs, no Task Detail)
   const tabCount = await page.evaluate(() => document.querySelectorAll('.tab').length);
   if (tabCount !== 2) fail('Should have exactly 2 tabs (Tasks + Logs), got ' + tabCount);
