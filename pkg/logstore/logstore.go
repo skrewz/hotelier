@@ -192,9 +192,15 @@ func (s *LogStore) ListDates() ([]string, error) {
 type PruneResult struct {
 	// DatesRemoved lists the date directories deleted, oldest first.
 	DatesRemoved []string
-	// FilesRemoved counts the files those directories held.
+	// FilesRemoved counts the files those directories held. Entries that
+	// cannot be read (a damaged volume, a permission error mid-walk) are
+	// skipped rather than counted, so this is a floor rather than an exact
+	// reconciliation.
 	FilesRemoved int
-	// BytesReclaimed sums the removed files' sizes.
+	// BytesReclaimed sums the removed files' sizes. As with FilesRemoved,
+	// an entry that cannot be stat'd counts as nothing, so the total reads
+	// as "at least this much came back" rather than "this is exactly what
+	// was there".
 	BytesReclaimed int64
 }
 
@@ -266,8 +272,10 @@ func (s *LogStore) PruneOlderThan(now time.Time, retentionDays int) (PruneResult
 
 // dirSize counts the regular files under dir and sums their sizes. It is
 // only ever called on a directory about to be removed, to report what the
-// sweep reclaims; unreadable entries are skipped rather than failing the
-// sweep.
+// sweep reclaims. Unreadable entries are skipped rather than failing the
+// sweep, so the counts are a lower bound: an entry that cannot be stat'd
+// is reported as having reclaimed nothing, and an expired day of such
+// entries is reported as 0 files / 0 bytes.
 func dirSize(dir string) (files int, bytes int64) {
 	filepath.WalkDir(dir, func(path string, d fs.DirEntry, err error) error {
 		if err != nil || !d.Type().IsRegular() {
