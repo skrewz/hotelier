@@ -2596,14 +2596,15 @@ const (
 // Neither window form nor days beyond the cap are accepted: see the
 // constants above for the policy and the error bodies for the specifics.
 //
-// The response says how complete it is. "truncated" means the match cap cut
-// the scan short, so older hits in the window exist that are not listed;
-// "partial" means some partition or trace could not be read (and was logged
-// here) while the rest of the window was scanned normally. Like every other
-// route on this server the endpoint is unauthenticated, and unlike
-// /api/tasks/:id/download it searches every task's output at once, so it
-// discloses the IDs, titles and statuses of whatever it matches; operators
-// who would rather it did not must front it themselves.
+// The response says how complete it is. "truncated" means the scan stopped
+// early — at the store's match cap or its scanned-bytes budget — so older
+// hits in the window exist that are not listed; "partial" means some
+// partition or trace could not be read (and was logged here) while the rest
+// of the window was scanned normally. Like every other route on this server
+// the endpoint is unauthenticated, and unlike /api/tasks/:id/download it
+// searches every task's output at once, so it discloses the IDs, titles and
+// statuses of whatever it matches; operators who would rather it did not
+// must front it themselves.
 func (s *Server) HandleTaskSearch(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 

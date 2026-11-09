@@ -1,6 +1,8 @@
 package logstore
 
 import (
+	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -193,5 +195,79 @@ func TestSearchDates_MissingDateIsNotAnError(t *testing.T) {
 	res := s.SearchDates([]string{"2025-01-01", "2026-05-10"}, "something")
 	if len(res.Matches) != 1 || res.Matches[0].Date != "2026-05-10" {
 		t.Fatalf("expected the one match from the existing date, got %+v", res.Matches)
+	}
+}
+
+// TestSearchDates_StopsWhenTheScannedBytesBudgetRunsOut verifies the read
+// side of the search is bounded: a trace larger than the budget stops the
+// scan with Truncated set, and the walk never reaches the traces after it.
+// The budget seam stands in for the tens of megabytes of decompressed output
+// that would exhaust the production constant.
+func TestSearchDates_StopsWhenTheScannedBytesBudgetRunsOut(t *testing.T) {
+	s := mustStore(t)
+	original := searchScannedBudget
+	searchScannedBudget = 4096
+	t.Cleanup(func() { searchScannedBudget = original })
+
+	long := strings.Repeat("x", 60)
+	var lines []string
+	for range 200 {
+		lines = append(lines, long+" needle here")
+	}
+	appendLines(t, s, "task-a", dayOne, lines)
+	appendLines(t, s, "task-b", dayOne, []string{"needle elsewhere"})
+
+	// task-b would be a scan error if the scan ever read it; a scan that
+	// honours its budget never gets that far.
+	if err := os.Chmod(filepath.Join(s.dir, "2026-05-10", "task-b"), 0o000); err != nil {
+		t.Fatalf("chmod: %v", err)
+	}
+	t.Cleanup(func() { os.Chmod(filepath.Join(s.dir, "2026-05-10", "task-b"), 0o755) })
+
+	res := s.SearchDates([]string{"2026-05-10"}, "needle")
+	if !res.Truncated {
+		t.Error("expected a scan that exhausted its scanned-bytes budget to report itself truncated")
+	}
+	if len(res.Errors) != 0 {
+		t.Errorf("expected the scan to stop before reading task-b, got errors %v", res.Errors)
+	}
+}
+
+// TestSearchDates_KeepsMatchesReadBeforeACorruptLine verifies a trace that
+// fails to parse partway through costs only its unreadable remainder: the
+// matches already streamed in come back, and the failure is reported.
+func TestSearchDates_KeepsMatchesReadBeforeACorruptLine(t *testing.T) {
+	s := mustStore(t)
+	taskDir := filepath.Join(s.dir, "2026-05-10", "task-a")
+	if err := os.MkdirAll(taskDir, 0o755); err != nil {
+		t.Fatalf("create task dir: %v", err)
+	}
+	f, err := os.Create(filepath.Join(taskDir, "logs.jsonl"))
+	if err != nil {
+		t.Fatalf("create log file: %v", err)
+	}
+	for _, line := range []string{"needle first", "clean"} {
+		entry := Entry{TaskID: "task-a", Line: line, Timestamp: dayOne}
+		raw, err := json.Marshal(entry)
+		if err != nil {
+			t.Fatalf("marshal entry: %v", err)
+		}
+		if _, err := fmt.Fprintf(f, "%s\n", raw); err != nil {
+			t.Fatalf("write entry: %v", err)
+		}
+	}
+	if _, err := f.WriteString("this is not a log entry\n"); err != nil {
+		t.Fatalf("write corrupt line: %v", err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatalf("close log file: %v", err)
+	}
+
+	res := s.SearchDates([]string{"2026-05-10"}, "needle")
+	if len(res.Matches) != 1 || res.Matches[0].Line != "needle first" {
+		t.Fatalf("expected the match read before the corrupt line, got %+v", res.Matches)
+	}
+	if len(res.Errors) == 0 {
+		t.Error("expected the corrupt line to be reported")
 	}
 }

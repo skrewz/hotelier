@@ -255,10 +255,12 @@ independent of log retention pruning: dates already pruned simply yield no
 matches, and pruning never widens a window. Days are the server's calendar
 days, the same ones the log store names its partitions by.
 
-Two response fields say how complete an answer is. At most 200 matches come
-back from any one request — the bound is the server's, not the query's, so a
-needle matching every line cannot make the server hold the whole window — and
-`truncated: true` says older hits in the window exist that are not listed.
+Two response fields say how complete an answer is. A search reads traces as
+a stream and costs at most 64 MiB of decompressed log text per request, and
+at most 200 matches come back — both bounds are the server's, not the
+query's, so one request can neither read nor hold the whole window — and
+`truncated: true` says the scan stopped at one of those bounds and older
+hits in the window exist that are not listed.
 `partial: true` says some partition or trace could not be read; the rest of
 the window was scanned normally and the reason went to the server log, so a
 partial answer is not a failed one.
