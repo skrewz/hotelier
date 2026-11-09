@@ -813,6 +813,10 @@ func capHoldReason(cap, inFlight int) string {
 // written when a task is refused, so they would report nothing about a queue
 // that filled its slot afterwards — and the queue is exactly what this number
 // exists to show.
+//
+// In flight can exceed the cap right after a boundary drops below the running
+// count; the room is then clamped to zero and the answer is the whole queue,
+// never more than the queue holds.
 func (o *Orchestrator) PendingHeldByCapCount() int {
 	o.mu.Lock()
 	defer o.mu.Unlock()
@@ -824,6 +828,10 @@ func (o *Orchestrator) PendingHeldByCapCount() int {
 
 	pending := len(o.queue.GetPendingTasks())
 	room := o.concurrencyCap - o.inFlightCountInternal()
+	if room < 0 {
+		// More in flight than the cap now allows: nothing else can start.
+		room = 0
+	}
 	if room >= pending {
 		return 0
 	}

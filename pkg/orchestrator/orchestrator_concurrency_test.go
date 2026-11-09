@@ -389,15 +389,43 @@ func TestPendingHeldByCapCount(t *testing.T) {
 		t.Errorf("expected 2 waiting on a full cap, got %d", got)
 	}
 
-	// An overnight cap of 0 holds the whole queue.
+	// An overnight cap of 0 holds the whole remaining queue: b1 is in
+	// flight, b2 and b3 are pending, so the answer is 2 — the queue,
+	// not the queue plus the in-flight overflow.
 	full.SetConcurrencyCap(0)
-	if got := full.PendingHeldByCapCount(); got != 3 {
-		t.Errorf("expected all 3 pending tasks held by a cap of 0, got %d", got)
+	if got := full.PendingHeldByCapCount(); got != 2 {
+		t.Errorf("expected the whole 2-task queue held by a cap of 0, got %d", got)
 	}
 
 	// An unlimited cap holds nothing, however long the queue is.
 	full.SetConcurrencyCap(config.ConcurrencyUnlimited)
 	if got := full.PendingHeldByCapCount(); got != 0 {
 		t.Errorf("expected an unlimited cap to hold nothing back, got %d", got)
+	}
+}
+
+// TestPendingHeldByCapCount_BoundaryDropsBelowInFlight is the case night
+// mode exists to surface: the cap drops at a schedule boundary while tasks
+// are running. The count must be the whole remaining queue — never the queue
+// plus the in-flight overflow.
+func TestPendingHeldByCapCount_BoundaryDropsBelowInFlight(t *testing.T) {
+	orch, _ := newCappedOrchestrator(t, 4)
+	for _, id := range []string{"d1", "d2", "d3", "d4", "d5", "d6"} {
+		addPending(t, orch, id)
+	}
+	for i, id := range []string{"d1", "d2", "d3", "d4"} {
+		guest := fmt.Sprintf("g%d", i+1)
+		if err := orch.RegisterGuest(guest, guest, nil); err != nil {
+			t.Fatalf("RegisterGuest %s: %v", guest, err)
+		}
+		if err := orch.AssignTask(id, guest); err != nil {
+			t.Fatalf("AssignTask %s: %v", id, err)
+		}
+	}
+
+	// The boundary arrives: cap 4 with 4 in flight becomes cap 2.
+	orch.SetConcurrencyCap(2)
+	if got := orch.PendingHeldByCapCount(); got != 2 {
+		t.Errorf("expected the whole 2-task queue when in flight exceeds the cap, got %d", got)
 	}
 }
