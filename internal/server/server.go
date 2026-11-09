@@ -16,10 +16,13 @@ import (
 	"sync"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus/promhttp"
+
 	"hotelier/pkg/config"
 	"hotelier/pkg/fatalwriter"
 	"hotelier/pkg/logstore"
 	"hotelier/pkg/logutil"
+	"hotelier/pkg/metrics"
 	"hotelier/pkg/orchestrator"
 	"hotelier/pkg/persona"
 	"hotelier/pkg/queue"
@@ -744,6 +747,22 @@ func (s *Server) Start() error {
 	mux.HandleFunc("/api/health", s.HandleHealth)
 	mux.HandleFunc("/api/logs", s.HandleLogs)
 	mux.HandleFunc("/api/logs/", s.HandleLogEntry)
+
+	// Prometheus scrape endpoint. Like /api/health it is unauthenticated, and
+	// it publishes only fixed-label gauges — no task IDs, guest IDs, personas
+	// or repository URLs — so there is nothing private in it (issue #260).
+	// One scrape at a time is exactly the semantics Prometheus wants anyway,
+	// and a failed gather lands in the server log rather than only in a 500
+	// nobody watches.
+	metricsRegistry, err := metrics.NewRegistry(s.orchestrator)
+	if err != nil {
+		return fmt.Errorf("register metrics collector: %w", err)
+	}
+	mux.Handle("/metrics", quietScrapes(promhttp.HandlerFor(metricsRegistry, promhttp.HandlerOpts{
+		ErrorLog:            s.log,
+		MaxRequestsInFlight: 1,
+		Timeout:             10 * time.Second,
+	})))
 
 	// Web UI
 	mux.HandleFunc("/", s.HandleWebUI)

@@ -593,13 +593,19 @@ func (o *Orchestrator) AdmitsNewWork(taskID string) bool {
 // inFlightCountInternal counts the tasks the cap must leave room for. The
 // caller must hold o.mu.
 func (o *Orchestrator) inFlightCountInternal() int {
-	n := 0
-	for _, task := range o.queue.GetAllTasks() {
-		if task.Status == queue.TaskStatusAssigned || task.Status == queue.TaskStatusRunning {
-			n++
-		}
-	}
-	return n
+	return o.queue.CountInFlight()
+}
+
+// HeldPendingCount returns the number of PENDING tasks carrying a hold
+// reason. HeldReason is written under o.mu once a task is in the queue
+// (issue #249), so the read takes that same lock: the queue's own lock does
+// not order against those writes, and reading the field unsynchronised is a
+// data race against a guest poll (issue #260).
+func (o *Orchestrator) HeldPendingCount() int {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+
+	return o.queue.CountHeldPending()
 }
 
 // admitsNewWorkInternal reports whether a new task may start now, and records

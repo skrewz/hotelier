@@ -415,6 +415,40 @@ func (q *TaskQueue) SetPriority(taskID, priority string) error {
 	return nil
 }
 
+// CountInFlight returns the number of tasks in flight: ASSIGNED or RUNNING.
+// Count-only on purpose: callers that need the number must not pay for the
+// slice and the priority sort GetPendingTasks performs (issue #260).
+func (q *TaskQueue) CountInFlight() int {
+	q.mu.RLock()
+	defer q.mu.RUnlock()
+
+	n := 0
+	for _, task := range q.ordered {
+		if task.Status == TaskStatusAssigned || task.Status == TaskStatusRunning {
+			n++
+		}
+	}
+	return n
+}
+
+// CountHeldPending returns the number of PENDING tasks carrying a hold
+// reason. Count-only, like CountInFlight. Note that a read through the queue
+// lock alone does not synchronise with the orchestrator's writes to
+// HeldReason: callers that must observe a consistent hold state read this
+// under the orchestrator lock (see orchestrator.HeldPendingCount).
+func (q *TaskQueue) CountHeldPending() int {
+	q.mu.RLock()
+	defer q.mu.RUnlock()
+
+	held := 0
+	for _, task := range q.ordered {
+		if task.Status == TaskStatusPending && task.HeldReason != "" {
+			held++
+		}
+	}
+	return held
+}
+
 // GetPendingTasks returns all pending tasks, sorted by priority
 // (highest first) and then by creation time (FIFO within same priority).
 func (q *TaskQueue) GetPendingTasks() []*Task {

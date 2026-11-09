@@ -241,6 +241,7 @@ curl -X POST http://localhost:8080/api/tasks \
 | `GET` | `/api/guests` | List connected guests (UID, host, state, tags) and the claim counters |
 | `GET` | `/api/guests/:id` | Get guest details |
 | `GET` | `/api/health` | Health check |
+| `GET` | `/metrics` | Prometheus scrape endpoint: live server state as gauges |
 | `WS` | `/ws` | WebSocket (JSON-RPC) |
 
 `/api/guests` also carries a `stats` object. The two action counters,
@@ -249,6 +250,55 @@ the guest confirms — revocations of re-queued claims and host-requested cancel
 alike — while `ack_refusals` is the recurrence signal for a guest running work
 the host has already closed (issue #252), so a non-zero action counter on a busy
 host is ordinary cancellation rather than a regression.
+
+### Metrics
+
+`GET /metrics` answers scrapes in the [Prometheus exposition
+format](https://prometheus.io/docs/instrumenting/exposition_formats/), gathered
+from the live state at scrape time — no background goroutine, and no second copy
+of a number another package owns. The exact encoding is negotiated from the
+scraper's `Accept` header; Prometheus defaults and plain `curl` get the text
+format. Like `/api/health` it is unauthenticated, and a scrape that fails to
+gather is logged on the server and answered with a generic 500 rather than an
+error dump.
+
+| Metric | Type | Labels | Meaning |
+|--------|------|--------|---------|
+| `hotelier_tasks` | gauge | `status` = `PENDING`, `ASSIGNED`, `RUNNING`, `COMPLETED`, `FAILED`, `CANCELLED` | Tasks the queue is holding, by status |
+| `hotelier_guests` | gauge | `state` = `DISCONNECTED`, `REGISTERED`, `IDLE`, `RUNNING` | Guests connected to this server, by state |
+| `hotelier_tasks_in_flight` | gauge | — | Tasks in flight: `ASSIGNED` or `RUNNING` |
+| `hotelier_concurrency_cap` | gauge | — | Maximum number of tasks allowed in flight; `+Inf` when no cap is in force |
+| `hotelier_tasks_held_by_cap` | gauge | — | `PENDING` tasks whose last assignment attempt was refused, i.e. carrying a hold reason (the count lags a rising cap until the next poll considers each task) |
+
+Label values are the strings the state machines use internally (`TaskStatus.String`
+and `GuestState.String`), and every label is a fixed enumeration: no task ID,
+guest ID, persona name or repository URL ever reaches this endpoint, so the
+number of series stays bounded whatever the queue does.
+
+**The cap is never published as a number when it is not in force.** Internally
+the "no cap" sentinel is deliberately negative (`config.ConcurrencyUnlimited`,
+`-1`) so it can never be mistaken for a count of tasks; on `/metrics` that case
+reads as `+Inf`. A graph of `hotelier_concurrency_cap` therefore shows a flat
+line at the configured ceiling whenever a cap is scheduled, and a series pushed
+off the top of the panel — night mode lifted, nothing held back — when it is
+not. `-1` never appears.
+
+These gauges describe **the process that is answering the scrape**. The queue
+keeps terminal tasks until the process restarts, so `hotelier_tasks{status="COMPLETED"}`
+and friends return to zero on a restart while the on-disk queue carries the work
+itself. Counting transitions and their durations — a number that survives a
+restart being counted — is a separate piece of this forest (issue #262).
+
+Scrape config sample:
+
+```yaml
+scrape_configs:
+  - job_name: hotelier
+    static_configs:
+      - targets: ["hotelier.example.com:8080"]
+    metrics_path: /metrics
+    scheme: http
+```
 
 ## Tags
 
