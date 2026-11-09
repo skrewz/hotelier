@@ -271,6 +271,40 @@ func TestScrapeReflectsLiveState(t *testing.T) {
 	}
 }
 
+// A scrape concurrent with the assignment path must not race on the hold
+// state: HeldReason is written under the orchestrator lock, and the
+// collector must read it under that same lock. Meaningless without -race;
+// under it, an unsynchronised read on either side shows up as a DATA RACE
+// (issue #260 review).
+func TestScrapeConcurrentWithHoldWrites(t *testing.T) {
+	o := newFixture(t)
+	addTasks(t, o, "pending", 4, nil)
+
+	url := serveState(t, o)
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for i := 0; i < 200; i++ {
+			// Alternate a cap that holds everything with one that admits,
+			// so the poll both writes and clears hold reasons.
+			if i%2 == 0 {
+				o.SetConcurrencyCap(0)
+			} else {
+				o.SetConcurrencyCap(1)
+			}
+			for _, task := range o.Queue().GetAllTasks() {
+				o.AdmitsNewWork(task.ID)
+			}
+		}
+	}()
+
+	for i := 0; i < 50; i++ {
+		scrape(t, url)
+	}
+	<-done
+}
+
 // A PENDING task the cap is holding back must make the queue read differently
 // from one it is simply waiting to place.
 func TestHeldByCapCountsHeldPendingTasks(t *testing.T) {

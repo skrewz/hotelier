@@ -125,13 +125,8 @@ func (c *Collector) Collect(ch chan<- prometheus.Metric) {
 	ch <- prometheus.MustNewConstMetric(c.capDesc, prometheus.GaugeValue,
 		capValue(c.orchestrator.ConcurrencyCap()))
 
-	held := 0
-	for _, task := range q.GetPendingTasks() {
-		if task.HeldReason != "" {
-			held++
-		}
-	}
-	ch <- prometheus.MustNewConstMetric(c.heldDesc, prometheus.GaugeValue, float64(held))
+	ch <- prometheus.MustNewConstMetric(c.heldDesc, prometheus.GaugeValue,
+		float64(c.orchestrator.HeldPendingCount()))
 }
 
 // capValue turns the cap into a float for the gauge. config.ConcurrencyUnlimited
