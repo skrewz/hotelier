@@ -1484,32 +1484,50 @@ func TestRestoreClearsHeldReason(t *testing.T) {
 func TestGetAllTasksOrdered(t *testing.T) {
 	q := newTestQueue(t)
 
-	base := time.Now().Add(-time.Hour)
-	add := func(id, priority string, offset time.Duration) {
-		task := &Task{ID: id, Prompt: id, Priority: priority, CreatedAt: base.Add(offset)}
-		if err := q.Add(task); err != nil {
-			t.Fatalf("add %s: %v", id, err)
+	must := func(err error) {
+		t.Helper()
+		if err != nil {
+			t.Fatalf("queue operation failed: %v", err)
 		}
 	}
 
-	add("running-old", PriorityOrangutan, 0)
-	add("assigned", PriorityOrangutan, time.Minute)
-	add("pending-firefighter", PriorityFirefighter, 2*time.Minute)
-	add("pending-old-orange", PriorityOrangutan, 3*time.Minute)
-	add("pending-teacher", PriorityTeacher, 4*time.Minute)
-	add("pending-new-orange", PriorityOrangutan, 5*time.Minute)
-	add("completed", PriorityOrangutan, 6*time.Minute)
-	add("failed", PriorityOrangutan, 7*time.Minute)
+	base := time.Now().Add(-time.Hour)
 
-	q.Assign("running-old", "guest-1")
-	q.Start("running-old")
-	q.Assign("assigned", "guest-2")
-	q.Assign("completed", "guest-3")
-	q.Start("completed")
-	q.Complete("completed", "done")
-	q.Assign("failed", "guest-4")
-	q.Start("failed")
-	q.Fail("failed", "boom")
+	// Restore rather than Add so the explicit CreatedAt survives (Add
+	// overwrites it with the wall clock), and restore in an order that
+	// deliberately disagrees with creation time: pending-new-orange is
+	// restored before the older pending-old-orange, and failed before the
+	// older completed. A tie-break on insertion position instead of
+	// CreatedAt would flip both pairs. This mirrors Store.Load, which
+	// restores tasks grouped by status and alphabetically by ID rather
+	// than by creation time, so FIFO after a restart rests on CreatedAt.
+	type restored struct {
+		id, priority string
+		age          time.Duration
+	}
+	for _, r := range []restored{
+		{"running-old", PriorityOrangutan, 7 * time.Minute},
+		{"assigned", PriorityOrangutan, 6 * time.Minute},
+		{"pending-firefighter", PriorityFirefighter, 5 * time.Minute},
+		{"pending-new-orange", PriorityOrangutan, 2 * time.Minute},
+		{"pending-old-orange", PriorityOrangutan, 3 * time.Minute},
+		{"pending-teacher", PriorityTeacher, 4 * time.Minute},
+		{"failed", PriorityOrangutan, 0},
+		{"completed", PriorityOrangutan, 1 * time.Minute},
+	} {
+		task := &Task{ID: r.id, Prompt: r.id, Priority: r.priority, CreatedAt: base.Add(-r.age)}
+		must(q.Restore(task))
+	}
+
+	must(q.Assign("running-old", "guest-1"))
+	must(q.Start("running-old"))
+	must(q.Assign("assigned", "guest-2"))
+	must(q.Assign("completed", "guest-3"))
+	must(q.Start("completed"))
+	must(q.Complete("completed", "done"))
+	must(q.Assign("failed", "guest-4"))
+	must(q.Start("failed"))
+	must(q.Fail("failed", "boom"))
 
 	got := q.GetAllTasksOrdered()
 	want := []string{
@@ -1538,9 +1556,17 @@ func TestGetAllTasksOrdered(t *testing.T) {
 func TestGetAllTasksOrderedReprioritisedMovesOutOfSlot(t *testing.T) {
 	q := newTestQueue(t)
 
-	base := time.Now().Add(-time.Hour)
-	q.Add(&Task{ID: "a", Prompt: "a", Priority: PriorityOrangutan, CreatedAt: base})
-	q.Add(&Task{ID: "b", Prompt: "b", Priority: PriorityOrangutan, CreatedAt: base.Add(time.Minute)})
+	must := func(err error) {
+		t.Helper()
+		if err != nil {
+			t.Fatalf("queue operation failed: %v", err)
+		}
+	}
+
+	// Add keeps the wall clock, which here agrees with insertion order;
+	// this test is about the reprioritised task leaving its old slot.
+	must(q.Add(&Task{ID: "a", Prompt: "a", Priority: PriorityOrangutan}))
+	must(q.Add(&Task{ID: "b", Prompt: "b", Priority: PriorityOrangutan}))
 
 	if err := q.SetPriority("b", PriorityFirefighter); err != nil {
 		t.Fatalf("SetPriority: %v", err)
