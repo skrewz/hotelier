@@ -625,3 +625,85 @@ func isEmptyLine(b []byte) bool {
 	}
 	return true
 }
+
+// Match is one log line that satisfied a search query, together with up to
+// ContextLines neighbouring lines from the same trace on either side.
+type Match struct {
+	TaskID        string    `json:"task_id"`
+	Date          string    `json:"date"`
+	Timestamp     time.Time `json:"timestamp"`
+	Line          string    `json:"line"`
+	ContextBefore []string  `json:"context_before"`
+	ContextAfter  []string  `json:"context_after"`
+}
+
+// SearchDates scans the given date partitions for log lines containing the
+// query (case-insensitive substring) and returns the matches ordered by
+// date, then task ID, then position within the trace. Only the dates handed
+// in are read — window enforcement is the caller's job (issue #269 keeps it
+// server-side in the HTTP handler), and a date that has been pruned or never
+// existed simply yields no matches. Context lines come from the same trace
+// and are clipped at either end.
+func (s *LogStore) SearchDates(dates []string, query string, contextLines int) ([]Match, error) {
+	if query == "" {
+		return nil, fmt.Errorf("search query must not be empty")
+	}
+	needle := strings.ToLower(query)
+
+	var matches []Match
+	for _, date := range dates {
+		tasks, err := s.ListTasks(date)
+		if err != nil {
+			return nil, err
+		}
+		sort.Strings(tasks)
+		for _, taskID := range tasks {
+			entries, err := s.ReadLogs(date, taskID)
+			if err != nil {
+				return nil, err
+			}
+			for i, e := range entries {
+				if !strings.Contains(strings.ToLower(e.Line), needle) {
+					continue
+				}
+				matches = append(matches, Match{
+					TaskID:        taskID,
+					Date:          date,
+					Timestamp:     e.Timestamp,
+					Line:          e.Line,
+					ContextBefore: linesBefore(entries, i, contextLines),
+					ContextAfter:  linesAfter(entries, i, contextLines),
+				})
+			}
+		}
+	}
+	return matches, nil
+}
+
+// linesBefore returns up to n entry lines immediately preceding index i,
+// oldest first, clipped at the start of the trace.
+func linesBefore(entries []Entry, i, n int) []string {
+	start := i - n
+	if start < 0 {
+		start = 0
+	}
+	out := make([]string, 0, i-start)
+	for _, e := range entries[start:i] {
+		out = append(out, e.Line)
+	}
+	return out
+}
+
+// linesAfter returns up to n entry lines immediately following index i,
+// in trace order, clipped at the end of the trace.
+func linesAfter(entries []Entry, i, n int) []string {
+	end := i + 1 + n
+	if end > len(entries) {
+		end = len(entries)
+	}
+	out := make([]string, 0, end-i-1)
+	for _, e := range entries[i+1 : end] {
+		out = append(out, e.Line)
+	}
+	return out
+}

@@ -238,11 +238,22 @@ curl -X POST http://localhost:8080/api/tasks \
 | `GET` | `/api/tasks/:id` | Get task details |
 | `POST` | `/api/tasks/:id/priority` | Change a PENDING task's priority; body `{"priority": "firefighter\|teacher\|orangutan"}` |
 | `GET` | `/api/tasks/:id/download` | Download the task's whole log trace as JSONL |
+| `GET` | `/api/tasks/search` | Search task output text: `q` (required), `status` (optional), window via `days=N` or `from`/`to` dates |
 | `GET` | `/api/guests` | List connected guests (UID, host, state, tags) and the claim counters |
 | `GET` | `/api/guests/:id` | Get guest details |
 | `GET` | `/api/health` | Health check |
 | `GET` | `/metrics` | Prometheus scrape endpoint: live server state as gauges |
 | `WS` | `/ws` | WebSocket (JSON-RPC) |
+
+`/api/tasks/search` reads matches through the date-partitioned log store,
+so searching output text never requires downloading whole traces. Lookback
+is enforced server-side: with no window supplied the last 5 days are
+searched, and a window wider than 14 days is rejected with `400` and an
+explanatory body — an explicit rejection rather than a silent clamp, so a
+client never believes it searched further than it did. The 14-day cap is
+independent of log retention pruning: dates already pruned simply yield no
+matches, and pruning never widens a window. Matches come back with the
+task's current title and status plus two lines of context either side.
 
 `/api/guests` also carries a `stats` object. The two action counters,
 `cancelled_while_running` and `cancelled_before_start`, cover every `task.cancel`

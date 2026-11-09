@@ -7,11 +7,13 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"reflect"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -741,6 +743,9 @@ func (s *Server) Start() error {
 
 	// REST API endpoints
 	mux.HandleFunc("/api/tasks", s.HandleTasks)
+	// Exact match: ServeMux prefers "/api/tasks/search" over the
+	// "/api/tasks/" subtree, so a search is never mistaken for a task ID.
+	mux.HandleFunc("/api/tasks/search", s.HandleTaskSearch)
 	mux.HandleFunc("/api/tasks/", s.HandleTaskDetail)
 	mux.HandleFunc("/api/guests", s.HandleGuests)
 	mux.HandleFunc("/api/guests/", s.HandleGuestDetail)
@@ -2564,5 +2569,171 @@ func writeLogAttachment(w http.ResponseWriter, filename, raw string) {
 	w.WriteHeader(http.StatusOK)
 	if _, err := w.Write([]byte(raw)); err != nil {
 		log.Printf("write log download %s: %v", filename, err)
+	}
+}
+
+// Lookback policy for task-output search (issue #269). The ideation issue
+// fixed these numbers: a search with no window covers the last five days,
+// and no request may scan more than fourteen. The cap is enforced
+// server-side by rejecting wider windows outright — an explicit 400 rather
+// than a silent clamp, so a client never believes it searched further than
+// it did — and stands independently of log retention pruning (issue #263):
+// pruning may already have removed older dates, but it never widens a
+// window.
+const (
+	defaultSearchLookbackDays = 5
+	maxSearchLookbackDays     = 14
+	searchContextLines        = 2
+)
+
+// HandleTaskSearch handles GET /api/tasks/search: a substring search over
+// task output text, read through the date-partitioned log store so callers
+// need not download whole traces (issue #269).
+//
+// Parameters: q (required, case-insensitive substring), status (optional,
+// matched case-insensitively against the task's current status), and a
+// lookback window — either days=N (the last N calendar days including
+// today) or an explicit inclusive from=YYYY-MM-DD&to=YYYY-MM-DD pair.
+// Neither window form nor days beyond the cap are accepted: see the
+// constants above for the policy and the error bodies for the specifics.
+func (s *Server) HandleTaskSearch(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	if s.diskLogStore == nil {
+		http.Error(w, "log store not configured", http.StatusServiceUnavailable)
+		return
+	}
+
+	query := strings.TrimSpace(r.URL.Query().Get("q"))
+	if query == "" {
+		http.Error(w, "q parameter is required", http.StatusBadRequest)
+		return
+	}
+
+	from, to, err := parseSearchWindow(r.URL.Query(), time.Now().UTC())
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	allDates, err := s.diskLogStore.ListDates()
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	// Restrict the scan to date directories inside the window; the store
+	// then only ever opens files under those directories.
+	window := make([]string, 0, len(allDates))
+	for _, date := range allDates {
+		d, err := time.Parse("2006-01-02", date)
+		if err != nil {
+			continue // not a date directory; ListDates would not have listed it
+		}
+		if !d.Before(from) && !d.After(to) {
+			window = append(window, date)
+		}
+	}
+
+	matches, err := s.diskLogStore.SearchDates(window, query, searchContextLines)
+	if err != nil {
+		// Store errors embed absolute filesystem paths; keep them
+		// server-side rather than echoing them to the client.
+		s.log.Printf("task search %q: %v", query, err)
+		http.Error(w, "failed to read logs", http.StatusInternalServerError)
+		return
+	}
+
+	statusFilter := strings.TrimSpace(r.URL.Query().Get("status"))
+	type decoratedMatch struct {
+		logstore.Match
+		Title  string `json:"title"`
+		Status string `json:"status"`
+	}
+	results := make([]decoratedMatch, 0, len(matches))
+	seen := make(map[string]*queue.Task)
+	for _, m := range matches {
+		task, ok := seen[m.TaskID]
+		if !ok {
+			task, ok = s.orchestrator.GetTask(m.TaskID)
+			seen[m.TaskID] = task
+		}
+		var title, status string
+		if ok && task != nil {
+			title, status = task.Title, task.Status.String()
+		}
+		// A status filter only matches tasks the queue still knows about
+		// and currently holds that status; a pruned-from-memory task has
+		// no status to satisfy the filter.
+		if statusFilter != "" {
+			if !ok || task == nil || !strings.EqualFold(status, statusFilter) {
+				continue
+			}
+		}
+		results = append(results, decoratedMatch{Match: m, Title: title, Status: status})
+	}
+
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"query":   query,
+		"from":    from.Format("2006-01-02"),
+		"to":      to.Format("2006-01-02"),
+		"count":   len(results),
+		"matches": results,
+	})
+}
+
+// parseSearchWindow resolves the lookback window to an inclusive UTC date
+// range, enforcing the cap server-side. It returns a descriptive error for
+// any malformed, ambiguous or over-wide window, which the handler turns
+// into a 400.
+func parseSearchWindow(values url.Values, now time.Time) (from, to time.Time, err error) {
+	y, mo, d := now.Date()
+	today := time.Date(y, mo, d, 0, 0, 0, 0, time.UTC)
+
+	daysStr := values.Get("days")
+	fromStr, toStr := values.Get("from"), values.Get("to")
+
+	switch {
+	case daysStr != "" && (fromStr != "" || toStr != ""):
+		return time.Time{}, time.Time{}, fmt.Errorf("specify either days or from/to, not both")
+
+	case daysStr != "":
+		n, err := strconv.Atoi(daysStr)
+		if err != nil || n <= 0 {
+			return time.Time{}, time.Time{}, fmt.Errorf("days must be a positive integer")
+		}
+		if n > maxSearchLookbackDays {
+			return time.Time{}, time.Time{}, fmt.Errorf("lookback window of %d days exceeds the maximum of %d days", n, maxSearchLookbackDays)
+		}
+		return today.AddDate(0, 0, -(n - 1)), today, nil
+
+	case fromStr != "" || toStr != "":
+		if fromStr == "" || toStr == "" {
+			return time.Time{}, time.Time{}, fmt.Errorf("both from and to are required")
+		}
+		from, err := time.Parse("2006-01-02", fromStr)
+		if err != nil {
+			return time.Time{}, time.Time{}, fmt.Errorf("from must be a YYYY-MM-DD date")
+		}
+		to, err := time.Parse("2006-01-02", toStr)
+		if err != nil {
+			return time.Time{}, time.Time{}, fmt.Errorf("to must be a YYYY-MM-DD date")
+		}
+		if from.After(to) {
+			return time.Time{}, time.Time{}, fmt.Errorf("from must not be after to")
+		}
+		span := int(to.Sub(from).Hours()/24) + 1
+		if span > maxSearchLookbackDays {
+			return time.Time{}, time.Time{}, fmt.Errorf("lookback window of %d days exceeds the maximum of %d days", span, maxSearchLookbackDays)
+		}
+		return from, to, nil
+
+	default:
+		return today.AddDate(0, 0, -(defaultSearchLookbackDays - 1)), today, nil
 	}
 }
