@@ -675,14 +675,6 @@ func (o *Orchestrator) GetTasksByStatus(status queue.TaskStatus) []*queue.Task {
 	return o.queue.GetTasksByStatus(status)
 }
 
-// GetAllTasks returns all tasks.
-func (o *Orchestrator) GetAllTasks() []*queue.Task {
-	o.mu.Lock()
-	defer o.mu.Unlock()
-
-	return o.queue.GetAllTasks()
-}
-
 // GetAllTasksOrdered returns all tasks in the order the queue will get
 // processed (issue #268); see queue.TaskQueue.GetAllTasksOrdered.
 func (o *Orchestrator) GetAllTasksOrdered() []*queue.Task {
