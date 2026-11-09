@@ -819,7 +819,7 @@ func (o *Orchestrator) PendingHeldByCapCount() int {
 		return 0
 	}
 
-	pending := len(o.queue.GetPendingTasks())
+	pending := o.queue.CountByStatus(queue.TaskStatusPending)
 	room := o.concurrencyCap - o.inFlightCountInternal()
 	if room < 0 {
 		// More in flight than the cap now allows: nothing else can start.
