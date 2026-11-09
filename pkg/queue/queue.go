@@ -490,11 +490,9 @@ func (q *TaskQueue) GetAllTasksOrdered() []*Task {
 			return ri < rj
 		}
 		if ri == processingRank(TaskStatusPending) {
-			// Within the pending band the queue drains by priority first.
-			vi, vj := priorityValue(result[i].Priority), priorityValue(result[j].Priority)
-			if vi != vj {
-				return vi < vj
-			}
+			// Within the pending band the queue drains by the same key
+			// NextPendingTask uses.
+			return lessPendingByPriority(result[i], result[j])
 		}
 		return result[i].CreatedAt.Before(result[j].CreatedAt)
 	})
@@ -595,16 +593,25 @@ func (q *TaskQueue) validTransition(from, to TaskStatus) bool {
 	return false
 }
 
+// lessPendingByPriority is the queue's single definition of pending drain
+// order: priority first (lower priorityValue = higher priority), then FIFO
+// by creation time. sortPendingByPriority and GetAllTasksOrdered share it
+// so the displayed order cannot drift from what NextPendingTask drains
+// (issue #268).
+func lessPendingByPriority(a, b *Task) bool {
+	vi, vj := priorityValue(a.Priority), priorityValue(b.Priority)
+	if vi != vj {
+		return vi < vj // lower value = higher priority
+	}
+	return a.CreatedAt.Before(b.CreatedAt)
+}
+
 // sortPendingByPriority sorts pending tasks by priority (highest first),
 // then by creation time (FIFO within same priority). The caller must hold
 // at least q.mu.RLock.
 func (q *TaskQueue) sortPendingByPriority(tasks []*Task) []*Task {
 	sort.SliceStable(tasks, func(i, j int) bool {
-		vi, vj := priorityValue(tasks[i].Priority), priorityValue(tasks[j].Priority)
-		if vi != vj {
-			return vi < vj // lower value = higher priority
-		}
-		return tasks[i].CreatedAt.Before(tasks[j].CreatedAt)
+		return lessPendingByPriority(tasks[i], tasks[j])
 	})
 	return tasks
 }
