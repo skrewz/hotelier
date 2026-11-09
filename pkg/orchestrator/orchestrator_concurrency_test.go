@@ -429,3 +429,24 @@ func TestPendingHeldByCapCount_BoundaryDropsBelowInFlight(t *testing.T) {
 		t.Errorf("expected the whole 2-task queue when in flight exceeds the cap, got %d", got)
 	}
 }
+
+// TestPendingHeldByCapCount_TagBlockedQueueIsTheQueueBeyondRoom pins the
+// documented reading of waiting_on_cap: it is the pending queue beyond the
+// cap's room, not a verdict on which obstacle holds each task. A queue no
+// registered guest can take still counts while it exceeds the room — the cap
+// leaves no room for those tasks either — and each task's held_reason is
+// what names what holds it.
+func TestPendingHeldByCapCount_TagBlockedQueueIsTheQueueBeyondRoom(t *testing.T) {
+	orch, _ := newCappedOrchestrator(t, 2)
+	if err := orch.RegisterGuest("g1", "G1", []string{"fast"}); err != nil {
+		t.Fatalf("RegisterGuest: %v", err)
+	}
+	for _, id := range []string{"t1", "t2", "t3"} {
+		if err := orch.AddTask(&queue.Task{ID: id, Prompt: id, Tags: []string{"gpu"}}); err != nil {
+			t.Fatalf("AddTask %s: %v", id, err)
+		}
+	}
+	if got := orch.PendingHeldByCapCount(); got != 1 {
+		t.Errorf("expected the 1 task beyond the cap's room, tags notwithstanding, got %d", got)
+	}
+}

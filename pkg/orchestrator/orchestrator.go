@@ -794,18 +794,18 @@ func (o *Orchestrator) capErrorInternal(taskID string) error {
 		taskID, o.inFlightCountInternal(), o.concurrencyCap)
 }
 
-// PendingHeldByCapCount reports how many PENDING tasks the cap cannot start at
-// this instant (issue #250). It is the number that tells an operator "the
-// queue is held behind the cap" apart from "the queue is empty": with the cap
-// full, the queue beyond the room it leaves cannot start however many matching
-// guests join, so a non-zero count next to idle guests means the schedule, not
-// the pool, is what work is stuck on.
+// PendingHeldByCapCount reports how many PENDING tasks there is no room for
+// under the cap at this instant (issue #250): the pending queue beyond the
+// room the cap leaves. It is the number that tells "the queue is held behind
+// the cap" apart from "the queue is empty".
 //
-// The count is derived from the cap and the live in-flight and pending counts
-// rather than from the holds the last assignment pass recorded. Holds are
-// written when a task is refused, so they would report nothing about a queue
-// that filled its slot afterwards — and the queue is exactly what this number
-// exists to show.
+// The count is arithmetic on the cap and the live in-flight and pending
+// counts, not a per-task verdict on why each task waits. Deriving it from
+// the holds the last assignment pass recorded would report nothing about a
+// queue that filled its slot after the pass — and a queue that also waits on
+// guests with matching tags still counts while it exceeds the room. What
+// holds a given task is that task's own held_reason; this number says only
+// that the queue is longer than the cap's room.
 //
 // In flight can exceed the cap right after a boundary drops below the running
 // count; the room is then clamped to zero and the answer is the whole queue,

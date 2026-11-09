@@ -137,11 +137,13 @@ no cap is in force) and `source` names the schedule entry — or
 without opening the file. `in_flight` counts the `ASSIGNED` and `RUNNING` tasks
 the cap is measured against, and `waiting_on_cap` the pending tasks there is no
 room for — the queue beyond whatever room the cap has left. `waiting_on_cap`
-above zero with idle guests means the queue is held behind the cap, which is
-the case a flat "nothing is running" cannot tell apart from a dead pool. A task
-waiting only for a guest with matching tags is not counted, and says so in its
-own `held_reason` instead. `next_change` is `null` while the cap will not move
-— no schedule, or a schedule whose entries all carry the same cap.
+above zero with idle guests means the queue is longer than the cap's room,
+which is the case a flat "nothing is running" cannot tell apart from a dead
+pool. The count is arithmetic on the queue and the room, not a per-task
+verdict: a queue that also waits on guests with matching tags still counts
+while it exceeds the room, and which of the two holds a given task is what
+that task's own `held_reason` says. `next_change` is `null` while the cap will
+not move — no schedule, or a schedule whose entries all carry the same cap.
 
 With neither `max_concurrent_tasks` nor a schedule set — the default, and every
 deployment that predates this feature — there is no cap and assignment behaves

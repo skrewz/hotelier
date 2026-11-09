@@ -2352,6 +2352,11 @@ func (s *Server) HandleGuests(w http.ResponseWriter, r *http.Request) {
 // enforcement reads — so the number an operator sees is the number the next
 // assignment decision will obey. The counts come from the orchestrator, which
 // is where they are decided.
+//
+// The HTTP API performs no authentication; deployments are expected to bind
+// to loopback or sit behind an authenticating proxy. Everything in this
+// response — queue depth, throttle schedule, timezone — must be written for
+// an untrusted reader.
 func (s *Server) concurrencyStatus(now time.Time) map[string]interface{} {
 	s.mu.RLock()
 	status := s.cfg.ConcurrencyStatus(now)
