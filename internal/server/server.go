@@ -2348,15 +2348,21 @@ func (s *Server) HandleGuests(w http.ResponseWriter, r *http.Request) {
 // produced it, how much work is in flight against it, how much more the cap
 // is holding back, and the next boundary at which the number changes.
 //
-// The cap comes from the config resolver — the same source of truth
-// enforcement reads — so the number an operator sees is the number the next
-// assignment decision will obey. The counts come from the orchestrator, which
-// is where they are decided.
+// The cap and the counts come from the orchestrator, which is where they are
+// decided and where enforcement measures the counts — one response is one
+// instant, and the number an operator sees is the number the next assignment
+// decision obeys. The provenance (`source`) and the schedule picture
+// (`next_change`, `timezone`) come from the config resolver, which reads the
+// schedule directly; immediately after a boundary they can therefore lead the
+// enforced cap by up to one concurrencySyncInterval (15s), the pre-existing
+// sync lag, until syncConcurrencyCap pushes the resolver's answer into the
+// orchestrator. /api/health reads the same enforced cap, so the two surfaces
+// state one number.
 //
-// The HTTP API performs no authentication; deployments are expected to bind
-// to loopback or sit behind an authenticating proxy. Everything in this
-// response — queue depth, throttle schedule, timezone — must be written for
-// an untrusted reader.
+// The HTTP API performs no authentication; bind to loopback or terminate
+// behind an authenticating proxy (see the README server configuration
+// section). Everything in this response — queue depth, throttle schedule,
+// timezone — must be written for an untrusted reader.
 func (s *Server) concurrencyStatus(now time.Time) map[string]interface{} {
 	s.mu.RLock()
 	status := s.cfg.ConcurrencyStatus(now)
@@ -2372,7 +2378,7 @@ func (s *Server) concurrencyStatus(now time.Time) map[string]interface{} {
 	}
 
 	return map[string]interface{}{
-		"cap":    capLabel(status.Cap),
+		"cap":    capLabel(s.orchestrator.ConcurrencyCap()),
 		"source": status.Source,
 		// "in_flight" is the ASSIGNED or RUNNING count the cap is measured
 		// against; "waiting_on_cap" is the pending queue there is no room

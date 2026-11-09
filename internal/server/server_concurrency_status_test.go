@@ -36,11 +36,16 @@ func addTask(t *testing.T, srv *Server, id string) {
 
 // TestConcurrencyStatus_FollowsTheScheduleWithAClock pins the verification the
 // issue asks for: read the status either side of a boundary and the number,
-// the entry it came from, and the next change all move on their own.
+// the entry it came from, and the next change all move on their own. Each
+// read is preceded by the sync tick the server runs every 15 seconds — the
+// published cap is the enforced one, so a status read at an instant states the
+// cap the schedule puts in force there once enforcement has caught up.
 func TestConcurrencyStatus_FollowsTheScheduleWithAClock(t *testing.T) {
 	srv := dayNightServer(t)
 
-	before := srv.concurrencyStatus(time.Date(2026, 6, 15, 6, 0, 0, 0, time.UTC))
+	at := time.Date(2026, 6, 15, 6, 0, 0, 0, time.UTC)
+	srv.syncConcurrencyCap(at)
+	before := srv.concurrencyStatus(at)
 	if before["cap"] != 4 {
 		t.Fatalf("expected cap 4 from the wrap-around 23:00 entry, got %v", before["cap"])
 	}
@@ -58,6 +63,7 @@ func TestConcurrencyStatus_FollowsTheScheduleWithAClock(t *testing.T) {
 		t.Errorf("expected the next change to name its zone, got %v", next["timezone"])
 	}
 
+	srv.syncConcurrencyCap(time.Date(2026, 6, 15, 8, 0, 0, 0, time.UTC))
 	after := srv.concurrencyStatus(time.Date(2026, 6, 15, 8, 0, 0, 0, time.UTC))
 	if after["cap"] != 2 {
 		t.Fatalf("expected cap 2 after the 07:00 boundary, got %v", after["cap"])
@@ -130,6 +136,32 @@ func TestConcurrencyStatus_UnlimitedCapIsSaidInWords(t *testing.T) {
 	}
 	if status["waiting_on_cap"] != 0 {
 		t.Errorf("expected nothing waiting on a cap that is not in force, got %v", status["waiting_on_cap"])
+	}
+}
+
+// TestConcurrencyStatus_StatesTheEnforcedCap: the cap on the status surface is
+// the number the orchestrator measures its counts against — the same one
+// /api/health states — not the resolver's answer, which can lead it by up to
+// one sync interval after a boundary.
+func TestConcurrencyStatus_StatesTheEnforcedCap(t *testing.T) {
+	srv := dayNightServer(t)
+
+	boundary := time.Date(2026, 6, 15, 8, 0, 0, 0, time.UTC)
+	before := srv.concurrencyStatus(boundary)
+	if before["cap"] != srv.orchestrator.ConcurrencyCap() {
+		t.Fatalf("expected the cap the orchestrator enforces (%v), got %v", srv.orchestrator.ConcurrencyCap(), before["cap"])
+	}
+
+	// Once the sync tick has pushed the boundary's cap into the orchestrator,
+	// the status and the enforced number agree again — and the schedule
+	// provenance still names where the cap came from.
+	srv.syncConcurrencyCap(boundary)
+	after := srv.concurrencyStatus(boundary)
+	if after["cap"] != 2 || srv.orchestrator.ConcurrencyCap() != 2 {
+		t.Errorf("expected the enforced cap 2 after the sync, got status %v, enforced %v", after["cap"], srv.orchestrator.ConcurrencyCap())
+	}
+	if after["source"] != `concurrency_schedule at "07:00"` {
+		t.Errorf("expected the source to name the 07:00 entry, got %v", after["source"])
 	}
 }
 

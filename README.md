@@ -74,6 +74,12 @@ max_concurrent_tasks: 0
 | `schedule_timezone` | IANA zone name the schedule's `at` times are interpreted in, so boundaries follow the wall clock across DST. The server binary embeds the tz database (`time/tzdata`), so a zone name resolves even in the scratch container image, which ships no `/usr/share/zoneinfo`. | `"UTC"` |
 | `log_retention_days` | How many days of task logs the prune sweep keeps. Date directories older than today minus this many days are removed at startup and on the cleanup tick; the current day and any in-window day are left completely alone, and `queue_dir` is never touched. Following the `max_guests` convention, `0` disables pruning. | `14` |
 
+**The HTTP API performs no authentication and there is no TLS.** A server
+bound to `0.0.0.0` serves the dashboard, the guest registry and the task logs
+to anyone who can reach the port. Bind `host` to `"127.0.0.1"` on a single
+machine, or keep it reachable only through a proxy that authenticates;
+whatever the bind, the API must not be exposed to untrusted networks.
+
 Worked example — cap of 2 from 07:00 and 4 from 23:00, Sydney time (DST-aware):
 
 ```yaml
@@ -114,7 +120,7 @@ guest, in the four places an operator reads:
 - the task: `held_reason` on a pending task names the cap and what is in
   flight, and clears as soon as the task is assigned
 - `/api/health`: `in_flight` and `concurrency_cap` (the latter `"unlimited"`
-  when no cap is configured) say the same thing at a glance
+  when no cap is in force) say the same thing at a glance
 - the dashboard: a concurrency stat in the header, `2/4 · next 23:00 → 4`, so
   night mode reads as night mode rather than as an idle system
 
@@ -131,12 +137,14 @@ The same picture is served on the endpoint the dashboard polls, as
 }
 ```
 
-`cap` is the number the resolver reports for this instant (`"unlimited"` when
-no cap is in force) and `source` names the schedule entry — or
-`max_concurrent_tasks` — it came from, so the value is traceable to the config
-without opening the file. `in_flight` counts the `ASSIGNED` and `RUNNING` tasks
-the cap is measured against, and `waiting_on_cap` the pending tasks there is no
-room for — the queue beyond whatever room the cap has left. `waiting_on_cap`
+`cap` is the enforced number the orchestrator measures its counts against —
+the same one `/api/health` states, and the one the next assignment decision
+obeys (`"unlimited"` when no cap is in force) — and `source` names the
+schedule entry — or `max_concurrent_tasks` — it came from, so the value is
+traceable to the config without opening the file. `in_flight` counts the
+`ASSIGNED` and `RUNNING` tasks the cap is measured against, and
+`waiting_on_cap` the pending tasks there is no room for — the queue beyond
+whatever room the cap has left. `waiting_on_cap`
 above zero with idle guests means the queue is longer than the cap's room,
 which is the case a flat "nothing is running" cannot tell apart from a dead
 pool. The count is arithmetic on the queue and the room, not a per-task
@@ -144,6 +152,9 @@ verdict: a queue that also waits on guests with matching tags still counts
 while it exceeds the room, and which of the two holds a given task is what
 that task's own `held_reason` says. `next_change` is `null` while the cap will
 not move — no schedule, or a schedule whose entries all carry the same cap.
+`source` and `next_change` are resolved from the schedule directly, so
+immediately after a boundary they can name the new cap up to one 15-second
+sync tick before `cap` and the counts move to it.
 
 With neither `max_concurrent_tasks` nor a schedule set — the default, and every
 deployment that predates this feature — there is no cap and assignment behaves
