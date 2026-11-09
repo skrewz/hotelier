@@ -803,6 +803,52 @@ func TestTaskStatusTransition_RunningToPending(t *testing.T) {
 	}
 }
 
+// TestSetPriority verifies that a submitted task's priority can be changed
+// after the fact (issue #266).
+func TestSetPriority(t *testing.T) {
+	q := newTestQueue(t)
+
+	task := &Task{ID: "task-1", Prompt: "Task 1"}
+	if err := q.Add(task); err != nil {
+		t.Fatalf("add failed: %v", err)
+	}
+	if task.Priority != PriorityOrangutan {
+		t.Fatalf("expected default priority %q, got %q", PriorityOrangutan, task.Priority)
+	}
+
+	// A bumped firefighter must sort ahead of an untouched teacher task,
+	// even though the teacher task was created first.
+	teacher := &Task{ID: "task-2", Prompt: "Task 2", Priority: PriorityTeacher}
+	if err := q.Add(teacher); err != nil {
+		t.Fatalf("add failed: %v", err)
+	}
+	if next := q.NextPendingTask(); next == nil || next.ID != "task-2" {
+		t.Fatalf("expected teacher task-2 first before the bump, got %v", next)
+	}
+
+	if err := q.SetPriority("task-1", PriorityFirefighter); err != nil {
+		t.Fatalf("SetPriority failed: %v", err)
+	}
+	if task.Priority != PriorityFirefighter {
+		t.Errorf("expected priority %q, got %q", PriorityFirefighter, task.Priority)
+	}
+	if next := q.NextPendingTask(); next == nil || next.ID != "task-1" {
+		t.Errorf("expected bumped task-1 first after the bump, got %v", next)
+	}
+
+	// Unknown priorities are rejected and leave the task untouched.
+	if err := q.SetPriority("task-1", "🔥"); err == nil {
+		t.Error("expected error for invalid priority")
+	}
+	if task.Priority != PriorityFirefighter {
+		t.Errorf("priority changed on invalid value: got %q", task.Priority)
+	}
+
+	if err := q.SetPriority("nonexistent", PriorityTeacher); err == nil {
+		t.Error("expected error for unknown task id")
+	}
+}
+
 // TestValidatePriority verifies that valid and invalid priorities are
 // correctly identified.
 func TestValidatePriority(t *testing.T) {

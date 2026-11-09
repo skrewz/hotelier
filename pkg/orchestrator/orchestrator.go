@@ -400,6 +400,32 @@ func (o *Orchestrator) CancelTask(taskID, guestID string) error {
 	return nil
 }
 
+// SetTaskPriority changes the priority of a pending task (issue #266).
+//
+// Priority only orders the pending queue, so a task that has left PENDING
+// is rejected: its place in the queue no longer matters, and changing it
+// would be misleading.
+func (o *Orchestrator) SetTaskPriority(taskID, priority string) error {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+
+	task, ok := o.queue.Get(taskID)
+	if !ok {
+		return fmt.Errorf("task %s not found", taskID)
+	}
+	if task.Status != queue.TaskStatusPending {
+		return fmt.Errorf("task %s is not pending (status: %s)", taskID, task.Status)
+	}
+
+	if err := o.queue.SetPriority(taskID, priority); err != nil {
+		return err
+	}
+	o.persistTask(task)
+
+	o.logf("task %s priority set to %s (PENDING)", taskID, priority)
+	return nil
+}
+
 // RequeueTask atomically re-queues a task and clears the guest.
 //
 // Task: ASSIGNED|RUNNING → PENDING (AssignedTo cleared)

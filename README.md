@@ -235,6 +235,7 @@ curl -X POST http://localhost:8080/api/tasks \
 | `GET` | `/api/tasks` | List all tasks |
 | `POST` | `/api/tasks` | Submit a new task |
 | `GET` | `/api/tasks/:id` | Get task details |
+| `POST` | `/api/tasks/:id/priority` | Change a PENDING task's priority; body `{"priority": "firefighter\|teacher\|orangutan"}` |
 | `GET` | `/api/tasks/:id/download` | Download the task's whole log trace as JSONL |
 | `GET` | `/api/guests` | List connected guests (UID, host, state, tags) and the claim counters |
 | `GET` | `/api/guests/:id` | Get guest details |

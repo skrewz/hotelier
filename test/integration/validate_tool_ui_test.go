@@ -2913,6 +2913,36 @@ const { chromium } = require('playwright');
   if (!noBadgeOnRunningTask) fail('Priority badge should NOT be on non-pending tasks');
   console.log('PASS: Priority badge not present on running task');
 
+  // Issue #266: orangutan is the lowest rung of the ladder, so the pending
+  // row offers exactly one bump control — the up arrow towards teacher.
+  const bumpButtonsInList = await page.evaluate((pid) => {
+    const items = document.querySelectorAll('.task-item');
+    for (const item of items) {
+      if (item.textContent.includes(pid)) {
+        const btns = [...item.querySelectorAll('.priority-bump')];
+        return { count: btns.length, dirs: btns.map(b => b.dataset.dir).join(','), priority: btns[0] ? btns[0].dataset.priority : null };
+      }
+    }
+    return { count: -1, dirs: '', priority: null };
+  }, pendingTaskId);
+  if (bumpButtonsInList.count !== 1) fail('Pending orangutan row should show exactly one bump button, got ' + bumpButtonsInList.count);
+  if (bumpButtonsInList.dirs !== 'up') fail('Pending orangutan row should show only the up bump button, got: ' + bumpButtonsInList.dirs);
+  if (bumpButtonsInList.priority !== 'orangutan') fail('Bump button should carry the current priority, got: ' + bumpButtonsInList.priority);
+  console.log('PASS: Pending orangutan row shows only the up bump button');
+
+  // Bump controls belong to pending tasks only.
+  const noBumpOnRunningTask = await page.evaluate((tid) => {
+    const items = document.querySelectorAll('.task-item');
+    for (const item of items) {
+      if (item.textContent.includes(tid)) {
+        return item.querySelector('.priority-bump') === null;
+      }
+    }
+    return true; // task not found, pass
+  }, taskId);
+  if (!noBumpOnRunningTask) fail('Bump buttons should NOT be on non-pending tasks');
+  console.log('PASS: Bump buttons not present on running task');
+
   // Click into the pending task to see detail view
   await page.evaluate((pid) => {
     const items = document.querySelectorAll('.task-item');
@@ -2943,6 +2973,56 @@ const { chromium } = require('playwright');
   console.log('PASS: Priority badge has correct format');
 
   await takeScreenshot('12-priority-badge');
+
+  // Issue #266: bump the pending task along the ladder from the detail
+  // header. orangutan -> teacher -> firefighter -> back down again,
+  // asserting at each rung that the badge and the button set match the
+  // ladder rule (top rung: down only; middle: both; bottom: up only).
+  const detailBumpButtons = () => page.evaluate(() => {
+    const header = document.querySelector('.task-detail-header');
+    if (!header) return { count: -1, dirs: '', priority: null, badge: '' };
+    const badge = header.querySelector('.badge-priority');
+    const btns = [...header.querySelectorAll('.priority-bump')];
+    return { count: btns.length, dirs: btns.map(b => b.dataset.dir).sort().join(','), priority: btns[0] ? btns[0].dataset.priority : null, badge: badge ? badge.textContent.trim() : '' };
+  });
+  const waitBadge = (emoji) => page.waitForFunction((e) => {
+    const badge = document.querySelector('.task-detail-header .badge-priority');
+    return badge && badge.textContent.includes(e);
+  }, emoji, { timeout: 8000 });
+
+  const detailBump0 = await detailBumpButtons();
+  if (detailBump0.count !== 1 || detailBump0.dirs !== 'up') fail('Detail view of an orangutan task should show only the up bump button, got: ' + JSON.stringify(detailBump0));
+
+  // Up: orangutan -> teacher (both buttons appear)
+  await page.evaluate(() => document.querySelector('.task-detail-header .priority-bump-up').click());
+  await waitBadge('🧑‍🏫'); // teacher
+  const detailBump1 = await detailBumpButtons();
+  if (detailBump1.count !== 2 || detailBump1.dirs !== 'down,up') fail('Detail view of a teacher task should show both bump buttons, got: ' + JSON.stringify(detailBump1));
+  if (detailBump1.priority !== 'teacher') fail('Detail bump buttons should carry priority teacher, got: ' + detailBump1.priority);
+  console.log('PASS: Bumping up moved orangutan -> teacher and shows both buttons');
+
+  // Up: teacher -> firefighter (only the down button remains)
+  await page.evaluate(() => document.querySelector('.task-detail-header .priority-bump-up').click());
+  await waitBadge('🧑‍🚒'); // firefighter
+  const detailBump2 = await detailBumpButtons();
+  if (detailBump2.count !== 1 || detailBump2.dirs !== 'down') fail('Detail view of a firefighter task should show only the down bump button, got: ' + JSON.stringify(detailBump2));
+  console.log('PASS: Bumping up moved teacher -> firefighter and shows only the down button');
+
+  // Down: firefighter -> teacher (both buttons return)
+  await page.evaluate(() => document.querySelector('.task-detail-header .priority-bump-down').click());
+  await waitBadge('🧑‍🏫'); // teacher
+  const detailBump3 = await detailBumpButtons();
+  if (detailBump3.count !== 2 || detailBump3.dirs !== 'down,up') fail('Bumping down should restore both bump buttons, got: ' + JSON.stringify(detailBump3));
+  console.log('PASS: Bumping down moved firefighter -> teacher and restores both buttons');
+
+  // Down: teacher -> orangutan (only the up button remains)
+  await page.evaluate(() => document.querySelector('.task-detail-header .priority-bump-down').click());
+  await waitBadge('🦧'); // orangutan
+  const detailBump4 = await detailBumpButtons();
+  if (detailBump4.count !== 1 || detailBump4.dirs !== 'up') fail('Bumping down to orangutan should leave only the up button, got: ' + JSON.stringify(detailBump4));
+  console.log('PASS: Bumping down returned to orangutan with only the up button');
+
+  await takeScreenshot('12b-priority-bumped');
 
   // =====================================================================
   // Phase 13: Compaction task — compaction events rendered as a block

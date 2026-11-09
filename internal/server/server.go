@@ -2002,6 +2002,13 @@ func (s *Server) HandleTaskDetail(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Check for priority sub-path: /api/tasks/:id/priority
+	if strings.HasSuffix(path, "/priority") {
+		taskID := strings.TrimSuffix(path, "/priority")
+		s.handleTaskPriority(w, r, taskID)
+		return
+	}
+
 	// Check for download sub-path: /api/tasks/:id/download
 	if strings.HasSuffix(path, "/download") {
 		taskID := strings.TrimSuffix(path, "/download")
@@ -2152,6 +2159,63 @@ func (s *Server) handleTaskCancelHTTP(w http.ResponseWriter, r *http.Request, ta
 	json.NewEncoder(w).Encode(map[string]interface{}{
 		"task_id": task.ID,
 		"status":  task.Status.String(),
+	})
+}
+
+// handleTaskPriority handles the /api/tasks/:id/priority endpoint.
+// POST /api/tasks/:id/priority — changes the priority of a PENDING task
+// (issue #266). The body must carry {"priority": "<level>"}. Only pending
+// tasks accept priority changes: priority orders the pending queue, so a
+// task already committed to a guest cannot be re-prioritised (409).
+func (s *Server) handleTaskPriority(w http.ResponseWriter, r *http.Request, taskID string) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	if taskID == "" {
+		http.Error(w, "task id required", http.StatusBadRequest)
+		return
+	}
+
+	var body struct {
+		Priority string `json:"priority"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		http.Error(w, "invalid request body", http.StatusBadRequest)
+		return
+	}
+	if !queue.ValidatePriority(body.Priority) {
+		http.Error(w, fmt.Sprintf("invalid priority %q (must be firefighter, teacher, or orangutan)", body.Priority), http.StatusBadRequest)
+		return
+	}
+
+	task, ok := s.orchestrator.GetTask(taskID)
+	if !ok {
+		http.Error(w, "task not found", http.StatusNotFound)
+		return
+	}
+	if task.Status != queue.TaskStatusPending {
+		http.Error(w, fmt.Sprintf("task is not pending (status: %s)", task.Status), http.StatusConflict)
+		return
+	}
+
+	// Re-checks existence and status under the orchestrator lock; a failure
+	// here means the task moved between the pre-check and now.
+	if err := s.orchestrator.SetTaskPriority(taskID, body.Priority); err != nil {
+		http.Error(w, err.Error(), http.StatusConflict)
+		return
+	}
+
+	// Broadcast task.updated to browsers so the list and any open detail
+	// view re-render with the new priority.
+	s.broadcastTaskUpdated(taskID, task.Status.String())
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"task_id":  taskID,
+		"priority": body.Priority,
+		"status":   task.Status.String(),
 	})
 }
 

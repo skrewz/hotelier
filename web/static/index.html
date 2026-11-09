@@ -832,8 +832,9 @@
                 const rerunBtn = isRerunnable ? `<button class="btn btn-sm btn-ghost" onclick="event.stopPropagation(); rerunTask('${t.id}')">🔄</button>` : '';
                 const btnRow = (rerunBtn || cancelBtn) ? `<div class="task-btn-row">${rerunBtn}${cancelBtn}</div>` : '';
                 const logCount = t.log_count != null ? ` · ${t.log_count} log${t.log_count === 1 ? '' : 's'}${listSpinnerHTML(t)}` : '';
-                // Priority label shown only for PENDING tasks
-                const priorityLabel = t.status === 'PENDING' && t.priority ? `<span class="badge badge-priority" title="Priority">🔜${priorityToEmoji(t.priority)}</span>` : '';
+                // Priority label shown only for PENDING tasks, with the
+                // bump controls alongside it (issue #266).
+                const priorityLabel = t.status === 'PENDING' && t.priority ? `<span class="badge badge-priority" title="Priority">🔜${priorityToEmoji(t.priority)}</span>${priorityBumpButtonsHTML(t.id, t.priority, true)}` : '';
                 const personaBadge = t.persona ? ` <span class="persona-badge ${personaColourClass(t.persona)}" title="Persona: ${escapeHtml(t.persona)}">🧑 ${escapeHtml(t.persona)}</span>` : '';
                 return `<div class="task-item ${itemClass}${isActive}" onclick="selectTask('${t.id}')">
                     <div class="task-id">${taskTitleHTML(t)}${t.id} <span class="badge ${badgeClass}">${t.status}</span>${priorityLabel}${personaBadge}</div>
@@ -1498,6 +1499,62 @@
             return map[priority] || priority;
         }
 
+        // PRIORITY_LADDER lists the priority levels from highest to lowest.
+        // The bump buttons step one position along this ladder (issue #266).
+        const PRIORITY_LADDER = ['firefighter', 'teacher', 'orangutan'];
+
+        // priorityBumpButtonsHTML renders the ⬆️/⬇️ controls for a pending
+        // task. Each button shows an arrow and the emoji of the priority it
+        // would move the task TO: an orangutan task therefore only shows
+        // "⬆️🧑‍🏫", a firefighter task only "⬇️🧑‍🏫", a teacher task both
+        // (issue #266).
+        //
+        // stopPropagation is set for buttons embedded in clickable list
+        // rows, where a click must not also select the task.
+        function priorityBumpButtonsHTML(taskId, priority, stopPropagation) {
+            const idx = PRIORITY_LADDER.indexOf(priority);
+            if (idx === -1) return '';
+            const guard = stopPropagation ? 'event.stopPropagation(); ' : '';
+            const attr = `data-task-id="${escapeAttr(taskId)}" data-priority="${escapeAttr(priority)}"`;
+            let html = '';
+            if (idx > 0) {
+                const up = PRIORITY_LADDER[idx - 1];
+                html += `<button class="btn btn-sm btn-ghost priority-bump priority-bump-up" ${attr} data-dir="up" title="Raise priority to ${escapeAttr(priorityToEmoji(up))} (${escapeAttr(up)})" onclick="${guard}bumpPriority(this.dataset.taskId, this.dataset.priority, this.dataset.dir)">&#x2B06;&#xFE0F;${priorityToEmoji(up)}</button>`;
+            }
+            if (idx < PRIORITY_LADDER.length - 1) {
+                const down = PRIORITY_LADDER[idx + 1];
+                html += `<button class="btn btn-sm btn-ghost priority-bump priority-bump-down" ${attr} data-dir="down" title="Lower priority to ${escapeAttr(priorityToEmoji(down))} (${escapeAttr(down)})" onclick="${guard}bumpPriority(this.dataset.taskId, this.dataset.priority, this.dataset.dir)">&#x2B07;&#xFE0F;${priorityToEmoji(down)}</button>`;
+            }
+            return html;
+        }
+
+        // bumpPriority moves a pending task one step up or down the
+        // priority ladder via POST /api/tasks/:id/priority (issue #266).
+        // dir is 'up' (towards firefighter) or 'down' (towards orangutan).
+        async function bumpPriority(taskId, current, dir) {
+            const idx = PRIORITY_LADDER.indexOf(current);
+            const target = idx === -1 ? undefined : PRIORITY_LADDER[idx + (dir === 'up' ? -1 : 1)];
+            if (!target) return; // already at the top or bottom of the ladder
+            try {
+                const res = await fetch('/api/tasks/' + encodeURIComponent(taskId) + '/priority', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ priority: target }),
+                });
+                if (!res.ok) {
+                    const errText = await res.text();
+                    alert('Failed to change priority: ' + errText);
+                }
+                // Refresh either way: on success to show the new priority,
+                // on failure to show the true state (e.g. the task was
+                // assigned while this request was in flight).
+                refresh();
+            } catch (e) {
+                console.error('priority bump failed:', e);
+                alert('Failed to change priority: ' + e.message);
+            }
+        }
+
         // personaColourClass returns a deterministic CSS class for the given
         // persona name, mapping it to one of several distinguishable colours.
         function personaColourClass(name) {
@@ -1671,17 +1728,22 @@
                 if (headerRow) {
                     const existingPriority = headerRow.querySelector('.badge-priority');
                     const showPriority = task.status === 'PENDING' && task.priority;
+                    // The bump controls live or die with the badge, and
+                    // must reflect the current priority (issue #266).
+                    headerRow.querySelectorAll('.priority-bump').forEach(b => b.remove());
                     if (showPriority) {
-                        if (existingPriority) {
-                            existingPriority.textContent = `🔜${priorityToEmoji(task.priority)}`;
-                            existingPriority.title = `Priority`;
+                        let badge = existingPriority;
+                        if (badge) {
+                            badge.textContent = `🔜${priorityToEmoji(task.priority)}`;
+                            badge.title = `Priority`;
                         } else {
-                            const span = document.createElement('span');
-                            span.className = 'badge badge-priority';
-                            span.title = 'Priority';
-                            span.textContent = `🔜${priorityToEmoji(task.priority)}`;
-                            headerRow.insertBefore(span, headerRow.firstChild);
+                            badge = document.createElement('span');
+                            badge.className = 'badge badge-priority';
+                            badge.title = 'Priority';
+                            badge.textContent = `🔜${priorityToEmoji(task.priority)}`;
+                            headerRow.insertBefore(badge, headerRow.firstChild);
                         }
+                        badge.insertAdjacentHTML('afterend', priorityBumpButtonsHTML(task.id, task.priority, false));
                     } else if (existingPriority) {
                         existingPriority.remove();
                     }
@@ -1973,7 +2035,7 @@
                         <div class="task-detail-meta">${task.assigned_to ? 'Guest: ' + guestLabel(task.assigned_to) : 'Unassigned'} · <span class="meta-log-count">${logs.length} log entries</span>${spinnerHTML(logs.length, isTaskRunning(task))}</div>
                     </div>
                     <div style="display:flex;gap:0.5rem;align-items:center;">
-                        ${task.status === 'PENDING' && task.priority ? `<span class="badge badge-priority" title="Priority">🔜${priorityToEmoji(task.priority)}</span>` : ''}
+                        ${task.status === 'PENDING' && task.priority ? `<span class="badge badge-priority" title="Priority">🔜${priorityToEmoji(task.priority)}</span>${priorityBumpButtonsHTML(task.id, task.priority, false)}` : ''}
                         <button class="btn btn-sm btn-ghost task-detail-fullscreen-btn" onclick="toggleLogsFullscreen()" aria-pressed="false" title="View these logs in full screen">&#x26F6; Full screen</button>
                         <button class="btn btn-sm btn-ghost download-task-btn" data-task-id="${escapeAttr(task.id)}" onclick="downloadTaskLog(this.dataset.taskId)" title="Download the whole trace as JSONL">⬇ Download</button>
                         <button class="btn btn-sm btn-ghost" data-task-id="${escapeAttr(task.id)}" onclick="rerunTask(this.dataset.taskId)">🔄 Re-run</button>

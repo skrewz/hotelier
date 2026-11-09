@@ -394,6 +394,27 @@ func (q *TaskQueue) SetResult(taskID, result string) error {
 	return nil
 }
 
+// SetPriority changes the priority of a task after submission (issue #266).
+// The new value must be one of the known priorities. Pending ordering is
+// recomputed on read (sortPendingByPriority), so no reshuffle is needed here.
+func (q *TaskQueue) SetPriority(taskID, priority string) error {
+	if !ValidatePriority(priority) {
+		return fmt.Errorf("invalid priority %q (must be firefighter, teacher, or orangutan)", priority)
+	}
+
+	q.mu.Lock()
+	defer q.mu.Unlock()
+
+	task, exists := q.tasks[taskID]
+	if !exists {
+		return fmt.Errorf("task %s not found", taskID)
+	}
+
+	task.Priority = priority
+	q.logf("task %s priority changed: %s", taskID, priority)
+	return nil
+}
+
 // GetPendingTasks returns all pending tasks, sorted by priority
 // (highest first) and then by creation time (FIFO within same priority).
 func (q *TaskQueue) GetPendingTasks() []*Task {
