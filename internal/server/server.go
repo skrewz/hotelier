@@ -1928,8 +1928,6 @@ func (s *Server) HandleTasks(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleGetTasks(w http.ResponseWriter, r *http.Request) {
-	// Ordered as the queue will process them: RUNNING first, then pending
-	// by priority (issue #268).
 	tasks := s.orchestrator.GetAllTasksOrdered()
 	// Build task list with log_count annotation
 	taskList := make([]map[string]interface{}, len(tasks))
