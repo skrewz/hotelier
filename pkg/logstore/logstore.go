@@ -631,6 +631,16 @@ func isEmptyLine(b []byte) bool {
 // own policy rather than as a parameter every caller repeats.
 const searchContextLines = 2
 
+// MaxSearchMatches bounds how many matches one search may collect, and so
+// what one request may make the server hold in memory and put on the wire. A
+// query is a substring, so the cheapest possible needle can match every line
+// of every trace in the window; the 14-day lookback cap bounds how many dates
+// are scanned, not how many bytes those dates hold, so the scan needs its own
+// bound. It is a property of the server rather than of the query: a caller
+// asking for more is answered with the earliest MaxSearchMatches hits and
+// SearchResult.Truncated set, never with a silent cut.
+const MaxSearchMatches = 200
+
 // Match is one log line that satisfied a search query, together with up to
 // searchContextLines neighbouring lines from the same trace on either side.
 type Match struct {
@@ -642,6 +652,22 @@ type Match struct {
 	ContextAfter  []string  `json:"context_after"`
 }
 
+// SearchResult is one scan's outcome: the matches it collected, whether the
+// cap cut the scan short, and what it could not read.
+type SearchResult struct {
+	Matches []Match
+
+	// Truncated reports the scan stopped at MaxSearchMatches, so older hits
+	// in the window exist that this result does not carry.
+	Truncated bool
+
+	// Errors describes partitions or traces the scan could not read. The
+	// scan kept walking past them — the same stance PruneOlderThan takes —
+	// so Matches is a partial answer rather than nothing. The messages quote
+	// filesystem paths and are for the server log, never for a client.
+	Errors []string
+}
+
 // SearchDates scans the given date partitions for log lines containing the
 // query (case-insensitive substring) and returns the matches ordered by
 // date, then task ID, then position within the trace. Only the dates handed
@@ -650,29 +676,40 @@ type Match struct {
 // existed simply yields no matches. Context lines come from the same trace
 // and are clipped at either end; how many is the store's policy, not a knob
 // each caller re-picks.
-func (s *LogStore) SearchDates(dates []string, query string) ([]Match, error) {
+//
+// The scan stops at MaxSearchMatches and says so, so no query can make it
+// accumulate the whole window. A partition it cannot read costs its own
+// matches and nothing else: the walk continues and the problem is reported
+// in SearchResult.Errors.
+func (s *LogStore) SearchDates(dates []string, query string) (SearchResult, error) {
 	if query == "" {
-		return nil, fmt.Errorf("search query must not be empty")
+		return SearchResult{}, fmt.Errorf("search query must not be empty")
 	}
 	needle := strings.ToLower(query)
 
-	var matches []Match
+	var res SearchResult
 	for _, date := range dates {
 		tasks, err := s.ListTasks(date)
 		if err != nil {
-			return nil, err
+			res.Errors = append(res.Errors, fmt.Sprintf("date %s: %v", date, err))
+			continue
 		}
 		sort.Strings(tasks)
 		for _, taskID := range tasks {
 			entries, err := s.ReadLogs(date, taskID)
 			if err != nil {
-				return nil, err
+				res.Errors = append(res.Errors, fmt.Sprintf("logs for %s/%s: %v", date, taskID, err))
+				continue
 			}
 			for i, e := range entries {
 				if !strings.Contains(strings.ToLower(e.Line), needle) {
 					continue
 				}
-				matches = append(matches, Match{
+				if len(res.Matches) == MaxSearchMatches {
+					res.Truncated = true
+					return res, nil
+				}
+				res.Matches = append(res.Matches, Match{
 					TaskID:        taskID,
 					Date:          date,
 					Timestamp:     e.Timestamp,
@@ -683,7 +720,7 @@ func (s *LogStore) SearchDates(dates []string, query string) ([]Match, error) {
 			}
 		}
 	}
-	return matches, nil
+	return res, nil
 }
 
 // linesBefore returns up to n entry lines immediately preceding index i,

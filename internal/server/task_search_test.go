@@ -6,6 +6,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -35,22 +36,32 @@ type searchMatch struct {
 }
 
 type searchResponse struct {
-	Query   string        `json:"query"`
-	From    string        `json:"from"`
-	To      string        `json:"to"`
-	Count   int           `json:"count"`
-	Matches []searchMatch `json:"matches"`
+	Query     string        `json:"query"`
+	From      string        `json:"from"`
+	To        string        `json:"to"`
+	Count     int           `json:"count"`
+	Truncated bool          `json:"truncated"`
+	Partial   bool          `json:"partial"`
+	Matches   []searchMatch `json:"matches"`
 }
 
 // newSearchServer builds a server backed by a fresh log store directory.
 func newSearchServer(t *testing.T) *Server {
+	t.Helper()
+	_, srv := newSearchServerWithDir(t)
+	return srv
+}
+
+// newSearchServerWithDir is newSearchServer with the store's directory, for
+// tests that must make a partition unreadable.
+func newSearchServerWithDir(t *testing.T) (string, *Server) {
 	t.Helper()
 	dir, err := os.MkdirTemp("", "hotelier-tasksearch-*")
 	if err != nil {
 		t.Fatalf("create temp dir: %v", err)
 	}
 	t.Cleanup(func() { os.RemoveAll(dir) })
-	return New(config.ServerConfig{Host: "127.0.0.1", Port: 0, LogDir: dir})
+	return dir, New(config.ServerConfig{Host: "127.0.0.1", Port: 0, LogDir: dir})
 }
 
 func doSearch(t *testing.T, srv *Server, target string) *httptest.ResponseRecorder {
@@ -269,6 +280,76 @@ func TestSearchAPI_UnknownTaskStillReturnedWithoutStatusFilter(t *testing.T) {
 	resp := decodeSearch(t, w)
 	if resp.Count != 1 || resp.Matches[0].Status != "" {
 		t.Fatalf("expected one match with empty status, got %+v", resp.Matches)
+	}
+}
+
+// TestSearchAPI_StoreFailureDoesNotLeakPaths verifies a log store the server
+// cannot read is answered with a generic 500. The underlying error wraps an
+// *os.PathError naming the store's directory, and the REST surface is
+// unauthenticated, so echoing it would hand a stranger the filesystem layout.
+func TestSearchAPI_StoreFailureDoesNotLeakPaths(t *testing.T) {
+	dir, srv := newSearchServerWithDir(t)
+	if err := os.Chmod(dir, 0o000); err != nil {
+		t.Fatalf("chmod: %v", err)
+	}
+	t.Cleanup(func() { os.Chmod(dir, 0o755) })
+
+	w := doSearch(t, srv, "/api/tasks/search?q=x")
+	if w.Code != http.StatusInternalServerError {
+		t.Fatalf("expected 500 when the store cannot be listed, got %d (body %q)", w.Code, w.Body.String())
+	}
+	if body := w.Body.String(); strings.Contains(body, dir) || strings.Contains(body, "/") {
+		t.Errorf("error body must not carry filesystem paths, got %q", body)
+	}
+}
+
+// TestSearchAPI_PartialScanIsReported verifies one unreadable partition costs
+// its own matches and not the search: the rest of the window is answered and
+// the response says the answer is partial.
+func TestSearchAPI_PartialScanIsReported(t *testing.T) {
+	dir, srv := newSearchServerWithDir(t)
+	appendTrace(t, srv, "task-readable", 2026, 5, 10, []string{"needle here"})
+	appendTrace(t, srv, "task-stuck", 2026, 5, 11, []string{"needle there"})
+	stuck := filepath.Join(dir, "2026-05-11", "task-stuck")
+	if err := os.Chmod(stuck, 0o000); err != nil {
+		t.Fatalf("chmod: %v", err)
+	}
+	t.Cleanup(func() { os.Chmod(stuck, 0o755) })
+
+	w := doSearch(t, srv, "/api/tasks/search?q=needle&from=2026-05-10&to=2026-05-11")
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200 with a partial answer, got %d (body %q)", w.Code, w.Body.String())
+	}
+	resp := decodeSearch(t, w)
+	if resp.Count != 1 || resp.Matches[0].TaskID != "task-readable" {
+		t.Fatalf("expected the readable partition's match, got %+v", resp.Matches)
+	}
+	if !resp.Partial {
+		t.Error("expected the response to say the scan was partial")
+	}
+}
+
+// TestSearchAPI_TruncationIsReported verifies the match cap bounds what one
+// request can make the server hold, and that a capped answer admits it is
+// capped rather than reading as the whole story.
+func TestSearchAPI_TruncationIsReported(t *testing.T) {
+	srv := newSearchServer(t)
+	lines := make([]string, logstore.MaxSearchMatches+10)
+	for i := range lines {
+		lines[i] = "needle in every line"
+	}
+	appendTrace(t, srv, "task-a", 2026, 5, 10, lines)
+
+	w := doSearch(t, srv, "/api/tasks/search?q=needle&from=2026-05-10&to=2026-05-10")
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d (body %q)", w.Code, w.Body.String())
+	}
+	resp := decodeSearch(t, w)
+	if resp.Count != logstore.MaxSearchMatches {
+		t.Fatalf("expected the cap of %d matches, got %d", logstore.MaxSearchMatches, resp.Count)
+	}
+	if !resp.Truncated {
+		t.Error("expected a capped response to report truncated")
 	}
 }
 

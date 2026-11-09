@@ -2595,6 +2595,15 @@ const (
 // today) or an explicit inclusive from=YYYY-MM-DD&to=YYYY-MM-DD pair.
 // Neither window form nor days beyond the cap are accepted: see the
 // constants above for the policy and the error bodies for the specifics.
+//
+// The response says how complete it is. "truncated" means the match cap cut
+// the scan short, so older hits in the window exist that are not listed;
+// "partial" means some partition or trace could not be read (and was logged
+// here) while the rest of the window was scanned normally. Like every other
+// route on this server the endpoint is unauthenticated, and unlike
+// /api/tasks/:id/download it searches every task's output at once, so it
+// discloses the IDs, titles and statuses of whatever it matches; operators
+// who would rather it did not must front it themselves.
 func (s *Server) HandleTaskSearch(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 
@@ -2626,7 +2635,11 @@ func (s *Server) HandleTaskSearch(w http.ResponseWriter, r *http.Request) {
 
 	allDates, err := s.diskLogStore.ListDates()
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		// Store errors wrap an *os.PathError naming the log directory, so
+		// they stay server-side like the one below — echoing them would hand
+		// an anonymous client the volume layout.
+		s.log.Printf("task search list dates: %v", err)
+		http.Error(w, "failed to read logs", http.StatusInternalServerError)
 		return
 	}
 
@@ -2643,14 +2656,21 @@ func (s *Server) HandleTaskSearch(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	matches, err := s.diskLogStore.SearchDates(window, query)
+	found, err := s.diskLogStore.SearchDates(window, query)
 	if err != nil {
 		// Store errors embed absolute filesystem paths; keep them
 		// server-side rather than echoing them to the client.
-		s.log.Printf("task search %q: %v", query, err)
+		s.log.Printf("task search %d byte query, window %s..%s: %v", len(query), from.Format("2006-01-02"), to.Format("2006-01-02"), err)
 		http.Error(w, "failed to read logs", http.StatusInternalServerError)
 		return
 	}
+	for _, problem := range found.Errors {
+		// A partition the scan could not read cost its own matches, not the
+		// search: say so where an operator will see it, and let the response
+		// carry the partial answer.
+		s.log.Printf("task search partial scan, window %s..%s: %v", from.Format("2006-01-02"), to.Format("2006-01-02"), problem)
+	}
+	matches := found.Matches
 
 	statusFilter := strings.TrimSpace(r.URL.Query().Get("status"))
 	type decoratedMatch struct {
@@ -2677,11 +2697,13 @@ func (s *Server) HandleTaskSearch(w http.ResponseWriter, r *http.Request) {
 	}
 
 	json.NewEncoder(w).Encode(map[string]interface{}{
-		"query":   query,
-		"from":    from.Format("2006-01-02"),
-		"to":      to.Format("2006-01-02"),
-		"count":   len(results),
-		"matches": results,
+		"query":     query,
+		"from":      from.Format("2006-01-02"),
+		"to":        to.Format("2006-01-02"),
+		"count":     len(results),
+		"truncated": found.Truncated,
+		"partial":   len(found.Errors) > 0,
+		"matches":   results,
 	})
 }
 
