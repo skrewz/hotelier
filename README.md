@@ -144,10 +144,9 @@ schedule entry — or `max_concurrent_tasks` — it came from, so the value is
 traceable to the config without opening the file. `in_flight` counts the
 `ASSIGNED` and `RUNNING` tasks the cap is measured against, and
 `waiting_on_cap` the pending tasks there is no room for — the queue beyond
-whatever room the cap has left. `waiting_on_cap`
-above zero with idle guests means the queue is longer than the cap's room,
-which is the case a flat "nothing is running" cannot tell apart from a dead
-pool. The count is arithmetic on the queue and the room, not a per-task
+whatever room the cap has left. `waiting_on_cap` above zero with idle guests
+means the queue is longer than the cap's room, which is the case a flat
+"nothing is running" cannot tell apart from a dead pool. The count is arithmetic on the queue and the room, not a per-task
 verdict: a queue that also waits on guests with matching tags still counts
 while it exceeds the room, and which of the two holds a given task is what
 that task's own `held_reason` says. `next_change` is `null` while the cap will
