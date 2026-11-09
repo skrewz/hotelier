@@ -252,8 +252,29 @@ searched, and a window wider than 14 days is rejected with `400` and an
 explanatory body — an explicit rejection rather than a silent clamp, so a
 client never believes it searched further than it did. The 14-day cap is
 independent of log retention pruning: dates already pruned simply yield no
-matches, and pruning never widens a window. Matches come back with the
-task's current title and status plus two lines of context either side.
+matches, and pruning never widens a window. Days are the server's calendar
+days, the same ones the log store names its partitions by.
+
+Two response fields say how complete an answer is. At most 200 matches come
+back from any one request — the bound is the server's, not the query's, so a
+needle matching every line cannot make the server hold the whole window — and
+`truncated: true` says older hits in the window exist that are not listed.
+`partial: true` says some partition or trace could not be read; the rest of
+the window was scanned normally and the reason went to the server log, so a
+partial answer is not a failed one.
+
+Each match carries the task's *current* title and status from the queue, plus
+two lines of context either side. The `status` filter matches against that
+current status only: a trace whose task the server has since forgotten comes
+back with empty `title` and `status` and never satisfies the filter, so a
+client searching history should retry without it.
+
+Reach worth stating plainly: like every other route here, this endpoint is
+unauthenticated, and unlike `/api/tasks/:id/download` — one known task per
+request — it greps every task's output in the window at once and returns the
+ID, title and status of each hit. An operator who wants that aggregate read
+restricted must front the port themselves; nothing here distinguishes one
+caller from another.
 
 `/api/guests` also carries a `stats` object. The two action counters,
 `cancelled_while_running` and `cancelled_before_start`, cover every `task.cancel`
