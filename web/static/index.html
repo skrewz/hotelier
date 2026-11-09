@@ -668,11 +668,8 @@
         }
 
         // renderConcurrency draws the one-line concurrency picture (issue #250):
-        // "2/4" in flight against the cap in force, and in the label where that
-        // cap came from next ("next 23:00 → 4") and how much pending work the
-        // cap itself is holding back. A non-zero "waiting on cap" next to idle
-        // guests is the signal that the schedule, not the pool, is what the
-        // queue is stuck on.
+        // "in flight / cap" as the value; the label carries the next
+        // scheduled change and any queue the cap is holding back.
         function renderConcurrency(c) {
             const value = document.getElementById('concurrency-count');
             const label = document.getElementById('concurrency-label');

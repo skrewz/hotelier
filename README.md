@@ -127,8 +127,7 @@ The same picture is served on the endpoint the dashboard polls, as
   "source": "concurrency_schedule at \"07:00\"",
   "in_flight": 2,
   "waiting_on_cap": 3,
-  "next_change": {"at": "23:00", "time": "2026-11-07T23:00:00+11:00",
-                   "cap": 4, "timezone": "Australia/Sydney"}
+  "next_change": {"at": "23:00", "cap": 4, "timezone": "Australia/Sydney"}
 }
 ```
 

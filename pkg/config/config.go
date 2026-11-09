@@ -449,8 +449,9 @@ func nextScheduleChange(entries []scheduleEntry, loc *time.Location, now time.Ti
 		for _, e := range entries {
 			// Filter on the instant rather than the minute: a DST fall-back
 			// repeats an hour of wall clock, so "already passed today" is not
-			// something the minute alone can answer.
-			when := wallClock(onset, e.minutes, loc)
+			// something the minute alone can answer. time.Date normalises a
+			// wall clock that a DST transition removed.
+			when := time.Date(onset.Year(), onset.Month(), onset.Day(), e.minutes/60, e.minutes%60, 0, 0, loc)
 			if !when.After(now) {
 				continue
 			}
@@ -465,12 +466,6 @@ func nextScheduleChange(entries []scheduleEntry, loc *time.Location, now time.Ti
 		}
 	}
 	return time.Time{}, "", cap
-}
-
-// wallClock builds the instant onset's calendar day at minutes past midnight,
-// in loc. time.Date normalises a wall clock that a DST transition removed.
-func wallClock(onset time.Time, minutes int, loc *time.Location) time.Time {
-	return time.Date(onset.Year(), onset.Month(), onset.Day(), minutes/60, minutes%60, 0, 0, loc)
 }
 
 // staticConcurrency states the static cap in the resolver's vocabulary:

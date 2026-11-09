@@ -769,7 +769,7 @@ func (o *Orchestrator) admitsNewWorkInternal(taskID string) bool {
 	// Legible in state, so "waiting on the schedule" is distinguishable from
 	// "no guest with the right tags", which leaves the field empty.
 	if task, ok := o.queue.Get(taskID); ok {
-		task.HeldReason = capHoldReason(o.concurrencyCap, inFlight)
+		task.HeldReason = fmt.Sprintf("concurrency cap %d reached (%d in flight)", o.concurrencyCap, inFlight)
 	}
 
 	// Legible in the log, once per distinct (task, cap, in-flight) state
@@ -792,13 +792,6 @@ func (o *Orchestrator) admitsNewWorkInternal(taskID string) bool {
 func (o *Orchestrator) capErrorInternal(taskID string) error {
 	return fmt.Errorf("%w: task %s, %d in flight, cap %d", ErrConcurrencyCapReached,
 		taskID, o.inFlightCountInternal(), o.concurrencyCap)
-}
-
-// capHoldReason words the refusal a pending task carries when the cap has no
-// room for it. The wording is the one an operator reads in the task view and
-// in the log; the count of such work is PendingHeldByCapCount.
-func capHoldReason(cap, inFlight int) string {
-	return fmt.Sprintf("concurrency cap %d reached (%d in flight)", cap, inFlight)
 }
 
 // PendingHeldByCapCount reports how many PENDING tasks the cap cannot start at

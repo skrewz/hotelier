@@ -1914,16 +1914,19 @@ func (s *Server) HandleWebUI(w http.ResponseWriter, r *http.Request) {
 	http.NotFound(w, r)
 }
 
+// capLabel states a cap for a JSON surface: the unlimited case in words, so
+// a bare -1 does not read as a broken number (issue #249). /api/health and
+// the concurrency picture on /api/guests share it so the two cannot drift.
+func capLabel(cap int) interface{} {
+	if cap == config.ConcurrencyUnlimited {
+		return "unlimited"
+	}
+	return cap
+}
+
 // handleHealth returns the server health status.
 // HandleHealth returns the server health status.
 func (s *Server) HandleHealth(w http.ResponseWriter, r *http.Request) {
-	currentCap := s.orchestrator.ConcurrencyCap()
-	// State the unlimited case in words: a bare -1 in JSON would read as a
-	// broken number rather than as "no cap" (issue #249).
-	var capLabel interface{} = currentCap
-	if currentCap == config.ConcurrencyUnlimited {
-		capLabel = "unlimited"
-	}
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]interface{}{
 		"status": "healthy",
@@ -1932,7 +1935,7 @@ func (s *Server) HandleHealth(w http.ResponseWriter, r *http.Request) {
 		// The cap and what is in flight against it, so "nothing is moving"
 		// can be read as night mode rather than guessed at (issue #249).
 		"in_flight":       s.orchestrator.InFlightCount(),
-		"concurrency_cap": capLabel,
+		"concurrency_cap": capLabel(s.orchestrator.ConcurrencyCap()),
 	})
 }
 
@@ -2354,30 +2357,21 @@ func (s *Server) concurrencyStatus(now time.Time) map[string]interface{} {
 	status := s.cfg.ConcurrencyStatus(now)
 	s.mu.RUnlock()
 
-	// Say the unlimited case in words: a bare -1 would read as a broken
-	// number rather than as "no cap" (the same wording /api/health uses).
-	var capLabel interface{} = status.Cap
-	if status.Cap == config.ConcurrencyUnlimited {
-		capLabel = "unlimited"
-	}
-
 	var next interface{}
 	if status.HasNextChange() {
 		next = map[string]interface{}{
 			"at":       status.NextAt,
-			"time":     status.NextChangeAt,
 			"cap":      status.NextCap,
 			"timezone": status.Timezone,
 		}
 	}
 
 	return map[string]interface{}{
-		"cap":    capLabel,
+		"cap":    capLabel(status.Cap),
 		"source": status.Source,
 		// "in_flight" is the ASSIGNED or RUNNING count the cap is measured
-		// against; "waiting_on_cap" is the pending work there is no room for.
-		// Idle guests alongside a non-zero waiting_on_cap mean the schedule,
-		// not the pool, is what the queue is stuck on.
+		// against; "waiting_on_cap" is the pending queue there is no room
+		// for under the cap.
 		"in_flight":      s.orchestrator.InFlightCount(),
 		"waiting_on_cap": s.orchestrator.PendingHeldByCapCount(),
 		"next_change":    next,

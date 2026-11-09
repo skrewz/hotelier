@@ -150,9 +150,8 @@ func TestHandleGuests_CarriesConcurrencyStatus(t *testing.T) {
 			InFlight     int    `json:"in_flight"`
 			WaitingOnCap int    `json:"waiting_on_cap"`
 			NextChange   *struct {
-				At   string `json:"at"`
-				Cap  int    `json:"cap"`
-				Time string `json:"time"`
+				At  string `json:"at"`
+				Cap int    `json:"cap"`
 			} `json:"next_change"`
 		} `json:"concurrency"`
 	}
@@ -166,7 +165,7 @@ func TestHandleGuests_CarriesConcurrencyStatus(t *testing.T) {
 	if body.Concurrency.NextChange == nil {
 		t.Fatal("expected /api/guests to carry the next scheduled change")
 	}
-	if _, err := time.Parse(time.RFC3339, body.Concurrency.NextChange.Time); err != nil {
-		t.Errorf("expected the next change instant to be RFC3339, got %q (%v)", body.Concurrency.NextChange.Time, err)
+	if body.Concurrency.NextChange.At == "" {
+		t.Errorf("expected the next change to name its wall-clock time, got %q", body.Concurrency.NextChange.At)
 	}
 }
