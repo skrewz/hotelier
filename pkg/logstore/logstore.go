@@ -18,6 +18,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"sort"
@@ -183,6 +184,89 @@ func (s *LogStore) ListDates() ([]string, error) {
 	// depend on that.
 	sort.Strings(dates)
 	return dates, nil
+}
+
+// PruneResult reports what one PruneOlderThan sweep removed, so the caller
+// can log evidence (issue #263): the next operator staring at a full disk
+// finds the reclaimed bytes in the log instead of du-ing the tree by hand.
+type PruneResult struct {
+	// DatesRemoved lists the date directories deleted, oldest first.
+	DatesRemoved []string
+	// FilesRemoved counts the files those directories held.
+	FilesRemoved int
+	// BytesReclaimed sums the removed files' sizes.
+	BytesReclaimed int64
+}
+
+// PruneOlderThan removes every date directory older than the retention
+// window, anchored at now: a directory is deleted when its YYYY-MM-DD name
+// names a day strictly earlier than now's date minus retentionDays. The
+// comparison works on directory names, not file trees, so the sweep costs a
+// ReadDir plus a RemoveAll per expired day — never a walk to decide what to
+// drop (one WalkDir per *removed* day still runs, to report its size).
+//
+// retentionDays <= 0 disables pruning and removes nothing, mirroring the
+// max_guests convention where 0 means "no limit". Directories whose names
+// are not dates (a queue store's pending/ running/ dirs sharing the tree,
+// stray files) are never touched, so a persisted queue entry survives the
+// sweep regardless of its age even when queue_dir points at log_dir.
+func (s *LogStore) PruneOlderThan(now time.Time, retentionDays int) (PruneResult, error) {
+	var res PruneResult
+	if retentionDays <= 0 {
+		return res, nil
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	dates, err := s.ListDates()
+	if err != nil {
+		return res, err
+	}
+
+	// Compare days, not instants: anchor the cutoff at midnight UTC of
+	// now's calendar date so a non-UTC "now" cannot shift the boundary by
+	// its clock time.
+	y, m, d := now.Date()
+	cutoff := time.Date(y, m, d, 0, 0, 0, 0, time.UTC).AddDate(0, 0, -retentionDays)
+
+	for _, date := range dates {
+		day, err := time.Parse("2006-01-02", date)
+		if err != nil {
+			// ListDates only returns parseable names; belt and braces.
+			continue
+		}
+		if !day.Before(cutoff) {
+			continue
+		}
+		path := filepath.Join(s.dir, date)
+		files, bytes := dirSize(path)
+		if err := os.RemoveAll(path); err != nil {
+			return res, fmt.Errorf("prune log dir %s: %w", path, err)
+		}
+		res.DatesRemoved = append(res.DatesRemoved, date)
+		res.FilesRemoved += files
+		res.BytesReclaimed += bytes
+	}
+	return res, nil
+}
+
+// dirSize counts the regular files under dir and sums their sizes. It is
+// only ever called on a directory about to be removed, to report what the
+// sweep reclaims; unreadable entries are skipped rather than failing the
+// sweep.
+func dirSize(dir string) (files int, bytes int64) {
+	filepath.WalkDir(dir, func(path string, d fs.DirEntry, err error) error {
+		if err != nil || !d.Type().IsRegular() {
+			return nil
+		}
+		if info, err := d.Info(); err == nil {
+			files++
+			bytes += info.Size()
+		}
+		return nil
+	})
+	return files, bytes
 }
 
 // TaskSummary holds a task ID and its earliest (starting) timestamp.

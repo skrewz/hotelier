@@ -438,6 +438,7 @@ func (s *Server) resolveCancelIntent(taskID, echoed string) string {
 //     raises the cap and frees the queue — takes effect here too; an invalid
 //     set of keys is rejected and the previous values are kept
 //   - LogDir: recreates the disk log store if the path changed
+//   - LogRetentionDays: read live by the log prune loop
 //   - Personas: rebuilds the persona store
 //   - TaskTimeout, HeartbeatInterval, MaxLogSize: stored for future use
 //   - SilenceTimeout, TaskSilenceTimeout, TaskAssignmentTimeout: read live by the cleanup loop
@@ -535,6 +536,9 @@ func (s *Server) reload(cfg config.ServerConfig) bool {
 	}
 	if cfg.MaxLogSize != old.MaxLogSize {
 		s.log.Printf("max_log_size updated: %d bytes", cfg.MaxLogSize)
+	}
+	if cfg.LogRetentionDays != old.LogRetentionDays {
+		s.log.Printf("log_retention_days updated: %d", cfg.LogRetentionDays)
 	}
 
 	return drain
@@ -720,6 +724,11 @@ func (s *Server) Start() error {
 	// Watch the concurrency schedule so a cap that rises at a boundary drains
 	// the queue without waiting for an event (issue #249).
 	go s.concurrencySyncLoop()
+
+	// Prune the disk task log store at startup and on a tick, so neither a
+	// first run nor a long-lived server can let the log tree grow into the
+	// volume that hosts it (issue #263).
+	go s.logPruneCleanup()
 
 	// Set up HTTP routes
 	mux := http.NewServeMux()
@@ -1693,6 +1702,50 @@ func (s *Server) staleGuestCleanup() {
 			// After removing stale guests, try to assign pending tasks to remaining idle guests.
 			s.tryAssignPendingTasks()
 		}
+	}
+}
+
+// logPruneCleanup sweeps the disk task log store at startup and then on the
+// heartbeat-interval tick, the way staleGuestCleanup ticks for guests.
+// Startup-only would fix a one-off fill but let a long-running server outlive
+// its own retention window, so the tick is what keeps the tree bounded
+// (issue #263).
+func (s *Server) logPruneCleanup() {
+	s.pruneTaskLogs()
+
+	interval := time.Duration(s.effectiveHeartbeatInterval()) * time.Second
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+
+	for range ticker.C {
+		s.pruneTaskLogs()
+	}
+}
+
+// pruneTaskLogs runs one retention sweep over the disk log store, honouring
+// the log_retention_days value loaded right now (0 disables pruning; a
+// Reload takes effect on the next tick without a restart). It logs what it
+// pruned — dirs, file count and bytes — so the evidence outlives the disk
+// it freed (issue #263). With no disk log store configured there is nothing
+// on disk to prune and the sweep is a no-op.
+func (s *Server) pruneTaskLogs() {
+	s.mu.RLock()
+	store := s.diskLogStore
+	retention := s.cfg.LogRetentionDays
+	s.mu.RUnlock()
+
+	if store == nil {
+		return
+	}
+
+	res, err := store.PruneOlderThan(time.Now(), retention)
+	if err != nil {
+		s.log.Printf("task log prune failed: %v", err)
+		return
+	}
+	if len(res.DatesRemoved) > 0 {
+		s.log.Printf("pruned task logs: %d date dir(s) %v, %d file(s), %d bytes reclaimed",
+			len(res.DatesRemoved), res.DatesRemoved, res.FilesRemoved, res.BytesReclaimed)
 	}
 }
 

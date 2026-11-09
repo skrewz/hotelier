@@ -35,6 +35,12 @@ max_concurrent_tasks: 0
 #  - at: "23:00"
 #    concurrency: 4
 # log_dir: "/var/log/hotelier"  # Persist task logs to disk (empty = in-memory only)
+# How many days of task logs the prune sweep keeps: date directories older
+# than today minus this many days are removed at startup and on the cleanup
+# tick. The current day and in-window days are never touched, and queue_dir
+# is left alone regardless of a persisted entry's age. 0 disables pruning
+# (the max_guests convention: 0 = no limit).
+log_retention_days: 14
 # queue_dir: "/var/lib/hotelier/queue"  # Persist unprocessed tasks across restarts (empty = in-memory only)
 
 # Personas define named sets of environment variables and file copies

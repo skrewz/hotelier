@@ -70,6 +70,11 @@ type ServerConfig struct {
 	// LogDir is the base directory where task logs are persisted to disk.
 	// When empty, logs are kept in memory only.
 	LogDir string `yaml:"log_dir"`
+	// LogRetentionDays is how many days of task logs the prune sweep keeps:
+	// date directories older than today minus this many days are removed at
+	// startup and on the cleanup tick (issue #263). Following the max_guests
+	// convention, 0 disables pruning entirely. Default: 14.
+	LogRetentionDays int `yaml:"log_retention_days"`
 	// QueueDir is the directory where unprocessed tasks (pending, assigned,
 	// running) are persisted as JSON files, one per task, in per-status
 	// subdirectories. When the server starts, persisted tasks are restored
@@ -160,6 +165,7 @@ func DefaultServerConfig() ServerConfig {
 		TaskAssignmentTimeout: 90,  // 3 heartbeats missed (3 * 30s)
 		TaskSilenceTimeout:    600, // 10 minutes of silence while running
 		MaxGuests:             0,   // unlimited
+		LogRetentionDays:      14,  // prune task logs older than two weeks
 		MaxConcurrentTasks:    0,   // unlimited
 		ScheduleTimezone:      "UTC",
 	}
