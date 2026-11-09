@@ -233,7 +233,7 @@ curl -X POST http://localhost:8080/api/tasks \
 
 | Method | Path | Description |
 |--------|------|-------------|
-| `GET` | `/api/tasks` | List all tasks |
+| `GET` | `/api/tasks` | List all tasks in queue processing order |
 | `POST` | `/api/tasks` | Submit a new task |
 | `GET` | `/api/tasks/:id` | Get task details |
 | `POST` | `/api/tasks/:id/priority` | Change a PENDING task's priority; body `{"priority": "firefighter\|teacher\|orangutan"}` |
