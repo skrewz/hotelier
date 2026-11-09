@@ -433,7 +433,9 @@ func (c ServerConfig) resolveSchedule(now time.Time) ([]scheduleEntry, *time.Loc
 // the cap in force. The schedule repeats daily, so looking one day ahead is
 // enough: a boundary that would change the cap later than that repeats one
 // already looked at. Boundaries are located on the wall clock in loc, so they
-// follow the zone across DST.
+// follow the zone across DST; one inside a spring-forward gap is located at
+// the transition itself, which is where resolveSchedule's wall-clock
+// comparison flips.
 func nextScheduleChange(entries []scheduleEntry, loc *time.Location, now time.Time, cap int) (time.Time, string, int) {
 	local := now.In(loc)
 	midnight := time.Date(local.Year(), local.Month(), local.Day(), 0, 0, 0, 0, loc)
@@ -449,13 +451,30 @@ func nextScheduleChange(entries []scheduleEntry, loc *time.Location, now time.Ti
 		for _, e := range entries {
 			// Filter on the instant rather than the minute: a DST fall-back
 			// repeats an hour of wall clock, so "already passed today" is not
-			// something the minute alone can answer. time.Date normalises a
-			// wall clock that a DST transition removed.
+			// something the minute alone can answer.
 			when := time.Date(onset.Year(), onset.Month(), onset.Day(), e.minutes/60, e.minutes%60, 0, 0, loc)
+			at := e.at
+			if m := when.Hour()*60 + when.Minute(); m != e.minutes {
+				// time.Date normalised a wall clock the spring-forward gap
+				// removed onto the far side of the gap. resolveSchedule
+				// compares wall-clock minutes, so the cap in force flips at
+				// the transition, not at the normalised instant: walk back to
+				// the first instant whose wall clock is at or past the
+				// boundary, and quote that — the entry's own minute never
+				// appears on a clock that day.
+				for {
+					prev := when.Add(-time.Minute)
+					if prev.Before(onset) || prev.Hour()*60+prev.Minute() < e.minutes {
+						break
+					}
+					when = prev
+				}
+				at = fmt.Sprintf("%02d:%02d", when.Hour(), when.Minute())
+			}
 			if !when.After(now) {
 				continue
 			}
-			candidates = append(candidates, candidate{when: when, at: e.at, cap: e.value})
+			candidates = append(candidates, candidate{when: when, at: at, cap: e.value})
 		}
 	}
 	sort.Slice(candidates, func(i, j int) bool { return candidates[i].when.Before(candidates[j].when) })

@@ -582,24 +582,77 @@ func TestConcurrencyStatus_AgreesWithEffectiveConcurrencyAcrossTheDay(t *testing
 
 // TestConcurrencyStatus_NextChangeIsAlwaysInTheFuture is the property the
 // dashboard depends on: a reported boundary must lie ahead of the reading it
-// came from, on a day whose wall clock repeats an hour. Sydney's autumn
-// transition (2026-04-05, 03:00 AEDT back to 02:00 AEST) is the day where
-// finding the next boundary by minute alone would point at the past.
+// came from, must not promise the cap already in force, and must be the
+// instant EffectiveConcurrency actually flips at. Sydney's autumn transition
+// (2026-04-05, 03:00 AEDT back to 02:00 AEST) is the day where finding the
+// next boundary by minute alone would point at the past; the spring day
+// (2026-10-04, 02:00 AEST up to 03:00 AEDT) is the day whose normalisation
+// could place a change later than the flip.
 func TestConcurrencyStatus_NextChangeIsAlwaysInTheFuture(t *testing.T) {
 	cfg := dayNightSchedule("Australia/Sydney")
 
-	start := time.Date(2026, 4, 4, 20, 0, 0, 0, time.UTC) // 06:00 AEDT on the 5th
-	for minute := 0; minute < 26*60; minute++ {
-		now := start.Add(time.Duration(minute) * time.Minute)
-		status := cfg.ConcurrencyStatus(now)
-		if !status.HasNextChange() {
-			continue
+	for _, start := range []time.Time{
+		time.Date(2026, 4, 4, 20, 0, 0, 0, time.UTC),  // across the fall-back
+		time.Date(2026, 10, 3, 20, 0, 0, 0, time.UTC), // across the spring-forward
+	} {
+		for minute := 0; minute < 26*60; minute++ {
+			now := start.Add(time.Duration(minute) * time.Minute)
+			status := cfg.ConcurrencyStatus(now)
+			if !status.HasNextChange() {
+				continue
+			}
+			if !status.NextChangeAt.After(now) {
+				t.Fatalf("at %s: reported a next change in the past (%s)", now, status.NextChangeAt)
+			}
+			if status.NextCap == status.Cap {
+				t.Fatalf("at %s: reported a change to the cap already in force (%d)", now, status.NextCap)
+			}
+			if got := cfg.EffectiveConcurrency(status.NextChangeAt); got != status.NextCap {
+				t.Fatalf("at %s: enforcement at the reported change (%s) gives %d, not %d",
+					now, status.NextChangeAt, got, status.NextCap)
+			}
 		}
-		if !status.NextChangeAt.After(now) {
-			t.Fatalf("at %s: reported a next change in the past (%s)", now, status.NextChangeAt)
-		}
-		if status.NextCap == status.Cap {
-			t.Fatalf("at %s: reported a change to the cap already in force (%d)", now, status.NextCap)
-		}
+	}
+}
+
+// TestConcurrencyStatus_SpringForwardBoundaryIsQuotedAtTheTransition: a
+// schedule entry inside the hour a spring-forward gap removes does not exist
+// on that day's clock. resolveSchedule's wall-clock comparison flips at the
+// transition itself, so that is the instant the status must report — not the
+// normalised instant half an hour later, and not a minute no clock showed.
+func TestConcurrencyStatus_SpringForwardBoundaryIsQuotedAtTheTransition(t *testing.T) {
+	cfg := ServerConfig{
+		MaxConcurrentTasks: 9,
+		ScheduleTimezone:   "Australia/Sydney",
+		ConcurrencySchedule: []ConcurrencyScheduleEntry{
+			{At: "02:30", Concurrency: 1},
+			{At: "07:00", Concurrency: 2},
+			{At: "23:00", Concurrency: 4},
+		},
+	}
+
+	// 01:30 AEST on the spring-forward day: the previous 23:00 entry holds.
+	status := cfg.ConcurrencyStatus(time.Date(2026, 10, 3, 15, 30, 0, 0, time.UTC))
+	if status.Cap != 4 {
+		t.Fatalf("expected cap 4 at 01:30 AEST, got %d", status.Cap)
+	}
+
+	transition := time.Date(2026, 10, 3, 16, 0, 0, 0, time.UTC) // 03:00 AEDT
+	if !status.NextChangeAt.Equal(transition) {
+		t.Errorf("expected the next change at the transition (%s), got %s", transition, status.NextChangeAt)
+	}
+	if status.NextAt != "03:00" {
+		t.Errorf("expected the next change quoted at 03:00, the first wall clock past the boundary, got %q", status.NextAt)
+	}
+	if status.NextCap != 1 {
+		t.Errorf("expected the next change to the 02:30 entry's cap 1, got %d", status.NextCap)
+	}
+
+	// The quote and the enforcement path agree across the boundary.
+	if got := cfg.EffectiveConcurrency(transition.Add(-time.Minute)); got != status.Cap {
+		t.Errorf("expected cap %d until the transition, got %d", status.Cap, got)
+	}
+	if got := cfg.EffectiveConcurrency(transition); got != status.NextCap {
+		t.Errorf("expected cap %d from the transition, got %d", status.NextCap, got)
 	}
 }
