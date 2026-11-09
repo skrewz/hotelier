@@ -1477,3 +1477,106 @@ func TestRestoreClearsHeldReason(t *testing.T) {
 		t.Errorf("expected a restored task to be PENDING, got %s", task.Status)
 	}
 }
+
+// TestGetAllTasksOrdered verifies the display ordering for issue #268:
+// RUNNING first, then ASSIGNED, then PENDING in the order the queue will
+// drain them (priority, then FIFO), then settled tasks oldest first.
+func TestGetAllTasksOrdered(t *testing.T) {
+	q := newTestQueue(t)
+
+	must := func(err error) {
+		t.Helper()
+		if err != nil {
+			t.Fatalf("queue operation failed: %v", err)
+		}
+	}
+
+	base := time.Now().Add(-time.Hour)
+
+	// Restore rather than Add so the explicit CreatedAt survives (Add
+	// overwrites it with the wall clock), and restore in an order that
+	// deliberately disagrees with creation time: pending-new-orange is
+	// restored before the older pending-old-orange, and failed before the
+	// older completed. A tie-break on insertion position instead of
+	// CreatedAt would flip both pairs. This mirrors Store.Load, which
+	// restores tasks grouped by status and alphabetically by ID rather
+	// than by creation time, so FIFO after a restart rests on CreatedAt.
+	type restored struct {
+		id, priority string
+		age          time.Duration
+	}
+	for _, r := range []restored{
+		{"running-old", PriorityOrangutan, 7 * time.Minute},
+		{"assigned", PriorityOrangutan, 6 * time.Minute},
+		{"pending-firefighter", PriorityFirefighter, 5 * time.Minute},
+		{"pending-new-orange", PriorityOrangutan, 2 * time.Minute},
+		{"pending-old-orange", PriorityOrangutan, 3 * time.Minute},
+		{"pending-teacher", PriorityTeacher, 4 * time.Minute},
+		{"failed", PriorityOrangutan, 0},
+		{"completed", PriorityOrangutan, 1 * time.Minute},
+	} {
+		task := &Task{ID: r.id, Prompt: r.id, Priority: r.priority, CreatedAt: base.Add(-r.age)}
+		must(q.Restore(task))
+	}
+
+	must(q.Assign("running-old", "guest-1"))
+	must(q.Start("running-old"))
+	must(q.Assign("assigned", "guest-2"))
+	must(q.Assign("completed", "guest-3"))
+	must(q.Start("completed"))
+	must(q.Complete("completed", "done"))
+	must(q.Assign("failed", "guest-4"))
+	must(q.Start("failed"))
+	must(q.Fail("failed", "boom"))
+
+	got := q.GetAllTasksOrdered()
+	want := []string{
+		"running-old",
+		"assigned",
+		"pending-firefighter",
+		"pending-teacher",
+		"pending-old-orange",
+		"pending-new-orange",
+		"completed",
+		"failed",
+	}
+	if len(got) != len(want) {
+		t.Fatalf("expected %d tasks, got %d", len(want), len(got))
+	}
+	for i, id := range want {
+		if got[i].ID != id {
+			t.Errorf("position %d: expected %s, got %s", i, id, got[i].ID)
+		}
+	}
+}
+
+// TestGetAllTasksOrderedReprioritisedMovesOutOfSlot verifies that a task
+// whose priority was bumped leaves its old slot and sorts with its new
+// priority band (issue #268).
+func TestGetAllTasksOrderedReprioritisedMovesOutOfSlot(t *testing.T) {
+	q := newTestQueue(t)
+
+	must := func(err error) {
+		t.Helper()
+		if err != nil {
+			t.Fatalf("queue operation failed: %v", err)
+		}
+	}
+
+	// Add keeps the wall clock, which here agrees with insertion order;
+	// this test is about the reprioritised task leaving its old slot.
+	must(q.Add(&Task{ID: "a", Prompt: "a", Priority: PriorityOrangutan}))
+	must(q.Add(&Task{ID: "b", Prompt: "b", Priority: PriorityOrangutan}))
+
+	if err := q.SetPriority("b", PriorityFirefighter); err != nil {
+		t.Fatalf("SetPriority: %v", err)
+	}
+
+	got := q.GetAllTasksOrdered()
+	if len(got) != 2 {
+		t.Fatalf("expected 2 tasks, got %d", len(got))
+	}
+	if got[0].ID != "b" || got[1].ID != "a" {
+		t.Errorf("expected [b a] after bump, got [%s %s]", got[0].ID, got[1].ID)
+	}
+}

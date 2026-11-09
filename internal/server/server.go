@@ -1928,7 +1928,7 @@ func (s *Server) HandleTasks(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleGetTasks(w http.ResponseWriter, r *http.Request) {
-	tasks := s.orchestrator.GetAllTasks()
+	tasks := s.orchestrator.GetAllTasksOrdered()
 	// Build task list with log_count annotation
 	taskList := make([]map[string]interface{}, len(tasks))
 	for i, t := range tasks {
