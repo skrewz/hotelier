@@ -139,29 +139,36 @@ func TestConcurrencyStatus_UnlimitedCapIsSaidInWords(t *testing.T) {
 	}
 }
 
-// TestConcurrencyStatus_StatesTheEnforcedCap: the cap on the status surface is
-// the number the orchestrator measures its counts against — the same one
+// TestConcurrencyStatus_StatesTheEnforcedCap: the cap on the status surface
+// is the number the orchestrator measures its counts against — the same one
 // /api/health states — not the resolver's answer, which can lead it by up to
-// one sync interval after a boundary.
+// one sync interval after a boundary. The two sources are made to disagree
+// on purpose: the sync tick first puts the resolver's answer (2 from the
+// 07:00 entry) into the orchestrator, then the enforced cap is moved to a
+// value the resolver cannot produce for this instant. A revert to answering
+// from the resolver fails here loudly, at any hour, on both endpoints; the
+// post-boundary cap and provenance themselves are owned by
+// TestConcurrencyStatus_FollowsTheScheduleWithAClock.
 func TestConcurrencyStatus_StatesTheEnforcedCap(t *testing.T) {
 	srv := dayNightServer(t)
 
 	boundary := time.Date(2026, 6, 15, 8, 0, 0, 0, time.UTC)
-	before := srv.concurrencyStatus(boundary)
-	if before["cap"] != srv.orchestrator.ConcurrencyCap() {
-		t.Fatalf("expected the cap the orchestrator enforces (%v), got %v", srv.orchestrator.ConcurrencyCap(), before["cap"])
+	srv.syncConcurrencyCap(boundary)      // enforced cap 2 from the 07:00 entry
+	srv.orchestrator.SetConcurrencyCap(9) // the resolver still answers 2 for this instant
+
+	if got := srv.concurrencyStatus(boundary)["cap"]; got != 9 {
+		t.Fatalf("expected the enforced cap 9, got %v — the status surface is answering the resolver", got)
 	}
 
-	// Once the sync tick has pushed the boundary's cap into the orchestrator,
-	// the status and the enforced number agree again — and the schedule
-	// provenance still names where the cap came from.
-	srv.syncConcurrencyCap(boundary)
-	after := srv.concurrencyStatus(boundary)
-	if after["cap"] != 2 || srv.orchestrator.ConcurrencyCap() != 2 {
-		t.Errorf("expected the enforced cap 2 after the sync, got status %v, enforced %v", after["cap"], srv.orchestrator.ConcurrencyCap())
+	req := httptest.NewRequest(http.MethodGet, "/api/health", nil)
+	w := httptest.NewRecorder()
+	srv.HandleHealth(w, req)
+	var health map[string]interface{}
+	if err := json.Unmarshal(w.Body.Bytes(), &health); err != nil {
+		t.Fatalf("decode /api/health: %v", err)
 	}
-	if after["source"] != `concurrency_schedule at "07:00"` {
-		t.Errorf("expected the source to name the 07:00 entry, got %v", after["source"])
+	if health["concurrency_cap"] != float64(9) {
+		t.Fatalf("expected /api/health to state the enforced cap 9, got %v", health["concurrency_cap"])
 	}
 }
 
