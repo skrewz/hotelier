@@ -2623,10 +2623,6 @@ func (s *Server) HandleTaskSearch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// The store partitions by the entry timestamp's own date, which is the
-	// host's calendar, so the window must be anchored there too — a UTC
-	// anchor would leave today's partition out of the search on any host
-	// east of UTC. PruneOlderThan anchors the same way.
 	from, to, err := parseSearchWindow(r.URL.Query(), time.Now())
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
@@ -2636,8 +2632,8 @@ func (s *Server) HandleTaskSearch(w http.ResponseWriter, r *http.Request) {
 	allDates, err := s.diskLogStore.ListDates()
 	if err != nil {
 		// Store errors wrap an *os.PathError naming the log directory, so
-		// they stay server-side like the one below — echoing them would hand
-		// an anonymous client the volume layout.
+		// they stay server-side; echoing them would hand an anonymous
+		// client the volume layout.
 		s.log.Printf("task search list dates: %v", err)
 		http.Error(w, "failed to read logs", http.StatusInternalServerError)
 		return
@@ -2656,14 +2652,7 @@ func (s *Server) HandleTaskSearch(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	found, err := s.diskLogStore.SearchDates(window, query)
-	if err != nil {
-		// Store errors embed absolute filesystem paths; keep them
-		// server-side rather than echoing them to the client.
-		s.log.Printf("task search %d byte query, window %s..%s: %v", len(query), from.Format("2006-01-02"), to.Format("2006-01-02"), err)
-		http.Error(w, "failed to read logs", http.StatusInternalServerError)
-		return
-	}
+	found := s.diskLogStore.SearchDates(window, query)
 	for _, problem := range found.Errors {
 		// A partition the scan could not read cost its own matches, not the
 		// search: say so where an operator will see it, and let the response

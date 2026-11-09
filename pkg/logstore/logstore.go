@@ -677,14 +677,18 @@ type SearchResult struct {
 // and are clipped at either end; how many is the store's policy, not a knob
 // each caller re-picks.
 //
-// The scan stops at MaxSearchMatches and says so, so no query can make it
-// accumulate the whole window. A partition it cannot read costs its own
-// matches and nothing else: the walk continues and the problem is reported
-// in SearchResult.Errors.
-func (s *LogStore) SearchDates(dates []string, query string) (SearchResult, error) {
-	if query == "" {
-		return SearchResult{}, fmt.Errorf("search query must not be empty")
-	}
+// Input validation is the caller's job, exactly like window enforcement:
+// dates must be partition directory names as ListDates returns them
+// (YYYY-MM-DD), since they are joined into filesystem paths verbatim, and
+// an empty query matches every line, so a caller that must not search for
+// nothing has to reject it itself.
+//
+// Everything the scan cannot do reports through SearchResult.Errors: there
+// is no separate failure channel. The scan stops at MaxSearchMatches and
+// says so, so no query can make it accumulate the whole window, and a
+// partition it cannot read costs its own matches and nothing else: the walk
+// continues and the problem is recorded for the caller to log.
+func (s *LogStore) SearchDates(dates []string, query string) SearchResult {
 	needle := strings.ToLower(query)
 
 	var res SearchResult
@@ -707,7 +711,7 @@ func (s *LogStore) SearchDates(dates []string, query string) (SearchResult, erro
 				}
 				if len(res.Matches) == MaxSearchMatches {
 					res.Truncated = true
-					return res, nil
+					return res
 				}
 				res.Matches = append(res.Matches, Match{
 					TaskID:        taskID,
@@ -720,7 +724,7 @@ func (s *LogStore) SearchDates(dates []string, query string) (SearchResult, erro
 			}
 		}
 	}
-	return res, nil
+	return res
 }
 
 // linesBefore returns up to n entry lines immediately preceding index i,

@@ -44,10 +44,7 @@ func TestSearchDates_FindsMatchesWithContext(t *testing.T) {
 	s := mustStore(t)
 	appendLines(t, s, "task-a", dayOne, []string{"one", "two", "THREE hit", "four", "five", "six"})
 
-	res, err := s.SearchDates([]string{"2026-05-10"}, "hit")
-	if err != nil {
-		t.Fatalf("search: %v", err)
-	}
+	res := s.SearchDates([]string{"2026-05-10"}, "hit")
 	if len(res.Matches) != 1 {
 		t.Fatalf("expected 1 match, got %d", len(res.Matches))
 	}
@@ -78,10 +75,7 @@ func TestSearchDates_MultipleMatchesAndFiles(t *testing.T) {
 	appendLines(t, s, "task-a", dayTwo, []string{"first needle", "clean", "second needle"})
 	appendLines(t, s, "task-a", dayOne, []string{"needle first day"})
 
-	res, err := s.SearchDates([]string{"2026-05-10", "2026-05-11"}, "needle")
-	if err != nil {
-		t.Fatalf("search: %v", err)
-	}
+	res := s.SearchDates([]string{"2026-05-10", "2026-05-11"}, "needle")
 	if len(res.Matches) != 4 {
 		t.Fatalf("expected 4 matches, got %d (%+v)", len(res.Matches), res.Matches)
 	}
@@ -109,10 +103,7 @@ func TestSearchDates_OnlyScansRequestedDates(t *testing.T) {
 	appendLines(t, s, "task-a", dayOne, []string{"needle here"})
 	appendLines(t, s, "task-b", dayTwo, []string{"needle here"})
 
-	res, err := s.SearchDates([]string{"2026-05-11"}, "needle")
-	if err != nil {
-		t.Fatalf("search: %v", err)
-	}
+	res := s.SearchDates([]string{"2026-05-11"}, "needle")
 	if len(res.Matches) != 1 || res.Matches[0].TaskID != "task-b" {
 		t.Fatalf("expected only the task in the requested date, got %+v", res.Matches)
 	}
@@ -123,10 +114,7 @@ func TestSearchDates_CaseInsensitive(t *testing.T) {
 	s := mustStore(t)
 	appendLines(t, s, "task-a", dayOne, []string{"Deploying Service"})
 
-	res, err := s.SearchDates([]string{"2026-05-10"}, "deploying SERVICE")
-	if err != nil {
-		t.Fatalf("search: %v", err)
-	}
+	res := s.SearchDates([]string{"2026-05-10"}, "deploying SERVICE")
 	if len(res.Matches) != 1 {
 		t.Fatalf("expected 1 case-insensitive match, got %d", len(res.Matches))
 	}
@@ -138,10 +126,7 @@ func TestSearchDates_ContextClippedAtEdges(t *testing.T) {
 	s := mustStore(t)
 	appendLines(t, s, "task-a", dayOne, []string{"hit", "next"})
 
-	res, err := s.SearchDates([]string{"2026-05-10"}, "hit")
-	if err != nil {
-		t.Fatalf("search: %v", err)
-	}
+	res := s.SearchDates([]string{"2026-05-10"}, "hit")
 	if len(res.Matches) != 1 {
 		t.Fatalf("expected 1 match, got %d", len(res.Matches))
 	}
@@ -164,10 +149,7 @@ func TestSearchDates_TruncatesAtTheCap(t *testing.T) {
 	}
 	appendLines(t, s, "task-a", dayOne, lines)
 
-	res, err := s.SearchDates([]string{"2026-05-10"}, "needle")
-	if err != nil {
-		t.Fatalf("search: %v", err)
-	}
+	res := s.SearchDates([]string{"2026-05-10"}, "needle")
 	if len(res.Matches) != MaxSearchMatches {
 		t.Fatalf("expected the scan to stop at %d matches, got %d", MaxSearchMatches, len(res.Matches))
 	}
@@ -193,10 +175,7 @@ func TestSearchDates_KeepsWalkingPastAnUnreadablePartition(t *testing.T) {
 	}
 	t.Cleanup(func() { os.Chmod(filepath.Join(s.dir, "2026-05-10", "task-bad"), 0o755) })
 
-	res, err := s.SearchDates([]string{"2026-05-10", "2026-05-11"}, "needle")
-	if err != nil {
-		t.Fatalf("one unreadable partition must not fail the search: %v", err)
-	}
+	res := s.SearchDates([]string{"2026-05-10", "2026-05-11"}, "needle")
 	if len(res.Matches) != 1 || res.Matches[0].TaskID != "task-good" {
 		t.Fatalf("expected the readable partition's match, got %+v", res.Matches)
 	}
@@ -211,10 +190,7 @@ func TestSearchDates_MissingDateIsNotAnError(t *testing.T) {
 	s := mustStore(t)
 	appendLines(t, s, "task-a", dayOne, []string{"something"})
 
-	res, err := s.SearchDates([]string{"2025-01-01", "2026-05-10"}, "something")
-	if err != nil {
-		t.Fatalf("search: %v", err)
-	}
+	res := s.SearchDates([]string{"2025-01-01", "2026-05-10"}, "something")
 	if len(res.Matches) != 1 || res.Matches[0].Date != "2026-05-10" {
 		t.Fatalf("expected the one match from the existing date, got %+v", res.Matches)
 	}
