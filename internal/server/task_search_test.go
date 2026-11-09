@@ -173,20 +173,6 @@ func TestSearchAPI_MatchesWithContext(t *testing.T) {
 	}
 }
 
-// TestSearchAPI_CaseInsensitive verifies the query matches regardless of case.
-func TestSearchAPI_CaseInsensitive(t *testing.T) {
-	srv := newSearchServer(t)
-	appendTrace(t, srv, "task-a", 2026, 5, 10, []string{"Deploying Service"})
-
-	w := doSearch(t, srv, "/api/tasks/search?q=deploying+service&from=2026-05-10&to=2026-05-10")
-	if w.Code != http.StatusOK {
-		t.Fatalf("expected 200, got %d", w.Code)
-	}
-	if resp := decodeSearch(t, w); resp.Count != 1 {
-		t.Errorf("expected case-insensitive match, got %d", resp.Count)
-	}
-}
-
 // TestSearchAPI_DefaultWindowIsFiveDays verifies that with no window supplied
 // only the last five days are searched (issue #269): a hit from today is
 // found, a ten-day-old hit is not — but days=14 reaches it.

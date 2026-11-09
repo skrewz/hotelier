@@ -2583,7 +2583,6 @@ func writeLogAttachment(w http.ResponseWriter, filename, raw string) {
 const (
 	defaultSearchLookbackDays = 5
 	maxSearchLookbackDays     = 14
-	searchContextLines        = 2
 )
 
 // HandleTaskSearch handles GET /api/tasks/search: a substring search over
@@ -2644,7 +2643,7 @@ func (s *Server) HandleTaskSearch(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	matches, err := s.diskLogStore.SearchDates(window, query, searchContextLines)
+	matches, err := s.diskLogStore.SearchDates(window, query)
 	if err != nil {
 		// Store errors embed absolute filesystem paths; keep them
 		// server-side rather than echoing them to the client.

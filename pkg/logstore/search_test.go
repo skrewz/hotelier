@@ -42,7 +42,7 @@ func TestSearchDates_FindsMatchesWithContext(t *testing.T) {
 	s := mustStore(t)
 	appendLines(t, s, "task-a", dayOne, []string{"one", "two", "THREE hit", "four", "five", "six"})
 
-	matches, err := s.SearchDates([]string{"2026-05-10"}, "hit", 2)
+	matches, err := s.SearchDates([]string{"2026-05-10"}, "hit")
 	if err != nil {
 		t.Fatalf("search: %v", err)
 	}
@@ -76,7 +76,7 @@ func TestSearchDates_MultipleMatchesAndFiles(t *testing.T) {
 	appendLines(t, s, "task-a", dayTwo, []string{"first needle", "clean", "second needle"})
 	appendLines(t, s, "task-a", dayOne, []string{"needle first day"})
 
-	matches, err := s.SearchDates([]string{"2026-05-10", "2026-05-11"}, "needle", 0)
+	matches, err := s.SearchDates([]string{"2026-05-10", "2026-05-11"}, "needle")
 	if err != nil {
 		t.Fatalf("search: %v", err)
 	}
@@ -107,7 +107,7 @@ func TestSearchDates_OnlyScansRequestedDates(t *testing.T) {
 	appendLines(t, s, "task-a", dayOne, []string{"needle here"})
 	appendLines(t, s, "task-b", dayTwo, []string{"needle here"})
 
-	matches, err := s.SearchDates([]string{"2026-05-11"}, "needle", 0)
+	matches, err := s.SearchDates([]string{"2026-05-11"}, "needle")
 	if err != nil {
 		t.Fatalf("search: %v", err)
 	}
@@ -121,7 +121,7 @@ func TestSearchDates_CaseInsensitive(t *testing.T) {
 	s := mustStore(t)
 	appendLines(t, s, "task-a", dayOne, []string{"Deploying Service"})
 
-	matches, err := s.SearchDates([]string{"2026-05-10"}, "deploying SERVICE", 0)
+	matches, err := s.SearchDates([]string{"2026-05-10"}, "deploying SERVICE")
 	if err != nil {
 		t.Fatalf("search: %v", err)
 	}
@@ -136,7 +136,7 @@ func TestSearchDates_ContextClippedAtEdges(t *testing.T) {
 	s := mustStore(t)
 	appendLines(t, s, "task-a", dayOne, []string{"hit", "next"})
 
-	matches, err := s.SearchDates([]string{"2026-05-10"}, "hit", 2)
+	matches, err := s.SearchDates([]string{"2026-05-10"}, "hit")
 	if err != nil {
 		t.Fatalf("search: %v", err)
 	}
@@ -157,7 +157,7 @@ func TestSearchDates_MissingDateIsNotAnError(t *testing.T) {
 	s := mustStore(t)
 	appendLines(t, s, "task-a", dayOne, []string{"something"})
 
-	matches, err := s.SearchDates([]string{"2025-01-01", "2026-05-10"}, "something", 0)
+	matches, err := s.SearchDates([]string{"2025-01-01", "2026-05-10"}, "something")
 	if err != nil {
 		t.Fatalf("search: %v", err)
 	}

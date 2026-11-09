@@ -626,8 +626,13 @@ func isEmptyLine(b []byte) bool {
 	return true
 }
 
+// searchContextLines is how many lines either side of a match the store
+// returns. Two is what the API documents, so it lives here as the store's
+// own policy rather than as a parameter every caller repeats.
+const searchContextLines = 2
+
 // Match is one log line that satisfied a search query, together with up to
-// ContextLines neighbouring lines from the same trace on either side.
+// searchContextLines neighbouring lines from the same trace on either side.
 type Match struct {
 	TaskID        string    `json:"task_id"`
 	Date          string    `json:"date"`
@@ -643,8 +648,9 @@ type Match struct {
 // in are read — window enforcement is the caller's job (issue #269 keeps it
 // server-side in the HTTP handler), and a date that has been pruned or never
 // existed simply yields no matches. Context lines come from the same trace
-// and are clipped at either end.
-func (s *LogStore) SearchDates(dates []string, query string, contextLines int) ([]Match, error) {
+// and are clipped at either end; how many is the store's policy, not a knob
+// each caller re-picks.
+func (s *LogStore) SearchDates(dates []string, query string) ([]Match, error) {
 	if query == "" {
 		return nil, fmt.Errorf("search query must not be empty")
 	}
@@ -671,8 +677,8 @@ func (s *LogStore) SearchDates(dates []string, query string, contextLines int) (
 					Date:          date,
 					Timestamp:     e.Timestamp,
 					Line:          e.Line,
-					ContextBefore: linesBefore(entries, i, contextLines),
-					ContextAfter:  linesAfter(entries, i, contextLines),
+					ContextBefore: linesBefore(entries, i, searchContextLines),
+					ContextAfter:  linesAfter(entries, i, searchContextLines),
 				})
 			}
 		}
