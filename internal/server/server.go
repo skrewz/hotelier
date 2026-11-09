@@ -1738,14 +1738,17 @@ func (s *Server) pruneTaskLogs() {
 		return
 	}
 
+	// PruneOlderThan keeps walking past a directory it cannot remove, so the
+	// partial result is still worth logging before the error: the sweep that
+	// could not free one stuck day has usually freed the rest (issue #263
+	// review).
 	res, err := store.PruneOlderThan(time.Now(), retention)
-	if err != nil {
-		s.log.Printf("task log prune failed: %v", err)
-		return
-	}
 	if len(res.DatesRemoved) > 0 {
 		s.log.Printf("pruned task logs: %d date dir(s) %v, %d file(s), %d bytes reclaimed",
 			len(res.DatesRemoved), res.DatesRemoved, res.FilesRemoved, res.BytesReclaimed)
+	}
+	if err != nil {
+		s.log.Printf("task log prune failed: %v", err)
 	}
 }
 

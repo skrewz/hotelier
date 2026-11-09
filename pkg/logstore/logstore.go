@@ -210,6 +210,13 @@ type PruneResult struct {
 // are not dates (a queue store's pending/ running/ dirs sharing the tree,
 // stray files) are never touched, so a persisted queue entry survives the
 // sweep regardless of its age even when queue_dir points at log_dir.
+//
+// A directory that cannot be removed does not stop the sweep: the error is
+// collected, the remaining (newer) dates are still visited, and the fully
+// populated PruneResult comes back alongside the joined errors. Returning on
+// the first failure would let one stuck day block every newer one on this
+// sweep and on every future tick, which is the failure mode the sweep exists
+// to prevent.
 func (s *LogStore) PruneOlderThan(now time.Time, retentionDays int) (PruneResult, error) {
 	var res PruneResult
 	if retentionDays <= 0 {
@@ -223,6 +230,8 @@ func (s *LogStore) PruneOlderThan(now time.Time, retentionDays int) (PruneResult
 	if err != nil {
 		return res, err
 	}
+
+	var errs []error
 
 	// Compare days, not instants: anchor the cutoff at midnight UTC of
 	// now's calendar date so a non-UTC "now" cannot shift the boundary by
@@ -242,13 +251,17 @@ func (s *LogStore) PruneOlderThan(now time.Time, retentionDays int) (PruneResult
 		path := filepath.Join(s.dir, date)
 		files, bytes := dirSize(path)
 		if err := os.RemoveAll(path); err != nil {
-			return res, fmt.Errorf("prune log dir %s: %w", path, err)
+			// Per-directory failure, not a sweep failure: keep walking so one
+			// stuck directory (permissions, an immutable attribute, a damaged
+			// volume) cannot permanently block every newer expired day.
+			errs = append(errs, fmt.Errorf("prune log dir %s: %w", path, err))
+			continue
 		}
 		res.DatesRemoved = append(res.DatesRemoved, date)
 		res.FilesRemoved += files
 		res.BytesReclaimed += bytes
 	}
-	return res, nil
+	return res, errors.Join(errs...)
 }
 
 // dirSize counts the regular files under dir and sums their sizes. It is

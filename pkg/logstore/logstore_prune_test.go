@@ -173,3 +173,49 @@ func TestLogStore_PruneEmptyStoreIsNoError(t *testing.T) {
 		t.Errorf("prune of a missing store dir should succeed: %v", err)
 	}
 }
+
+// TestLogStore_PruneOlderThanContinuesAfterRemovalFailure covers the
+// damaged-volume case: one expired directory the process cannot remove
+// (permissions, an immutable attribute, a failing disk) must not freeze the
+// rest of the window. The sweep keeps walking, reports the directories it
+// did reclaim and surfaces the failure as an error alongside them.
+func TestLogStore_PruneOlderThanContinuesAfterRemovalFailure(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("running as root: a read-only directory stays removable")
+	}
+	s, dir := newTestLogStore(t)
+	defer os.RemoveAll(dir)
+
+	now := time.Date(2026, 6, 15, 12, 0, 0, 0, time.UTC)
+	appendOn(t, s, "stuck-task", time.Date(2026, 5, 1, 9, 0, 0, 0, time.UTC))
+	appendOn(t, s, "newer-task", time.Date(2026, 5, 20, 9, 0, 0, 0, time.UTC))
+
+	// Read-only expired dir: RemoveAll cannot unlink its child task dir, so
+	// this day cannot be deleted while the newer one can.
+	stuck := filepath.Join(dir, "2026-05-01")
+	if err := os.Chmod(stuck, 0o500); err != nil {
+		t.Fatalf("chmod: %v", err)
+	}
+	t.Cleanup(func() { os.Chmod(stuck, 0o755) })
+
+	res, err := s.PruneOlderThan(now, 14)
+	if err == nil {
+		t.Error("prune must report the directory it could not remove")
+	}
+	if _, statErr := os.Stat(stuck); statErr != nil {
+		t.Fatalf("unremovable dir should still exist: %v", statErr)
+	}
+	if _, statErr := os.Stat(filepath.Join(dir, "2026-05-20")); !os.IsNotExist(statErr) {
+		t.Errorf("a newer expired dir must not be blocked by an older one (stat err = %v)", statErr)
+	}
+	os.Chmod(stuck, 0o755)
+
+	// The partial result is kept, not discarded: the log line still carries
+	// evidence of what the sweep did reclaim.
+	if len(res.DatesRemoved) != 1 || res.DatesRemoved[0] != "2026-05-20" {
+		t.Errorf("DatesRemoved = %v, want [2026-05-20]", res.DatesRemoved)
+	}
+	if res.FilesRemoved == 0 || res.BytesReclaimed == 0 {
+		t.Errorf("removed dir must report files and bytes, got %d/%d", res.FilesRemoved, res.BytesReclaimed)
+	}
+}
