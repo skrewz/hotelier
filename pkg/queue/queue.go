@@ -456,6 +456,51 @@ func (q *TaskQueue) GetAllTasks() []*Task {
 	return result
 }
 
+// processingRank orders statuses by when the queue touches them: RUNNING
+// tasks are executing now, ASSIGNED tasks are claimed and about to run,
+// PENDING tasks wait their turn, and settled tasks are done with.
+func processingRank(status TaskStatus) int {
+	switch status {
+	case TaskStatusRunning:
+		return 0
+	case TaskStatusAssigned:
+		return 1
+	case TaskStatusPending:
+		return 2
+	default:
+		return 3
+	}
+}
+
+// GetAllTasksOrdered returns every task in the order the queue will get
+// processed (issue #268): RUNNING first, then ASSIGNED (claimed, about to
+// start), then PENDING in the same order NextPendingTask would drain them
+// (priority first, FIFO within a priority), and finally settled tasks
+// oldest first. Priority changes take effect on the next read, so a
+// re-prioritised task leaves its old slot without any reshuffle.
+func (q *TaskQueue) GetAllTasksOrdered() []*Task {
+	q.mu.RLock()
+	defer q.mu.RUnlock()
+
+	result := make([]*Task, 0, len(q.ordered))
+	result = append(result, q.ordered...)
+	sort.SliceStable(result, func(i, j int) bool {
+		ri, rj := processingRank(result[i].Status), processingRank(result[j].Status)
+		if ri != rj {
+			return ri < rj
+		}
+		if ri == processingRank(TaskStatusPending) {
+			// Within the pending band the queue drains by priority first.
+			vi, vj := priorityValue(result[i].Priority), priorityValue(result[j].Priority)
+			if vi != vj {
+				return vi < vj
+			}
+		}
+		return result[i].CreatedAt.Before(result[j].CreatedAt)
+	})
+	return result
+}
+
 // GetAssignedGuest returns the guest ID assigned to a task.
 func (q *TaskQueue) GetAssignedGuest(taskID string) (string, bool) {
 	q.mu.RLock()

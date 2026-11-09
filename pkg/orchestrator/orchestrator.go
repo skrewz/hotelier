@@ -683,6 +683,15 @@ func (o *Orchestrator) GetAllTasks() []*queue.Task {
 	return o.queue.GetAllTasks()
 }
 
+// GetAllTasksOrdered returns all tasks in the order the queue will get
+// processed (issue #268); see queue.TaskQueue.GetAllTasksOrdered.
+func (o *Orchestrator) GetAllTasksOrdered() []*queue.Task {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+
+	return o.queue.GetAllTasksOrdered()
+}
+
 // GetAllGuests returns all guests.
 func (o *Orchestrator) GetAllGuests() []*registry.Guest {
 	o.mu.Lock()

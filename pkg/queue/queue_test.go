@@ -1477,3 +1477,80 @@ func TestRestoreClearsHeldReason(t *testing.T) {
 		t.Errorf("expected a restored task to be PENDING, got %s", task.Status)
 	}
 }
+
+// TestGetAllTasksOrdered verifies the display ordering for issue #268:
+// RUNNING first, then ASSIGNED, then PENDING in the order the queue will
+// drain them (priority, then FIFO), then settled tasks oldest first.
+func TestGetAllTasksOrdered(t *testing.T) {
+	q := newTestQueue(t)
+
+	base := time.Now().Add(-time.Hour)
+	add := func(id, priority string, offset time.Duration) {
+		task := &Task{ID: id, Prompt: id, Priority: priority, CreatedAt: base.Add(offset)}
+		if err := q.Add(task); err != nil {
+			t.Fatalf("add %s: %v", id, err)
+		}
+	}
+
+	add("running-old", PriorityOrangutan, 0)
+	add("assigned", PriorityOrangutan, time.Minute)
+	add("pending-firefighter", PriorityFirefighter, 2*time.Minute)
+	add("pending-old-orange", PriorityOrangutan, 3*time.Minute)
+	add("pending-teacher", PriorityTeacher, 4*time.Minute)
+	add("pending-new-orange", PriorityOrangutan, 5*time.Minute)
+	add("completed", PriorityOrangutan, 6*time.Minute)
+	add("failed", PriorityOrangutan, 7*time.Minute)
+
+	q.Assign("running-old", "guest-1")
+	q.Start("running-old")
+	q.Assign("assigned", "guest-2")
+	q.Assign("completed", "guest-3")
+	q.Start("completed")
+	q.Complete("completed", "done")
+	q.Assign("failed", "guest-4")
+	q.Start("failed")
+	q.Fail("failed", "boom")
+
+	got := q.GetAllTasksOrdered()
+	want := []string{
+		"running-old",
+		"assigned",
+		"pending-firefighter",
+		"pending-teacher",
+		"pending-old-orange",
+		"pending-new-orange",
+		"completed",
+		"failed",
+	}
+	if len(got) != len(want) {
+		t.Fatalf("expected %d tasks, got %d", len(want), len(got))
+	}
+	for i, id := range want {
+		if got[i].ID != id {
+			t.Errorf("position %d: expected %s, got %s", i, id, got[i].ID)
+		}
+	}
+}
+
+// TestGetAllTasksOrderedReprioritisedMovesOutOfSlot verifies that a task
+// whose priority was bumped leaves its old slot and sorts with its new
+// priority band (issue #268).
+func TestGetAllTasksOrderedReprioritisedMovesOutOfSlot(t *testing.T) {
+	q := newTestQueue(t)
+
+	base := time.Now().Add(-time.Hour)
+	q.Add(&Task{ID: "a", Prompt: "a", Priority: PriorityOrangutan, CreatedAt: base})
+	q.Add(&Task{ID: "b", Prompt: "b", Priority: PriorityOrangutan, CreatedAt: base.Add(time.Minute)})
+
+	if err := q.SetPriority("b", PriorityFirefighter); err != nil {
+		t.Fatalf("SetPriority: %v", err)
+	}
+
+	got := q.GetAllTasksOrdered()
+	if len(got) != 2 {
+		t.Fatalf("expected 2 tasks, got %d", len(got))
+	}
+	if got[0].ID != "b" || got[1].ID != "a" {
+		t.Errorf("expected [b a] after bump, got [%s %s]", got[0].ID, got[1].ID)
+	}
+}
