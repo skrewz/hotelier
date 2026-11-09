@@ -814,6 +814,12 @@ func (o *Orchestrator) PendingHeldByCapCount() int {
 	o.mu.Lock()
 	defer o.mu.Unlock()
 
+	return o.pendingHeldByCapCountInternal()
+}
+
+// pendingHeldByCapCountInternal is PendingHeldByCapCount for callers that
+// already hold o.mu.
+func (o *Orchestrator) pendingHeldByCapCountInternal() int {
 	// An unlimited cap holds nothing back, whatever the queue looks like.
 	if o.concurrencyCap < 0 {
 		return 0
@@ -829,6 +835,21 @@ func (o *Orchestrator) PendingHeldByCapCount() int {
 		return 0
 	}
 	return pending - room
+}
+
+// ConcurrencyCounts returns the cap in force, the in-flight count and the
+// pending queue held back by the cap in a single acquisition of the
+// orchestrator lock, so a status read states three numbers that were true
+// at the same instant (issue #250). Reading the three through separate
+// accessors would let an assignment or completion landing between the calls
+// put a triple in the response that never existed at any one instant. The
+// cap follows ConcurrencyCap: negative means no cap, and an unlimited cap
+// holds nothing back.
+func (o *Orchestrator) ConcurrencyCounts() (int, int, int) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+
+	return o.concurrencyCap, o.inFlightCountInternal(), o.pendingHeldByCapCountInternal()
 }
 
 // --- Read-Only Delegation ---

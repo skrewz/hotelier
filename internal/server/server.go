@@ -1928,14 +1928,17 @@ func capLabel(cap int) interface{} {
 // HandleHealth returns the server health status.
 func (s *Server) HandleHealth(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
+	capNow, inFlight, _ := s.orchestrator.ConcurrencyCounts()
 	json.NewEncoder(w).Encode(map[string]interface{}{
 		"status": "healthy",
 		"guests": s.orchestrator.Registry().Count(),
 		"tasks":  s.orchestrator.Queue().Count(),
 		// The cap and what is in flight against it, so "nothing is moving"
 		// can be read as night mode rather than guessed at (issue #249).
-		"in_flight":       s.orchestrator.InFlightCount(),
-		"concurrency_cap": capLabel(s.orchestrator.ConcurrencyCap()),
+		// Read in one acquisition with the cap, as on /api/guests, so the
+		// two can never state counts measured against a superseded cap.
+		"in_flight":       inFlight,
+		"concurrency_cap": capLabel(capNow),
 	})
 }
 
@@ -2348,12 +2351,12 @@ func (s *Server) HandleGuests(w http.ResponseWriter, r *http.Request) {
 // produced it, how much work is in flight against it, how much more the cap
 // is holding back, and the next boundary at which the number changes.
 //
-// The cap and the counts come from the orchestrator, which is where they are
-// decided and where enforcement measures the counts — one response is one
-// instant, and the number an operator sees is the number the next assignment
-// decision obeys. The provenance (`source`) and the schedule picture
-// (`next_change`, `timezone`) come from the config resolver, which reads the
-// schedule directly; immediately after a boundary they can therefore lead the
+// The cap and the counts come from the orchestrator, in a single lock
+// acquisition (ConcurrencyCounts) — one response is one instant, and the
+// number an operator sees is the number the next assignment decision obeys.
+// The provenance (`source`) and the schedule picture (`next_change`,
+// `timezone`) come from the config resolver, which reads the schedule
+// directly; immediately after a boundary they can therefore lead the
 // enforced cap by up to one concurrencySyncInterval (15s), the pre-existing
 // sync lag, until syncConcurrencyCap pushes the resolver's answer into the
 // orchestrator. /api/health reads the same enforced cap, so the two surfaces
@@ -2377,14 +2380,16 @@ func (s *Server) concurrencyStatus(now time.Time) map[string]interface{} {
 		}
 	}
 
+	capNow, inFlight, waitingOnCap := s.orchestrator.ConcurrencyCounts()
+
 	return map[string]interface{}{
-		"cap":    capLabel(s.orchestrator.ConcurrencyCap()),
+		"cap":    capLabel(capNow),
 		"source": status.Source,
 		// "in_flight" is the ASSIGNED or RUNNING count the cap is measured
 		// against; "waiting_on_cap" is the pending queue there is no room
 		// for under the cap.
-		"in_flight":      s.orchestrator.InFlightCount(),
-		"waiting_on_cap": s.orchestrator.PendingHeldByCapCount(),
+		"in_flight":      inFlight,
+		"waiting_on_cap": waitingOnCap,
 		"next_change":    next,
 	}
 }
