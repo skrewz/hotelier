@@ -2674,8 +2674,9 @@ const (
 // {"filter": "<text>"}, and the empty string clears; the response echoes
 // what is now in force, so the caller learns the trimmed value.
 //
-// While a filter is set the queue drains the pending tasks whose text
-// carries the substring first; once no pending task matches, normal queue
+// While a filter is set the queue drains first the pending tasks carrying
+// the substring in one of their fields (repository, title, prompt, persona
+// or tags); once no pending task matches, normal queue
 // semantics apply — the filter is a preference, never a suppression.
 //
 // There is no read half: the dashboard's persistence path for the field is

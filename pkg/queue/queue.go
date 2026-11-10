@@ -697,7 +697,7 @@ func (q *TaskQueue) PreferenceFilter() string {
 }
 
 // preferenceMatches decides the preference filter once per pending task in
-// a single O(N) pass, so a sort costs one haystack per task rather than one
+// a single O(N) pass, so a sort costs one weighing per task rather than one
 // per comparison. Tasks that are not pending are left out of the table:
 // only the pending band consults it, and their text is never scanned.
 // The needle is lowercased once here rather than per call. The caller must
@@ -716,14 +716,22 @@ func (q *TaskQueue) preferenceMatches(tasks []*Task) map[*Task]bool {
 	return matches
 }
 
-// matchesPreference reports whether the task's text carries the lowercased
-// filter needle. The fields searched are those an operator would type a
-// fragment of: repository, title, prompt, persona and tags.
+// matchesPreference reports whether any one of the task's fields carries
+// the lowercased filter needle. The fields weighed are those an operator
+// would type a fragment of: repository, title, prompt, persona and tags.
+// Each is tested on its own, so the rule is the documented one — a
+// substring of *each* field — and no needle straddling a field boundary
+// can match the drain without matching the client-side list filter (which
+// weighs the same fields per-field, in web/static/index.html).
 func matchesPreference(task *Task, needle string) bool {
-	haystack := strings.ToLower(strings.Join([]string{
+	for _, field := range []string{
 		task.RepoRef, task.Title, task.Prompt, task.Persona, strings.Join(task.Tags, " "),
-	}, " "))
-	return strings.Contains(haystack, needle)
+	} {
+		if strings.Contains(strings.ToLower(field), needle) {
+			return true
+		}
+	}
+	return false
 }
 
 // sortPending sorts pending tasks by the queue's drain key: preference

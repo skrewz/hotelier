@@ -867,14 +867,16 @@
         // =====================================================================
 
         // matchesPrefFilter reports whether a task survives the client-side
-        // substring filter. The fields searched are the ones the backend
-        // weighs (queue.matchesPreference): repo, title, prompt, persona and
-        // tags.
+        // substring filter. The fields weighed are the ones the backend
+        // weighs (queue.matchesPreference), each tested on its own for the
+        // same reason: a needle straddling a field boundary must not filter
+        // the list without prioritising the drain, or the reverse, so field
+        // order cannot matter here either.
         function matchesPrefFilter(t) {
             if (!prefFilterText) return true;
             const needle = prefFilterText.toLowerCase();
-            const haystack = [t.title || '', t.prompt || '', t.repo_ref || '', t.persona || '', (t.tags || []).join(' ')].join(' ').toLowerCase();
-            return haystack.includes(needle);
+            const fields = [t.title || '', t.prompt || '', t.repo_ref || '', t.persona || '', (t.tags || []).join(' ')];
+            return fields.some(f => f.toLowerCase().includes(needle));
         }
 
         // readPrefFilterHash returns the #filter=... fragment, trimmed as

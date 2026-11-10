@@ -151,7 +151,12 @@ func TestPreferenceFilter_MatchesFieldsCaseInsensitively(t *testing.T) {
 		{"prompt", &Task{ID: "t", Prompt: "Refactor the parser"}, "PARSER", true},
 		{"persona", &Task{ID: "t", Persona: "implementer"}, "plem", true},
 		{"tags", &Task{ID: "t", Tags: []string{"android", "frontend"}}, "FRONTEND", true},
-		{"no match", &Task{ID: "t", Prompt: "something else", RepoRef: "https://example.com/other.git"}, "habit", false},
+		{"no match", &Task{ID: "t", Prompt: "something else", RepoRef: "https://example.com/other.git"}, "no-match", false},
+		// The documented rule is a substring of *each* field, so a needle
+		// straddling two fields must not match — joining the fields into one
+		// haystack would match it, and the client-side copy weighs the fields
+		// in its own order, so the list and the drain could diverge.
+		{"across a field boundary", &Task{ID: "t", Title: "Finish the polish", Prompt: "prompt the reader"}, "polish prompt", false},
 	}
 
 	for _, tc := range cases {
@@ -170,6 +175,24 @@ func TestPreferenceFilter_MatchesFieldsCaseInsensitively(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestPreferenceFilter_AcrossFieldNeedleDoesNotMatch(t *testing.T) {
+	base := time.Now().Add(-time.Hour)
+	// The needle straddles the title/prompt boundary: a haystack built by
+	// joining the fields would call this a match and drain late first,
+	// while the client (which weighs the fields in its own order) would
+	// hide nothing — the list and the drain drifting apart again.
+	q := newRestoredQueue(t, []*Task{
+		{ID: "early", Title: "Unrelated", Prompt: "nothing of note", CreatedAt: base},
+		{ID: "late", Title: "Finish the polish", Prompt: "prompt the reader", CreatedAt: base.Add(time.Minute)},
+	})
+
+	q.SetPreferenceFilter("polish prompt")
+
+	if got := q.NextPendingTask(); got == nil || got.ID != "early" {
+		t.Fatalf("a needle spanning two fields must not match, so FIFO should decide, got %v", got)
 	}
 }
 
