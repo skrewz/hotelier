@@ -196,6 +196,25 @@ func TestPreferenceFilter_AcrossFieldNeedleDoesNotMatch(t *testing.T) {
 	}
 }
 
+// The comment on lessPending claims matches drain "in ordinary order among
+// themselves" — priority, then FIFO, inside the matching band. Without two
+// matching tasks no test can refute that claim: give the band a firefighter
+// and a default, created oldest-first, and drop the priority tie-break for
+// matched tasks and the rest of the suite still passes.
+func TestNextPendingTask_PriorityWithinMatchBand(t *testing.T) {
+	base := time.Now().Add(-time.Hour)
+	q := newRestoredQueue(t, []*Task{
+		{ID: "default-match", Title: "widget chore", CreatedAt: base},
+		{ID: "firefighter-match", Title: "widget outage", Priority: PriorityFirefighter, CreatedAt: base.Add(time.Minute)},
+	})
+
+	q.SetPreferenceFilter("widget")
+
+	if got := q.NextPendingTask(); got == nil || got.ID != "firefighter-match" {
+		t.Fatalf("expected the firefighter to lead the matching band, got %v", got)
+	}
+}
+
 func TestGetPendingTasks_And_OrderedFollowPreference(t *testing.T) {
 	base := time.Now().Add(-time.Hour)
 	q := newRestoredQueue(t, []*Task{
