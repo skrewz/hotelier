@@ -426,3 +426,31 @@ func TestSearchDates_KeepsPendingMatchWhenTheBudgetStopsTheScan(t *testing.T) {
 	}
 }
 
+// TestSearchDates_ReportsCorruptTraceWhenNoLegacyLog pins the promise
+// openTaskLog makes to ReadRawJSONL: a present-but-unreadable trace is not
+// a missing one. With a corrupt-but-non-empty bzip2 and no legacy file to
+// fall back to, the scan answers with no matches and one reported error —
+// not the silent empty answer that would disagree with the download
+// endpoint, which returns an I/O error for the same task.
+func TestSearchDates_ReportsCorruptTraceWhenNoLegacyLog(t *testing.T) {
+	s := mustStore(t)
+	taskDir := filepath.Join(s.dir, "2026-05-10", "task-a")
+	if err := os.MkdirAll(taskDir, 0o755); err != nil {
+		t.Fatalf("create task dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(taskDir, "logs.jsonl.bz2"),
+		[]byte("not a bzip2 stream at all"), 0o644); err != nil {
+		t.Fatalf("write corrupt bzip2: %v", err)
+	}
+
+	res := s.SearchDates([]string{"2026-05-10"}, "needle")
+	if len(res.Matches) != 0 {
+		t.Errorf("expected no matches from an unreadable trace, got %+v", res.Matches)
+	}
+	if len(res.Errors) != 1 {
+		t.Fatalf("expected the unreadable trace reported once, got %v", res.Errors)
+	}
+	if _, err := s.ReadRawJSONL("2026-05-10", "task-a"); err == nil {
+		t.Error("the endpoints disagree: the search reported the trace unreadable but ReadRawJSONL answered without error")
+	}
+}
