@@ -2583,6 +2583,14 @@ func writeLogAttachment(w http.ResponseWriter, filename, raw string) {
 const (
 	defaultSearchLookbackDays = 5
 	maxSearchLookbackDays     = 14
+
+	// maxSearchErrorsLogged bounds how many partial-scan failure messages
+	// one log line quotes. The errors grow once per partition and once per
+	// trace, so a window whose traces all fail to open — a permissions slip
+	// after a deploy, a bad volume — would otherwise join a megabyte-scale
+	// line that shippers truncate at the tail; the count next to the
+	// excerpt carries the rest.
+	maxSearchErrorsLogged = 10
 )
 
 // HandleTaskSearch handles GET /api/tasks/search: a substring search over
@@ -2599,13 +2607,12 @@ const (
 // The response says how complete it is. "truncated" means the scan stopped
 // early — at the store's match cap or its scanned-bytes budget — so newer
 // hits in the window exist that are not listed (the walk goes oldest
-// first); "partial" means some
-// partition or trace could not be read (and was logged here) while the rest
-// of the window was scanned normally. Like every other route on this server
-// the endpoint is unauthenticated, and unlike /api/tasks/:id/download it
-// searches every task's output at once, so it discloses the IDs, titles and
-// statuses of whatever it matches; operators who would rather it did not
-// must front it themselves.
+// first). "partial" means a partition or trace could not be read (and was
+// logged here) while the rest of the window was scanned normally. Like
+// every other route on this server the endpoint is unauthenticated, and
+// unlike /api/tasks/:id/download it searches every task's output at once,
+// so it discloses the IDs, titles and statuses of whatever it matches;
+// operators who would rather it did not must front it themselves.
 func (s *Server) HandleTaskSearch(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 
@@ -2660,9 +2667,17 @@ func (s *Server) HandleTaskSearch(w http.ResponseWriter, r *http.Request) {
 		// search: say so where an operator will see it, once for the whole
 		// scan rather than once per trace — the joined-failures stance
 		// PruneOlderThan's caller takes — and let the response carry the
-		// partial answer.
-		s.log.Printf("task search partial scan, window %s..%s: %d partition(s)/trace(s) unreadable: %s",
-			from.Format("2006-01-02"), to.Format("2006-01-02"), len(found.Errors), strings.Join(found.Errors, "; "))
+		// partial answer. Quote only the first maxSearchErrorsLogged
+		// messages: the full join is unbounded in the all-traces-fail case,
+		// and the count already states what the excerpt leaves out.
+		quoted := found.Errors
+		suffix := ""
+		if len(quoted) > maxSearchErrorsLogged {
+			suffix = fmt.Sprintf(" (and %d more)", len(quoted)-maxSearchErrorsLogged)
+			quoted = quoted[:maxSearchErrorsLogged]
+		}
+		s.log.Printf("task search partial scan, window %s..%s: %d partition(s)/trace(s) unreadable: %s%s",
+			from.Format("2006-01-02"), to.Format("2006-01-02"), len(found.Errors), strings.Join(quoted, "; "), suffix)
 	}
 	matches := found.Matches
 
