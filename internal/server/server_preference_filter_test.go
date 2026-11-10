@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -12,14 +13,10 @@ import (
 	"hotelier/pkg/rpc"
 )
 
-// Task preference filter endpoint tests (issue #281).
-
-func getFilter(srv *Server) *httptest.ResponseRecorder {
-	req := httptest.NewRequest(http.MethodGet, "/api/tasks/filter", nil)
-	w := httptest.NewRecorder()
-	srv.HandleTaskFilter(w, req)
-	return w
-}
+// Task preference filter endpoint tests (issue #281). The endpoint is a
+// write: POST sets or clears the live filter and echoes what is now in
+// force. There is no read half — the dashboard's own persistence path for
+// the field is the #filter= fragment in the address bar.
 
 func postFilter(srv *Server, body string) *httptest.ResponseRecorder {
 	req := httptest.NewRequest(http.MethodPost, "/api/tasks/filter", bytes.NewReader([]byte(body)))
@@ -29,36 +26,22 @@ func postFilter(srv *Server, body string) *httptest.ResponseRecorder {
 	return w
 }
 
-func TestHandleTaskFilter_SetReadClear(t *testing.T) {
+func TestHandleTaskFilter_SetAndClear(t *testing.T) {
 	srv := newTestServer(t)
 
-	w := getFilter(srv)
+	w := postFilter(srv, `{"filter":"example-repo"}`)
 	if w.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
 	}
-	var empty map[string]interface{}
-	if err := json.Unmarshal(w.Body.Bytes(), &empty); err != nil {
-		t.Fatalf("unmarshal: %v", err)
-	}
-	if empty["filter"] != "" {
-		t.Fatalf("expected empty filter by default, got %v", empty["filter"])
-	}
-
-	w = postFilter(srv, `{"filter":"s-habit-tracker"}`)
-	if w.Code != http.StatusOK {
-		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
-	}
-	if got := srv.Orchestrator().PreferenceFilter(); got != "s-habit-tracker" {
+	if got := srv.Orchestrator().PreferenceFilter(); got != "example-repo" {
 		t.Fatalf("expected filter on the orchestrator, got %q", got)
 	}
-
-	w = getFilter(srv)
-	var read map[string]interface{}
-	if err := json.Unmarshal(w.Body.Bytes(), &read); err != nil {
+	var echoed map[string]interface{}
+	if err := json.Unmarshal(w.Body.Bytes(), &echoed); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
-	if read["filter"] != "s-habit-tracker" {
-		t.Fatalf("expected filter to read back, got %v", read["filter"])
+	if echoed["filter"] != "example-repo" {
+		t.Fatalf("expected the response to echo what is in force, got %v", echoed["filter"])
 	}
 
 	// An empty filter clears it (the UI's Clear button path).
@@ -68,6 +51,25 @@ func TestHandleTaskFilter_SetReadClear(t *testing.T) {
 	}
 	if got := srv.Orchestrator().PreferenceFilter(); got != "" {
 		t.Fatalf("expected cleared filter, got %q", got)
+	}
+}
+
+// One operator action is one log line: the handler must not log alongside
+// the queue.
+func TestHandleTaskFilter_LogsOnce(t *testing.T) {
+	srv := newTestServer(t)
+
+	var logBuf bytes.Buffer
+	out := srv.log.Writer()
+	srv.log.SetOutput(&logBuf)
+	w := postFilter(srv, `{"filter":"widget"}`)
+	srv.log.SetOutput(out)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	if n := strings.Count(logBuf.String(), "preference filter"); n != 1 {
+		t.Fatalf("expected one log line for one set, got %d:\n%s", n, logBuf.String())
 	}
 }
 
@@ -88,14 +90,50 @@ func TestHandleTaskFilter_RejectsBadInput(t *testing.T) {
 	if w.Code != http.StatusOK {
 		t.Fatalf("setup failed: %d", w.Code)
 	}
-	req := httptest.NewRequest(http.MethodDelete, "/api/tasks/filter", nil)
-	w = httptest.NewRecorder()
-	srv.HandleTaskFilter(w, req)
-	if w.Code != http.StatusMethodNotAllowed {
-		t.Fatalf("expected 405, got %d", w.Code)
+	for _, method := range []string{http.MethodGet, http.MethodDelete} {
+		req := httptest.NewRequest(method, "/api/tasks/filter", nil)
+		w = httptest.NewRecorder()
+		srv.HandleTaskFilter(w, req)
+		if w.Code != http.StatusMethodNotAllowed {
+			t.Fatalf("%s: expected 405, got %d", method, w.Code)
+		}
 	}
 	if got := srv.Orchestrator().PreferenceFilter(); got != "keep" {
 		t.Errorf("unsupported method changed the filter: %q", got)
+	}
+}
+
+// The filter is a fragment of a repository name or title, so a value past
+// the bound is not a mistake but an attack: it must be refused, not stored
+// in the queue and repeated into the log.
+func TestHandleTaskFilter_RejectsOverlongFilter(t *testing.T) {
+	srv := newTestServer(t)
+
+	if w := postFilter(srv, `{"filter":"keep"}`); w.Code != http.StatusOK {
+		t.Fatalf("setup failed: %d", w.Code)
+	}
+
+	body, err := json.Marshal(map[string]string{"filter": strings.Repeat("x", maxPreferenceFilterLen+1)})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if w := postFilter(srv, string(body)); w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for an over-long filter, got %d", w.Code)
+	}
+	if got := srv.Orchestrator().PreferenceFilter(); got != "keep" {
+		t.Fatalf("rejected filter changed the queue: %q", got)
+	}
+
+	// The bound counts the filter text, not the JSON envelope around it.
+	body, err = json.Marshal(map[string]string{"filter": strings.Repeat("y", maxPreferenceFilterLen)})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if w := postFilter(srv, string(body)); w.Code != http.StatusOK {
+		t.Fatalf("expected a filter at the bound to be accepted, got %d", w.Code)
+	}
+	if got := srv.Orchestrator().PreferenceFilter(); got != strings.Repeat("y", maxPreferenceFilterLen) {
+		t.Fatalf("expected the filter at the bound to stand, got %q", got)
 	}
 }
 
@@ -110,7 +148,7 @@ func TestHandleGetTasks_PendingOrderFollowsFilter(t *testing.T) {
 	}
 	base := time.Now().Add(-time.Hour)
 	mk("plain", "Unrelated", "https://example.com/other.git", base)
-	mk("hit", "Widget polish", "https://example.com/org/s-habit-tracker.git", base.Add(time.Minute))
+	mk("hit", "Widget polish", "https://example.com/org/example-repo.git", base.Add(time.Minute))
 
 	if w := postFilter(srv, `{"filter":"widget"}`); w.Code != http.StatusOK {
 		t.Fatalf("set filter: %d %s", w.Code, w.Body.String())

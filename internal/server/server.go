@@ -2659,44 +2659,66 @@ const (
 	maxSearchErrorsLogged = 10
 )
 
-// HandleTaskFilter handles the /api/tasks/filter endpoint (issue #281).
+// The task preference filter (issue #281) is a fragment of a repository
+// name, title, prompt, persona or tag, so a few hundred bytes bounds any
+// value an operator would type. The body bound carries the JSON envelope
+// around the filter text; both bounds exist so an oversized request is
+// refused rather than kept in the queue and repeated into the log.
+const (
+	maxPreferenceFilterLen       = 256
+	maxPreferenceFilterBodyBytes = 8 * maxPreferenceFilterLen
+)
+
+// HandleTaskFilter handles POST /api/tasks/filter (issue #281): it sets or
+// clears the live task preference filter. The body must carry
+// {"filter": "<text>"}, and the empty string clears; the response echoes
+// what is now in force, so the caller learns the trimmed value.
 //
-// GET  returns the live task preference filter: {"filter": "<text>"}.
-// POST sets or clears it: the body must carry {"filter": "<text>"}, and
-// the empty string clears. While a filter is set the queue drains the
-// pending tasks whose text carries the substring first; once no pending
-// task matches, normal queue semantics apply — the filter is a
-// preference, never a suppression.
+// While a filter is set the queue drains the pending tasks whose text
+// carries the substring first; once no pending task matches, normal queue
+// semantics apply — the filter is a preference, never a suppression.
 //
-// Like the concurrency cap this is a live operator control: it is held
-// in memory and is not persisted, so a server restart clears it.
+// There is no read half: the dashboard's persistence path for the field is
+// the #filter= fragment in the address bar, so nothing needs the live value
+// back and the endpoint is one write with no read.
+//
+// Like the concurrency cap this is a live operator control held in memory,
+// so a server restart clears it. Reach worth stating plainly: like every
+// other route on this server it is unauthenticated, and unlike the
+// per-task controls it is a *global* one — one POST reorders the pending
+// drain for every guest, and it stands until someone clears it. The
+// README's preference-filter section states what that means operationally.
 func (s *Server) HandleTaskFilter(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 
-	switch r.Method {
-	case http.MethodGet:
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			"filter": s.orchestrator.PreferenceFilter(),
-		})
-	case http.MethodPost:
-		var raw map[string]interface{}
-		if err := json.NewDecoder(r.Body).Decode(&raw); err != nil {
-			http.Error(w, "invalid request body", http.StatusBadRequest)
-			return
-		}
-		filter, ok := raw["filter"].(string)
-		if !ok {
-			http.Error(w, `body must carry {"filter": "<text>"}`, http.StatusBadRequest)
-			return
-		}
-		s.orchestrator.SetPreferenceFilter(filter)
-		s.log.Printf("task preference filter set to %q", s.orchestrator.PreferenceFilter())
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			"filter": s.orchestrator.PreferenceFilter(),
-		})
-	default:
+	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
 	}
+
+	// The body bound is the filter bound plus slack for the JSON envelope
+	// (escapes expand); a truncated read fails as a bad body below.
+	var raw map[string]interface{}
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxPreferenceFilterBodyBytes)).Decode(&raw); err != nil {
+		http.Error(w, "invalid request body", http.StatusBadRequest)
+		return
+	}
+	filter, ok := raw["filter"].(string)
+	if !ok {
+		http.Error(w, `body must carry {"filter": "<text>"}`, http.StatusBadRequest)
+		return
+	}
+	if len(strings.TrimSpace(filter)) > maxPreferenceFilterLen {
+		http.Error(w, "filter too long", http.StatusBadRequest)
+		return
+	}
+
+	// The queue owns the one log line this action produces, and it says
+	// whether the filter was set or cleared.
+	s.orchestrator.SetPreferenceFilter(filter)
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"filter": s.orchestrator.PreferenceFilter(),
+	})
 }
 
 // HandleTaskSearch handles GET /api/tasks/search: a substring search over
