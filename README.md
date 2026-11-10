@@ -259,8 +259,9 @@ Two response fields say how complete an answer is. A search reads traces as
 a stream and costs at most 64 MiB of decompressed log text per request, and
 at most 200 matches come back — both bounds are the server's, not the
 query's, so one request can neither read nor hold the whole window — and
-`truncated: true` says the scan stopped at one of those bounds and older
-hits in the window exist that are not listed.
+`truncated: true` says the scan stopped at one of those bounds and newer
+hits in the window exist that are not listed (the scan walks oldest
+first, so what it omits is what comes after the cut).
 `partial: true` says some partition or trace could not be read; the rest of
 the window was scanned normally and the reason went to the server log, so a
 partial answer is not a failed one.

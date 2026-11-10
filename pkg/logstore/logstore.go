@@ -675,8 +675,8 @@ type SearchResult struct {
 	Matches []Match
 
 	// Truncated reports the scan stopped early — at MaxSearchMatches or at
-	// the scanned-bytes budget — so older hits in the window exist that
-	// this result does not carry.
+	// the scanned-bytes budget. The walk goes oldest first, so newer hits
+	// in the window exist that this result does not carry.
 	Truncated bool
 
 	// Errors describes partitions or traces the scan could not read. The

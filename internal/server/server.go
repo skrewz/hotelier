@@ -2597,8 +2597,9 @@ const (
 // constants above for the policy and the error bodies for the specifics.
 //
 // The response says how complete it is. "truncated" means the scan stopped
-// early — at the store's match cap or its scanned-bytes budget — so older
-// hits in the window exist that are not listed; "partial" means some
+// early — at the store's match cap or its scanned-bytes budget — so newer
+// hits in the window exist that are not listed (the walk goes oldest
+// first); "partial" means some
 // partition or trace could not be read (and was logged here) while the rest
 // of the window was scanned normally. Like every other route on this server
 // the endpoint is unauthenticated, and unlike /api/tasks/:id/download it
