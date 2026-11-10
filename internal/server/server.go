@@ -2655,11 +2655,14 @@ func (s *Server) HandleTaskSearch(w http.ResponseWriter, r *http.Request) {
 	}
 
 	found := s.diskLogStore.SearchDates(window, query)
-	for _, problem := range found.Errors {
+	if len(found.Errors) > 0 {
 		// A partition the scan could not read cost its own matches, not the
-		// search: say so where an operator will see it, and let the response
-		// carry the partial answer.
-		s.log.Printf("task search partial scan, window %s..%s: %v", from.Format("2006-01-02"), to.Format("2006-01-02"), problem)
+		// search: say so where an operator will see it, once for the whole
+		// scan rather than once per trace — the joined-failures stance
+		// PruneOlderThan's caller takes — and let the response carry the
+		// partial answer.
+		s.log.Printf("task search partial scan, window %s..%s: %d partition(s)/trace(s) unreadable: %s",
+			from.Format("2006-01-02"), to.Format("2006-01-02"), len(found.Errors), strings.Join(found.Errors, "; "))
 	}
 	matches := found.Matches
 
