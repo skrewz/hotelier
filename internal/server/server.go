@@ -1940,8 +1940,8 @@ func (s *Server) HandleHealth(w http.ResponseWriter, r *http.Request) {
 		// under the assignment lock to discard the answer. The cap is the
 		// same enforced value ConcurrencyCounts states, so the two
 		// surfaces state one number; the pair is read in two
-		// acquisitions, a window this endpoint has always had and one
-		// that only an assignment landing between the reads can widen.
+		// acquisitions, so only an assignment landing between the
+		// reads can widen the window between them.
 		"in_flight":       s.orchestrator.InFlightCount(),
 		"concurrency_cap": capLabel(s.orchestrator.ConcurrencyCap()),
 	})

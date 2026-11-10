@@ -356,9 +356,8 @@ func TestSetConcurrencyCap_DefaultsToUnlimited(t *testing.T) {
 }
 
 // waitingOnCap reads the pending-queue-behind-the-cap count the way the
-// status surface does: the third return of ConcurrencyCounts, which has
-// been this PR's only production path to the count since the standalone
-// accessor went away.
+// status surface does: the third return of ConcurrencyCounts, so the count
+// is always measured against the cap in the same response.
 func waitingOnCap(o *Orchestrator) int {
 	_, _, waiting := o.ConcurrencyCounts()
 	return waiting

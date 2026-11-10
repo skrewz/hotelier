@@ -306,6 +306,11 @@ func parseScheduleAt(at string) (int, error) {
 //
 // ConcurrencyStatus is this same resolution with the provenance and the next
 // boundary attached, for callers that have to say more than the number.
+// This function resolves that whole status and keeps only the cap: the
+// next-change walk inside it is work this caller discards. That is
+// invisible at the call sites this has (the sync tick, startup, reload),
+// but a caller that only ever needs the number on a hot path would pay
+// for the walk here rather than resolve the cap alone.
 func (c ServerConfig) EffectiveConcurrency(now time.Time) int {
 	return c.ConcurrencyStatus(now).Cap
 }
