@@ -1,11 +1,16 @@
-// Package metrics exposes Hotelier's in-memory working state in the Prometheus
-// text exposition format (issue #260).
+// Package metrics exposes Hotelier's working state in the Prometheus text
+// exposition format (issue #260) and counts its task transitions and their
+// durations (issue #262).
 //
 // The gauges are gathered at scrape time by a custom prometheus.Collector that
 // reads the live orchestrator state. Nothing is stored twice and no background
 // goroutine polls anything: the queue, the registry and the concurrency cap
 // stay owned by the packages that keep them, and a scrape is a read of those
 // (see the Prometheus Go guide linked below).
+//
+// The counters and histograms ride the same registry but not the scrape-time
+// read: the orchestrator reports every lifecycle event through a one-method
+// interface, and this package translates the events (issue #262).
 //
 // Cardinality is bounded on purpose. Every label value comes from a fixed
 // enumeration — a task status or a guest state — so the series count cannot
@@ -17,6 +22,7 @@
 package metrics
 
 import (
+	"log"
 	"math"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -54,7 +60,8 @@ var (
 // collector publishes the live server state as Prometheus gauges. It holds only
 // a pointer to the orchestrator: every value is read when Prometheus scrapes,
 // so the endpoint can never disagree with /api/health. The package exports
-// NewRegistry alone (issue #260): nothing outside it builds one by hand.
+// NewRegistry alone (issues #260 and #262): nothing outside it builds one by
+// hand.
 type collector struct {
 	orchestrator *orchestrator.Orchestrator
 
@@ -145,13 +152,140 @@ func capValue(limit int) float64 {
 	return float64(limit)
 }
 
-// NewRegistry returns a dedicated registry holding only Hotelier's gauges, so
-// the exposed set is a known list rather than whatever a dependency happened to
-// register on the process-global one.
+// taskBuckets spans seconds to a couple of hours, deliberately rather than
+// by default: these are agent runs, so the default histogram buckets (which
+// top out around ten seconds) would put every task in +Inf and make the
+// distribution unreadable. The ceiling sits above the one-hour task_timeout
+// default so a task that times out is still placed in a finite bucket.
+var taskBuckets = []float64{
+	1, 5, 15, 30, 60, 120, 300, 600, 900, 1800, 3600, 7200,
+}
+
+// observers turns the orchestrator's task-lifecycle events (issue #262) into
+// counters and histograms: what happened, as opposed to the collector above,
+// which answers what is happening right now. It is wired into the
+// orchestrator by NewRegistry, so the funnel in pkg/orchestrator and the
+// registry cannot drift apart, and it implements orchestrator.TaskObserver
+// with plain strings and floats — no Prometheus type reaches pkg/queue or
+// the orchestrator itself.
+type observers struct {
+	submitted    prometheus.Counter
+	deduplicated prometheus.Counter
+	finished     *prometheus.CounterVec
+	requeued     prometheus.Counter
+	queueWait    prometheus.Histogram
+	duration     prometheus.Histogram
+}
+
+// outcomeFinished is the complete outcome label set, exactly the three
+// terminal transitions that exist. Like the gauge label sets it is a fixed
+// enumeration, and the vector is pre-initialised to all three so a scrape
+// carries the whole set whatever has finished yet.
+var outcomeFinished = []string{"completed", "failed", "cancelled"}
+
+func newObservers() *observers {
+	finished := prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: prometheus.BuildFQName(namespace, "", "tasks_finished_total"),
+			Help: "Tasks that reached a terminal state, by outcome. Resets on process restart; use rate() for rates over time.",
+		},
+		[]string{"outcome"},
+	)
+	for _, outcome := range outcomeFinished {
+		finished.WithLabelValues(outcome) // pin the zero series into every scrape
+	}
+	return &observers{
+		submitted: prometheus.NewCounter(prometheus.CounterOpts{
+			Name: prometheus.BuildFQName(namespace, "", "tasks_submitted_total"),
+			Help: "Tasks accepted into the queue. Squelched duplicates count under tasks_deduplicated_total instead. Resets on process restart; use rate() for rates over time.",
+		}),
+		deduplicated: prometheus.NewCounter(prometheus.CounterOpts{
+			Name: prometheus.BuildFQName(namespace, "", "tasks_deduplicated_total"),
+			Help: "Submissions squelched against an already-pending task with the same dedup key. Resets on process restart; use rate() for rates over time.",
+		}),
+		finished: finished,
+		requeued: prometheus.NewCounter(prometheus.CounterOpts{
+			Name: prometheus.BuildFQName(namespace, "", "tasks_requeued_total"),
+			Help: "Tasks re-entering the pending queue after being requeued or declined. Resets on process restart; use rate() for rates over time.",
+		}),
+		queueWait: prometheus.NewHistogram(prometheus.HistogramOpts{
+			Name: prometheus.BuildFQName(namespace, "", "task_queue_wait_seconds"),
+			Help: "Seconds a task spent in the pending queue before an assignment, observed at each assignment; a requeued task's wait counts from the requeue. Resets on process restart.",
+			// The wait is measured from the moment the task last entered
+			// the queue (queue.Task.PendingSince), not from submission, so
+			// a retried task never reports its previous run here.
+			Buckets: taskBuckets,
+		}),
+		duration: prometheus.NewHistogram(prometheus.HistogramOpts{
+			Name:    prometheus.BuildFQName(namespace, "", "task_duration_seconds"),
+			Help:    "Seconds a task spent between assignment and its terminal transition, observed at each finish. Resets on process restart.",
+			Buckets: taskBuckets,
+		}),
+	}
+}
+
+// Observe implements orchestrator.TaskObserver. seconds is ignored (or
+// tested for NaN) exactly where the event carries no window to measure.
+// The cases are the whole set orchestrator.TaskEvents lists;
+// TestObserveHandlesEveryTaskEvent fails the day the two part, and the
+// default branch makes any event that still slips through loud in the log
+// rather than silent (issue #262 review).
+func (ob *observers) Observe(event string, seconds float64) {
+	switch event {
+	case orchestrator.EventSubmitted:
+		ob.submitted.Inc()
+	case orchestrator.EventDeduplicated:
+		ob.deduplicated.Inc()
+	case orchestrator.EventRequeued:
+		ob.requeued.Inc()
+	case orchestrator.EventQueueWait:
+		if !math.IsNaN(seconds) {
+			ob.queueWait.Observe(seconds)
+		}
+	case orchestrator.EventCompleted, orchestrator.EventFailed, orchestrator.EventCancelled:
+		ob.finished.WithLabelValues(event).Inc()
+		// A task cancelled straight from PENDING finished without ever
+		// being in a guest's hands: it counts, but has no duration.
+		if !math.IsNaN(seconds) {
+			ob.duration.Observe(seconds)
+		}
+	default:
+		log.Printf("[METRICS] unhandled task event %q: nothing counted it", event)
+	}
+}
+
+// collectors are the families the observers write. Each already implements
+// prometheus.Collector, so the registry takes them directly — no composite
+// whose Describe and Collect merely delegate to them (issue #262 review).
+func (ob *observers) collectors() []prometheus.Collector {
+	return []prometheus.Collector{
+		ob.submitted,
+		ob.deduplicated,
+		ob.finished,
+		ob.requeued,
+		ob.queueWait,
+		ob.duration,
+	}
+}
+
+// NewRegistry returns a dedicated registry holding only Hotelier's
+// gauges, counters and histograms, so the exposed set is a known list
+// rather than whatever a dependency happened to register on the
+// process-global one. As part of building it, NewRegistry wires the
+// transition observers into the orchestrator: the registry and the funnel
+// are one package's two halves, and a server that forgets to wire them
+// would under-count forever (issue #262).
 func NewRegistry(o *orchestrator.Orchestrator) (*prometheus.Registry, error) {
 	reg := prometheus.NewRegistry()
 	if err := reg.Register(newCollector(o)); err != nil {
 		return nil, err
 	}
+	obs := newObservers()
+	for _, c := range obs.collectors() {
+		if err := reg.Register(c); err != nil {
+			return nil, err
+		}
+	}
+	o.SetTaskObserver(obs)
 	return reg, nil
 }

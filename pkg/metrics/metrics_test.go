@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 
@@ -157,19 +158,25 @@ func TestScrapePublishesEveryFamily(t *testing.T) {
 		t.Errorf("Content-Type = %q, want the Prometheus text format", ct)
 	}
 
-	families := []string{
-		"hotelier_tasks",
-		"hotelier_guests",
-		"hotelier_tasks_in_flight",
-		"hotelier_concurrency_cap",
-		"hotelier_tasks_held_by_cap",
+	families := map[string]string{
+		"hotelier_tasks":                    "gauge",
+		"hotelier_guests":                   "gauge",
+		"hotelier_tasks_in_flight":          "gauge",
+		"hotelier_concurrency_cap":          "gauge",
+		"hotelier_tasks_held_by_cap":        "gauge",
+		"hotelier_tasks_submitted_total":    "counter",
+		"hotelier_tasks_deduplicated_total": "counter",
+		"hotelier_tasks_finished_total":     "counter",
+		"hotelier_tasks_requeued_total":     "counter",
+		"hotelier_task_queue_wait_seconds":  "histogram",
+		"hotelier_task_duration_seconds":    "histogram",
 	}
-	for _, name := range families {
+	for name, kind := range families {
 		if !strings.Contains(body, "# HELP "+name+" ") {
 			t.Errorf("no # HELP for %s in scrape:\n%s", name, body)
 		}
-		if !strings.Contains(body, "# TYPE "+name+" gauge") {
-			t.Errorf("no # TYPE %s gauge in scrape:\n%s", name, body)
+		if !strings.Contains(body, "# TYPE "+name+" "+kind) {
+			t.Errorf("no # TYPE %s %s in scrape:\n%s", name, kind, body)
 		}
 	}
 
@@ -189,6 +196,18 @@ func TestScrapePublishesEveryFamily(t *testing.T) {
 		"hotelier_tasks_in_flight":              "3",
 		"hotelier_concurrency_cap":              "4",
 		"hotelier_tasks_held_by_cap":            "0",
+		// The state was walked through the queue directly, not through the
+		// orchestrator funnel, so the transition counters are legitimately
+		// zero — and still present, including the whole outcome set
+		// (issue #262).
+		"hotelier_tasks_submitted_total":                     "0",
+		"hotelier_tasks_deduplicated_total":                  "0",
+		`hotelier_tasks_finished_total{outcome="completed"}`: "0",
+		`hotelier_tasks_finished_total{outcome="failed"}`:    "0",
+		`hotelier_tasks_finished_total{outcome="cancelled"}`: "0",
+		"hotelier_tasks_requeued_total":                      "0",
+		"hotelier_task_queue_wait_seconds_count":             "0",
+		"hotelier_task_duration_seconds_count":               "0",
 	}
 	for series, expected := range want {
 		if got := find(t, body, series); got != expected {
@@ -415,5 +434,238 @@ func TestHeldByCapCountsHeldPendingTasks(t *testing.T) {
 	}
 	if got := find(t, body, `hotelier_tasks{status="PENDING"}`); got != "3" {
 		t.Errorf(`hotelier_tasks{status="PENDING"} = %s, want 3`, got)
+	}
+}
+
+// --- Counters and histograms (issue #262) ---
+//
+// Seam ownership: this file asserts what the orchestrator's events turn into
+// on /metrics; orchestrator_metrics_test.go asserts which method emits which
+// event. Keep edits in the seam that owns them.
+
+// submitAssign wires the orchestrator into a scrape endpoint first, then runs
+// a task through submit → assign → acknowledge, so every event after the
+// wiring is observed. It returns the scrape URL and stops at the point the
+// test wants to finish the task.
+func submitAssign(t *testing.T, o *orchestrator.Orchestrator, id string) string {
+	t.Helper()
+	url := serveState(t, o)
+	if err := o.AddTask(&queue.Task{ID: id, Prompt: "do the thing"}); err != nil {
+		t.Fatalf("AddTask %s: %v", id, err)
+	}
+	if err := o.RegisterGuest("guest-a", "guest-a", []string{"default"}); err != nil {
+		t.Fatalf("RegisterGuest: %v", err)
+	}
+	if err := o.AssignTask(id, "guest-a"); err != nil {
+		t.Fatalf("AssignTask: %v", err)
+	}
+	return url
+}
+
+// histogramCount reads a histogram's observation count from a scrape body.
+func histogramCount(t *testing.T, body, family string) int {
+	t.Helper()
+	return atoi(t, find(t, body, family+"_count"))
+}
+
+func atoi(t *testing.T, s string) int {
+	t.Helper()
+	var n int
+	if _, err := fmt.Sscanf(strings.TrimSpace(s), "%d", &n); err != nil {
+		t.Fatalf("parse %q as a count: %v", s, err)
+	}
+	return n
+}
+
+func parseFloat(t *testing.T, s string) float64 {
+	t.Helper()
+	var f float64
+	if _, err := fmt.Sscanf(strings.TrimSpace(s), "%g", &f); err != nil {
+		t.Fatalf("parse %q as a number: %v", s, err)
+	}
+	return f
+}
+
+func TestCompletedTaskCountsAndObserves(t *testing.T) {
+	o := newFixture(t)
+	url := submitAssign(t, o, "t1")
+	if err := o.AcknowledgeTask("t1", "guest-a"); err != nil {
+		t.Fatalf("AcknowledgeTask: %v", err)
+	}
+	if err := o.CompleteTask("t1", "guest-a", "done"); err != nil {
+		t.Fatalf("CompleteTask: %v", err)
+	}
+	_, body := scrape(t, url)
+
+	if got := find(t, body, "hotelier_tasks_submitted_total"); got != "1" {
+		t.Errorf("submitted_total = %s, want 1", got)
+	}
+	if got := find(t, body, `hotelier_tasks_finished_total{outcome="completed"}`); got != "1" {
+		t.Errorf(`finished_total{outcome="completed"} = %s, want 1`, got)
+	}
+	if got := histogramCount(t, body, "hotelier_task_queue_wait_seconds"); got != 1 {
+		t.Errorf("queue_wait_seconds_count = %d, want 1", got)
+	}
+	if got := histogramCount(t, body, "hotelier_task_duration_seconds"); got != 1 {
+		t.Errorf("duration_seconds_count = %d, want 1", got)
+	}
+	// Both windows are seconds-to-hours by nature; a journey of test
+	// wall-clock must land well inside the deliberate bucket set, never in
+	// a default set's +Inf.
+	assertBucketedWithin(t, body, "hotelier_task_queue_wait_seconds", 60)
+	assertBucketedWithin(t, body, "hotelier_task_duration_seconds", 60)
+}
+
+// assertBucketedWithin checks the family saw its observations below bound
+// seconds: the bucket at that boundary is cumulative and must equal the
+// count, and the sum must sit under the bound.
+func assertBucketedWithin(t *testing.T, body, family string, bound float64) {
+	t.Helper()
+	le := fmt.Sprintf("%g", bound)
+	series := family + "_bucket{le=\"" + le + "\"}"
+	count := histogramCount(t, body, family)
+	if got := atoi(t, find(t, body, series)); got != count {
+		t.Errorf("%s = %d, want the full count %d (observations leaked to a higher or +Inf bucket)", series, got, count)
+	}
+	if sum := parseFloat(t, find(t, body, family+"_sum")); sum < 0 || sum >= bound {
+		t.Errorf("%s_sum = %v, want a plausible total below %v", family, sum, bound)
+	}
+}
+
+func TestFailedTaskCountsOutcomeFailed(t *testing.T) {
+	o := newFixture(t)
+	url := submitAssign(t, o, "t1")
+	if err := o.FailTask("t1", "guest-a", "boom"); err != nil {
+		t.Fatalf("FailTask: %v", err)
+	}
+	_, body := scrape(t, url)
+
+	if got := find(t, body, `hotelier_tasks_finished_total{outcome="failed"}`); got != "1" {
+		t.Errorf(`finished_total{outcome="failed"} = %s, want 1`, got)
+	}
+	if got := find(t, body, `hotelier_tasks_finished_total{outcome="completed"}`); got != "0" {
+		t.Errorf(`finished_total{outcome="completed"} = %s, want 0`, got)
+	}
+	if got := histogramCount(t, body, "hotelier_task_duration_seconds"); got != 1 {
+		t.Errorf("duration_seconds_count = %d, want 1", got)
+	}
+}
+
+func TestCancelledTaskCountsOutcomeCancelled(t *testing.T) {
+	o := newFixture(t)
+	url := submitAssign(t, o, "t1")
+	if err := o.CancelTask("t1", "guest-a"); err != nil {
+		t.Fatalf("CancelTask: %v", err)
+	}
+	_, body := scrape(t, url)
+
+	if got := find(t, body, `hotelier_tasks_finished_total{outcome="cancelled"}`); got != "1" {
+		t.Errorf(`finished_total{outcome="cancelled"} = %s, want 1`, got)
+	}
+	if got := histogramCount(t, body, "hotelier_task_duration_seconds"); got != 1 {
+		t.Errorf("duration_seconds_count = %d, want 1", got)
+	}
+}
+
+// A task cancelled before assignment finished without ever being in a
+// guest's hands: it counts as a finish but contributes no duration.
+func TestCancelPendingTaskCountsFinishWithoutDuration(t *testing.T) {
+	o := newFixture(t)
+	url := serveState(t, o)
+	if err := o.AddTask(&queue.Task{ID: "t1", Prompt: "do the thing"}); err != nil {
+		t.Fatalf("AddTask: %v", err)
+	}
+	if err := o.CancelTask("t1", ""); err != nil {
+		t.Fatalf("CancelTask: %v", err)
+	}
+	_, body := scrape(t, url)
+
+	if got := find(t, body, `hotelier_tasks_finished_total{outcome="cancelled"}`); got != "1" {
+		t.Errorf(`finished_total{outcome="cancelled"} = %s, want 1`, got)
+	}
+	if got := histogramCount(t, body, "hotelier_task_duration_seconds"); got != 0 {
+		t.Errorf("duration_seconds_count = %d, want 0 — there was no run window", got)
+	}
+}
+
+// The requeue → re-assign journey is the one path where measuring the wait
+// from submission would charge a task's first run to the queue. Rewinding the
+// submission an hour leaves the requeue stamp as the only sane starting point:
+// both observations must still land in the sub-minute buckets.
+func TestReassignedTaskQueueWaitExcludesFirstRun(t *testing.T) {
+	o := newFixture(t)
+	url := submitAssign(t, o, "t1")
+	if err := o.AcknowledgeTask("t1", "guest-a"); err != nil {
+		t.Fatalf("AcknowledgeTask: %v", err)
+	}
+	time.Sleep(150 * time.Millisecond) // a run long enough to be miscounted
+	if err := o.RequeueTask("t1"); err != nil {
+		t.Fatalf("RequeueTask: %v", err)
+	}
+	task, ok := o.GetTask("t1")
+	if !ok {
+		t.Fatal("GetTask t1: not found")
+	}
+	task.CreatedAt = time.Now().Add(-time.Hour)
+	if err := o.AssignTask("t1", "guest-a"); err != nil {
+		t.Fatalf("AssignTask after requeue: %v", err)
+	}
+	_, body := scrape(t, url)
+
+	if got := histogramCount(t, body, "hotelier_task_queue_wait_seconds"); got != 2 {
+		t.Fatalf("queue_wait_seconds_count = %d, want one observation per assignment", got)
+	}
+	assertBucketedWithin(t, body, "hotelier_task_queue_wait_seconds", 60)
+	if got := histogramCount(t, body, "hotelier_task_duration_seconds"); got != 0 {
+		t.Errorf("duration_seconds_count = %d, want 0 — no transition ended this task yet", got)
+	}
+}
+
+func TestRequeueAndDeclineCountRequeued(t *testing.T) {
+	o := newFixture(t)
+	url := serveState(t, o)
+	if err := o.RegisterGuest("guest-a", "guest-a", []string{"default"}); err != nil {
+		t.Fatalf("RegisterGuest: %v", err)
+	}
+	for _, id := range []string{"t1", "t2"} {
+		if err := o.AddTask(&queue.Task{ID: id, Prompt: "do the thing"}); err != nil {
+			t.Fatalf("AddTask %s: %v", id, err)
+		}
+	}
+	if err := o.AssignTask("t1", "guest-a"); err != nil {
+		t.Fatalf("AssignTask t1: %v", err)
+	}
+	if err := o.RequeueTask("t1"); err != nil {
+		t.Fatalf("RequeueTask: %v", err)
+	}
+	if err := o.AssignTask("t2", "guest-a"); err != nil {
+		t.Fatalf("AssignTask t2: %v", err)
+	}
+	if err := o.DeclineTask("t2", "guest-a"); err != nil {
+		t.Fatalf("DeclineTask: %v", err)
+	}
+	_, body := scrape(t, url)
+
+	if got := find(t, body, "hotelier_tasks_requeued_total"); got != "2" {
+		t.Errorf("requeued_total = %s, want 2", got)
+	}
+}
+
+func TestDeduplicatedSubmissionCountsDeduplicatedOnly(t *testing.T) {
+	o := newFixture(t)
+	url := serveState(t, o)
+	if _, dup, err := o.AddTaskOrDedup(&queue.Task{ID: "t1", Prompt: "p", DedupKey: "k"}); err != nil || dup {
+		t.Fatalf("AddTaskOrDedup: dup=%v err=%v", dup, err)
+	}
+	if _, dup, err := o.AddTaskOrDedup(&queue.Task{ID: "t2", Prompt: "p", DedupKey: "k"}); err != nil || !dup {
+		t.Fatalf("AddTaskOrDedup second: dup=%v err=%v", dup, err)
+	}
+	_, body := scrape(t, url)
+
+	if got := find(t, body, "hotelier_tasks_submitted_total"); got != "1" {
+		t.Errorf("submitted_total = %s, want 1 — the squelched submission must not count as submitted", got)
+	}
+	if got := find(t, body, "hotelier_tasks_deduplicated_total"); got != "1" {
+		t.Errorf("deduplicated_total = %s, want 1", got)
 	}
 }

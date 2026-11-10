@@ -3,6 +3,7 @@ package orchestrator
 import (
 	"errors"
 	"fmt"
+	"math"
 	"sync"
 	"time"
 
@@ -10,6 +11,65 @@ import (
 	"hotelier/pkg/queue"
 	"hotelier/pkg/registry"
 )
+
+// Task lifecycle events reported to a TaskObserver (issue #262). The names
+// are deliberately plain strings rather than Prometheus types: the funnel
+// lives here so no call site can be forgotten, but pkg/metrics (which
+// imports this package) translates them into counters and histograms, and
+// pkg/queue stays free of any metrics dependency.
+const (
+	// EventSubmitted fires when a task enters the queue — via AddTask or
+	// the accepted path of AddTaskOrDedup.
+	EventSubmitted = "submitted"
+	// EventDeduplicated fires when AddTaskOrDedup squelches a submission
+	// against an existing PENDING task. No EventSubmitted accompanies it.
+	EventDeduplicated = "deduplicated"
+	// EventRequeued fires when an ASSIGNED or RUNNING task re-enters the
+	// queue via RequeueTask or DeclineTask.
+	EventRequeued = "requeued"
+	// EventQueueWait fires on a successful assignment; seconds carries the
+	// time from the moment the task last entered the pending queue to that
+	// assignment.
+	EventQueueWait = "queue_wait"
+	// EventCompleted, EventFailed and EventCancelled fire on the terminal
+	// transitions; seconds carries the time from assignment to the
+	// transition, or noDuration when the task never left PENDING.
+	EventCompleted = "completed"
+	EventFailed    = "failed"
+	EventCancelled = "cancelled"
+)
+
+// TaskEvents lists every lifecycle event the orchestrator can emit. It exists
+// so pkg/metrics can assert in CI that its translation covers the whole set:
+// a new Event* constant added without a case there fails a test instead of
+// being dropped in silence (issue #262 review).
+func TaskEvents() []string {
+	return []string{
+		EventSubmitted,
+		EventDeduplicated,
+		EventRequeued,
+		EventQueueWait,
+		EventCompleted,
+		EventFailed,
+		EventCancelled,
+	}
+}
+
+// noDuration is passed to TaskObserver.Observe when the event has no time
+// window to measure (e.g. cancelling a task that was never assigned). It is
+// NaN so it can never be mistaken for a real number of seconds; observers
+// must test it with math.IsNaN (NaN is not equal to itself) and skip the
+// observation when they see it.
+var noDuration = math.NaN()
+
+// TaskObserver receives task lifecycle events from the orchestrator. It is
+// satisfied by the collectors in pkg/metrics and by test fakes; the
+// orchestrator depends on nothing beyond this one method.
+type TaskObserver interface {
+	// Observe records one event. seconds is a duration in seconds, or NaN
+	// (see noDuration) when the event carries none.
+	Observe(event string, seconds float64)
+}
 
 // ErrConcurrencyCapReached is returned by AssignTask when the concurrency cap
 // already covers everything in flight (issue #249). It is a distinct error so
@@ -51,6 +111,63 @@ type Orchestrator struct {
 	// a single global slot would alternate its key between two tasks held
 	// at once (two polling guests, say) and log every poll.
 	lastHoldLog map[string]string
+	// observer receives the task-lifecycle events of issue #262. It is
+	// optional: the constructors leave it nil and observe() is a no-op on
+	// a nil observer, so every existing orchestrator.New/NewWithExisting
+	// call site keeps compiling and running with no metrics wired.
+	observer TaskObserver
+}
+
+// SetTaskObserver wires in the observer for task-lifecycle events (issue
+// #262). Passing nil disables observation again. Call it before tasks
+// flow: events emitted before the call are not back-filled.
+func (o *Orchestrator) SetTaskObserver(obs TaskObserver) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	if o.observer != nil && obs != nil {
+		// Last writer wins, so say so: a second registry built for the same
+		// orchestrator would otherwise read zeros forever while the process
+		// counted into the first (issue #262 review).
+		o.logf("task observer replaced; the previous one stops seeing events")
+	}
+	o.observer = obs
+}
+
+// observe hands one event to the observer, if there is one. Callers hold
+// o.mu; the observer implementations are leaf operations (a Prometheus
+// counter increment), so no one waits on a lock behind them.
+func (o *Orchestrator) observe(event string, seconds float64) {
+	if o.observer != nil {
+		o.observer.Observe(event, seconds)
+	}
+}
+
+// queueWaitSeconds is the time the task spent waiting to be assigned, for
+// EventQueueWait. PendingSince is stamped by Add and Restore and re-stamped
+// every time the task re-enters PENDING, so a task that ran before being
+// requeued is not credited with its own run time. A task hand-built in a test
+// carries neither stamp; the event then carries noDuration rather than a
+// duration measured from the epoch.
+func queueWaitSeconds(task *queue.Task) float64 {
+	since := task.PendingSince
+	if since.IsZero() {
+		since = task.CreatedAt
+	}
+	if since.IsZero() {
+		return noDuration
+	}
+	return time.Since(since).Seconds()
+}
+
+// runSeconds is the time from the task's assignment to now, for the
+// terminal events (issue #262: duration is assignment to terminal state,
+// which is the window the task was actually in a guest's hands). A task
+// cancelled straight from PENDING was never assigned and carries noDuration.
+func runSeconds(task *queue.Task) float64 {
+	if task.AssignedAt.IsZero() {
+		return noDuration
+	}
+	return time.Since(task.AssignedAt).Seconds()
 }
 
 // New creates a new Orchestrator wrapping the given queue and registry.
@@ -164,6 +281,7 @@ func (o *Orchestrator) AddTask(task *queue.Task) error {
 		return err
 	}
 	o.persistTask(task)
+	o.observe(EventSubmitted, noDuration)
 	return nil
 }
 
@@ -178,8 +296,11 @@ func (o *Orchestrator) AddTaskOrDedup(task *queue.Task) (*queue.Task, bool, erro
 	if err != nil {
 		return nil, false, err
 	}
-	if !deduplicated {
+	if deduplicated {
+		o.observe(EventDeduplicated, noDuration)
+	} else {
 		o.persistTask(existing)
+		o.observe(EventSubmitted, noDuration)
 	}
 	return existing, deduplicated, nil
 }
@@ -250,6 +371,7 @@ func (o *Orchestrator) AssignTask(taskID, guestID string) error {
 	guest.LastTaskHeartbeat = time.Time{} // reset — guest must confirm via heartbeat
 
 	o.persistTask(task)
+	o.observe(EventQueueWait, queueWaitSeconds(task))
 	o.logf("task %s assigned to guest %s (atomic: PENDING→ASSIGNED, IDLE→RUNNING)", taskID, guestID)
 	return nil
 }
@@ -320,6 +442,7 @@ func (o *Orchestrator) CompleteTask(taskID, guestID, result string) error {
 	o.releaseGuestInternal(guestID)
 	o.forgetTask(taskID)
 
+	o.observe(EventCompleted, runSeconds(task))
 	o.logf("task %s completed by guest %s (atomic: →COMPLETED, RUNNING→IDLE)", taskID, guestID)
 	return nil
 }
@@ -354,6 +477,7 @@ func (o *Orchestrator) FailTask(taskID, guestID, errMsg string) error {
 	o.releaseGuestInternal(guestID)
 	o.forgetTask(taskID)
 
+	o.observe(EventFailed, runSeconds(task))
 	o.logf("task %s failed by guest %s (atomic: →FAILED, RUNNING→IDLE): %s", taskID, guestID, errMsg)
 	return nil
 }
@@ -390,6 +514,7 @@ func (o *Orchestrator) CancelTask(taskID, guestID string) error {
 	}
 	o.forgetTask(taskID)
 
+	o.observe(EventCancelled, runSeconds(task))
 	o.logf("task %s cancelled (atomic: →CANCELLED%s)", taskID,
 		func() string {
 			if guestID != "" {
@@ -454,6 +579,7 @@ func (o *Orchestrator) RequeueTask(taskID string) error {
 	if guestID != "" {
 		o.releaseGuestInternal(guestID)
 	}
+	o.observe(EventRequeued, noDuration)
 
 	return nil
 }
@@ -492,6 +618,7 @@ func (o *Orchestrator) DeclineTask(taskID, guestID string) error {
 	}
 
 	o.releaseGuestInternal(guestID)
+	o.observe(EventRequeued, noDuration)
 
 	statusFrom := "ASSIGNED"
 	if task.Status == queue.TaskStatusRunning {
@@ -535,6 +662,10 @@ func (o *Orchestrator) TryAssignNext() bool {
 	guest.LastTaskHeartbeat = time.Time{}
 
 	o.persistTask(task)
+	// This method assigns without going through AssignTask, so the queue-wait
+	// observation belongs here too: the funnel claim is only true if every
+	// assignment path reports it (issue #262 review).
+	o.observe(EventQueueWait, queueWaitSeconds(task))
 	o.logf("task %s auto-assigned to guest %s", task.ID, guest.ID)
 	return true
 }
@@ -1092,6 +1223,9 @@ func (o *Orchestrator) requeueTaskInternal(taskID string) {
 	task.Status = queue.TaskStatusPending
 	task.AssignedTo = ""
 	task.AssignedAt = time.Time{}
+	// The queue window restarts here: everything before this instant belongs
+	// to the task's previous attempt, not to its wait (issue #262 review).
+	task.PendingSince = time.Now()
 	o.persistTask(task)
 }
 

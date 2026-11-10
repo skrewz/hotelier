@@ -241,7 +241,7 @@ curl -X POST http://localhost:8080/api/tasks \
 | `GET` | `/api/guests` | List connected guests (UID, host, state, tags) and the claim counters |
 | `GET` | `/api/guests/:id` | Get guest details |
 | `GET` | `/api/health` | Health check |
-| `GET` | `/metrics` | Prometheus scrape endpoint: live server state as gauges |
+| `GET` | `/metrics` | Prometheus scrape endpoint: live server state as gauges, plus task-transition counters and histograms |
 | `WS` | `/ws` | WebSocket (JSON-RPC) |
 
 `/api/guests` also carries a `stats` object. The two action counters,
@@ -269,6 +269,12 @@ error dump.
 | `hotelier_tasks_in_flight` | gauge | — | Tasks in flight: `ASSIGNED` or `RUNNING` |
 | `hotelier_concurrency_cap` | gauge | — | Maximum number of tasks allowed in flight; `+Inf` when no cap is in force |
 | `hotelier_tasks_held_by_cap` | gauge | — | `PENDING` tasks whose last assignment attempt was refused, i.e. carrying a hold reason (the count lags a rising cap until the next poll considers each task) |
+| `hotelier_tasks_submitted_total` | counter | — | Tasks accepted into the queue |
+| `hotelier_tasks_deduplicated_total` | counter | — | Submissions squelched against an already-pending task with the same dedup key |
+| `hotelier_tasks_finished_total` | counter | `outcome` = `completed`, `failed`, `cancelled` | Tasks that reached a terminal state, by outcome |
+| `hotelier_tasks_requeued_total` | counter | — | Tasks re-entering the pending queue after `RequeueTask` or a guest declining |
+| `hotelier_task_queue_wait_seconds` | histogram | — | Seconds a task spent in the pending queue before an assignment; for a requeued task the window opens at the requeue, so its earlier run is never counted as waiting |
+| `hotelier_task_duration_seconds` | histogram | — | Seconds between a task's assignment and its terminal transition (a task cancelled before assignment counts in `finished_total` but contributes no duration) |
 
 Label values are the strings the state machines use internally (`TaskStatus.String`
 and `GuestState.String`), and every label is a fixed enumeration: no task ID,
@@ -283,11 +289,23 @@ line at the configured ceiling whenever a cap is scheduled, and a series pushed
 off the top of the panel — night mode lifted, nothing held back — when it is
 not. `-1` never appears.
 
-These gauges describe **the process that is answering the scrape**. The queue
-keeps terminal tasks until the process restarts, so `hotelier_tasks{status="COMPLETED"}`
-and friends return to zero on a restart while the on-disk queue carries the work
-itself. Counting transitions and their durations — a number that survives a
-restart being counted — is a separate piece of this forest (issue #262).
+The counters and histograms count **transitions** — what happened — while the
+gauges above read **state** — what is happening. They are incremented in the
+orchestrator, at every point a status changes — the lifecycle methods plus the
+auto-assign path in `TryAssignNext` — so the counts cannot drift from the
+state, and no server call site can be forgotten. Both histograms use buckets
+spanning one second to two hours, deliberately: these are agent runs, and the
+default Prometheus bucket set (topping out around ten seconds) would put every
+task in `+Inf`; the ceiling sits above the one-hour `task_timeout` default so
+even a timed-out task lands in a finite bucket.
+
+**Counters and histogram observations reset when the process restarts.** That
+is how Prometheus counters work, and `rate()` accounts for the resets; nothing
+here persists them, because `queue_dir` persists unprocessed tasks only and a
+persisted counter would need a recovery path nothing else in this server has.
+The queue keeps terminal tasks until the process restarts, so
+`hotelier_tasks{status="COMPLETED"}` and friends likewise return to zero while
+the on-disk queue carries the work itself.
 
 Scrape config sample:
 

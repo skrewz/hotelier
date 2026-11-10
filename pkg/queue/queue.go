@@ -142,6 +142,12 @@ type Task struct {
 	// It is in-memory only — it describes the decision just made, not the
 	// task — and is cleared whenever the task is assigned, added or restored.
 	HeldReason string `json:"held_reason,omitempty"`
+	// PendingSince is when the task last entered the pending queue: set with
+	// CreatedAt on submission, back-filled from it on restore, and re-stamped
+	// whenever the task re-enters PENDING. The queue-wait histogram (issue
+	// #262) measures from here, so a task that ran before being requeued is
+	// not credited with its own run time.
+	PendingSince time.Time `json:"pending_since,omitempty"`
 }
 
 // TaskQueue manages pending and active tasks.
@@ -205,6 +211,7 @@ func (q *TaskQueue) addLocked(task *Task) error {
 
 	task.Status = TaskStatusPending
 	task.CreatedAt = time.Now()
+	task.PendingSince = task.CreatedAt
 	// A submission carries no hold: the reason belongs to the queue's next
 	// assignment decision, and a client-supplied held_reason must not survive
 	// into a task that is about to be assigned (issue #249).
@@ -240,6 +247,11 @@ func (q *TaskQueue) Restore(task *Task) error {
 	task.HeldReason = ""
 	if task.CreatedAt.IsZero() {
 		task.CreatedAt = time.Now()
+	}
+	// A task persisted before it re-entered the queue has never been requeued,
+	// so its pending window starts where its life does.
+	if task.PendingSince.IsZero() {
+		task.PendingSince = task.CreatedAt
 	}
 	if task.Priority == "" || !ValidatePriority(task.Priority) {
 		task.Priority = PriorityOrangutan
