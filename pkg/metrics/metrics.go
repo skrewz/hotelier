@@ -22,6 +22,7 @@
 package metrics
 
 import (
+	"log"
 	"math"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -167,11 +168,6 @@ var taskBuckets = []float64{
 // registry cannot drift apart, and it implements orchestrator.TaskObserver
 // with plain strings and floats — no Prometheus type reaches pkg/queue or
 // the orchestrator itself.
-//
-// Counters reset when the process restarts; that is how Prometheus counters
-// work and rate() accounts for it. Nothing here persists them, since
-// queue_dir persists unprocessed tasks only and a persisted counter would
-// need a recovery path nothing else in this server has.
 type observers struct {
 	submitted    prometheus.Counter
 	deduplicated prometheus.Counter
@@ -213,8 +209,11 @@ func newObservers() *observers {
 			Help: "Tasks re-entering the pending queue after being requeued or declined. Resets on process restart; use rate() for rates over time.",
 		}),
 		queueWait: prometheus.NewHistogram(prometheus.HistogramOpts{
-			Name:    prometheus.BuildFQName(namespace, "", "task_queue_wait_seconds"),
-			Help:    "Seconds a task spent between submission and assignment, observed at each assignment. Resets on process restart.",
+			Name: prometheus.BuildFQName(namespace, "", "task_queue_wait_seconds"),
+			Help: "Seconds a task spent in the pending queue before an assignment, observed at each assignment; a requeued task's wait counts from the requeue. Resets on process restart.",
+			// The wait is measured from the moment the task last entered
+			// the queue (queue.Task.PendingSince), not from submission, so
+			// a retried task never reports its previous run here.
 			Buckets: taskBuckets,
 		}),
 		duration: prometheus.NewHistogram(prometheus.HistogramOpts{
@@ -227,6 +226,10 @@ func newObservers() *observers {
 
 // Observe implements orchestrator.TaskObserver. seconds is ignored (or
 // tested for NaN) exactly where the event carries no window to measure.
+// The cases are the whole set orchestrator.TaskEvents lists;
+// TestObserveHandlesEveryTaskEvent fails the day the two part, and the
+// default branch makes any event that still slips through loud in the log
+// rather than silent (issue #262 review).
 func (ob *observers) Observe(event string, seconds float64) {
 	switch event {
 	case orchestrator.EventSubmitted:
@@ -246,27 +249,23 @@ func (ob *observers) Observe(event string, seconds float64) {
 		if !math.IsNaN(seconds) {
 			ob.duration.Observe(seconds)
 		}
+	default:
+		log.Printf("[METRICS] unhandled task event %q: nothing counted it", event)
 	}
 }
 
-// Describe reports the families the observers can produce.
-func (ob *observers) Describe(ch chan<- *prometheus.Desc) {
-	ob.submitted.Describe(ch)
-	ob.deduplicated.Describe(ch)
-	ob.finished.Describe(ch)
-	ob.requeued.Describe(ch)
-	ob.queueWait.Describe(ch)
-	ob.duration.Describe(ch)
-}
-
-// Collect emits the current value of every counter and histogram.
-func (ob *observers) Collect(ch chan<- prometheus.Metric) {
-	ob.submitted.Collect(ch)
-	ob.deduplicated.Collect(ch)
-	ob.finished.Collect(ch)
-	ob.requeued.Collect(ch)
-	ob.queueWait.Collect(ch)
-	ob.duration.Collect(ch)
+// collectors are the families the observers write. Each already implements
+// prometheus.Collector, so the registry takes them directly — no composite
+// whose Describe and Collect merely delegate to them (issue #262 review).
+func (ob *observers) collectors() []prometheus.Collector {
+	return []prometheus.Collector{
+		ob.submitted,
+		ob.deduplicated,
+		ob.finished,
+		ob.requeued,
+		ob.queueWait,
+		ob.duration,
+	}
 }
 
 // NewRegistry returns a dedicated registry holding only Hotelier's
@@ -282,8 +281,10 @@ func NewRegistry(o *orchestrator.Orchestrator) (*prometheus.Registry, error) {
 		return nil, err
 	}
 	obs := newObservers()
-	if err := reg.Register(obs); err != nil {
-		return nil, err
+	for _, c := range obs.collectors() {
+		if err := reg.Register(c); err != nil {
+			return nil, err
+		}
 	}
 	o.SetTaskObserver(obs)
 	return reg, nil

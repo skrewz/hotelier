@@ -3,9 +3,14 @@ package orchestrator
 import (
 	"math"
 	"testing"
+	"time"
 
 	"hotelier/pkg/queue"
 )
+
+// Seam ownership: this file asserts *which* funnel method emits *which* event
+// (the orchestrator's contract with an observer); metrics_test.go asserts what
+// those events turn into on /metrics. Keep edits in the seam that owns them.
 
 // recordedEvent is one Observe call captured by fakeObserver.
 type recordedEvent struct {
@@ -123,6 +128,63 @@ func TestAssignTaskObservesQueueWait(t *testing.T) {
 	}
 }
 
+// TryAssignNext assigns on its own rather than calling AssignTask, so it is
+// the one place a status changes outside the eight instrumented methods. It
+// must emit the same queue-wait event, otherwise "every status change goes
+// through the funnel" is a claim the file contradicts (issue #262 review).
+func TestTryAssignNextObservesQueueWait(t *testing.T) {
+	o, obs := wired(t)
+	mustTask(t, o, "t1")
+	if err := o.RegisterGuest("g1", "g1", nil); err != nil {
+		t.Fatalf("RegisterGuest: %v", err)
+	}
+	if !o.TryAssignNext() {
+		t.Fatal("expected TryAssignNext to assign the pending task")
+	}
+	last := obs.last(t)
+	if last.name != EventQueueWait {
+		t.Fatalf("event = %s, want queue_wait", last.name)
+	}
+	if math.IsNaN(last.seconds) || last.seconds < 0 {
+		t.Errorf("queue_wait seconds = %v, want a real non-negative duration", last.seconds)
+	}
+}
+
+// A task that ran, was requeued and is picked up again spent only the time
+// since the requeue in the queue — its first run belongs to the duration
+// histogram, not here. CreatedAt survives the requeue; the moment the task
+// re-entered the queue does not, so the wait must be measured from that
+// (issue #262 review).
+func TestReassignedTaskObservesQueueWaitSinceRequeue(t *testing.T) {
+	o, obs := wired(t)
+	mustTask(t, o, "t1")
+	mustAssign(t, o, "t1", "g1")
+	if err := o.AcknowledgeTask("t1", "g1"); err != nil {
+		t.Fatalf("AcknowledgeTask: %v", err)
+	}
+	if err := o.RequeueTask("t1"); err != nil {
+		t.Fatalf("RequeueTask: %v", err)
+	}
+	// Rewind the submission an hour: an implementation still measuring from
+	// CreatedAt would report that hour as queue wait.
+	task, ok := o.GetTask("t1")
+	if !ok {
+		t.Fatal("GetTask t1: not found")
+	}
+	task.CreatedAt = time.Now().Add(-time.Hour)
+
+	if err := o.AssignTask("t1", "g1"); err != nil {
+		t.Fatalf("AssignTask after requeue: %v", err)
+	}
+	last := obs.last(t)
+	if last.name != EventQueueWait {
+		t.Fatalf("event = %s, want queue_wait", last.name)
+	}
+	if math.IsNaN(last.seconds) || last.seconds < 0 || last.seconds >= 60 {
+		t.Errorf("queue_wait seconds = %v, want the few seconds since the requeue, not the task's whole life", last.seconds)
+	}
+}
+
 func TestAssignTaskRefusedByCapObservesNothing(t *testing.T) {
 	o, obs := wired(t)
 	o.SetConcurrencyCap(0)
@@ -209,7 +271,7 @@ func TestCancelPendingTaskObservesCancelledWithoutDuration(t *testing.T) {
 		t.Fatalf("event = %s, want cancelled", last.name)
 	}
 	if !math.IsNaN(last.seconds) {
-		t.Errorf("duration seconds = %v, want NoDuration (NaN) for a task that was never assigned", last.seconds)
+		t.Errorf("duration seconds = %v, want NaN for a task that was never assigned", last.seconds)
 	}
 }
 

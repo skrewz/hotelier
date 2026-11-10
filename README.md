@@ -273,7 +273,7 @@ error dump.
 | `hotelier_tasks_deduplicated_total` | counter | — | Submissions squelched against an already-pending task with the same dedup key |
 | `hotelier_tasks_finished_total` | counter | `outcome` = `completed`, `failed`, `cancelled` | Tasks that reached a terminal state, by outcome |
 | `hotelier_tasks_requeued_total` | counter | — | Tasks re-entering the pending queue after `RequeueTask` or a guest declining |
-| `hotelier_task_queue_wait_seconds` | histogram | — | Seconds between a task's submission and its assignment |
+| `hotelier_task_queue_wait_seconds` | histogram | — | Seconds a task spent in the pending queue before an assignment; for a requeued task the window opens at the requeue, so its earlier run is never counted as waiting |
 | `hotelier_task_duration_seconds` | histogram | — | Seconds between a task's assignment and its terminal transition (a task cancelled before assignment counts in `finished_total` but contributes no duration) |
 
 Label values are the strings the state machines use internally (`TaskStatus.String`
@@ -290,13 +290,14 @@ off the top of the panel — night mode lifted, nothing held back — when it is
 not. `-1` never appears.
 
 The counters and histograms count **transitions** — what happened — while the
-gauges above read **state** — what is happening. They are incremented at the
-single funnel every status change already passes through (the orchestrator's
-lifecycle methods), so the counts cannot drift from the state. Both histograms
-use buckets spanning one second to two hours, deliberately: these are agent
-runs, and the default Prometheus bucket set (topping out around ten seconds)
-would put every task in `+Inf`; the ceiling sits above the one-hour
-`task_timeout` default so even a timed-out task lands in a finite bucket.
+gauges above read **state** — what is happening. They are incremented in the
+orchestrator, at every point a status changes — the lifecycle methods plus the
+auto-assign path in `TryAssignNext` — so the counts cannot drift from the
+state, and no server call site can be forgotten. Both histograms use buckets
+spanning one second to two hours, deliberately: these are agent runs, and the
+default Prometheus bucket set (topping out around ten seconds) would put every
+task in `+Inf`; the ceiling sits above the one-hour `task_timeout` default so
+even a timed-out task lands in a finite bucket.
 
 **Counters and histogram observations reset when the process restarts.** That
 is how Prometheus counters work, and `rate()` accounts for the resets; nothing

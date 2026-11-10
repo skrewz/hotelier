@@ -28,29 +28,46 @@ const (
 	// queue via RequeueTask or DeclineTask.
 	EventRequeued = "requeued"
 	// EventQueueWait fires on a successful assignment; seconds carries the
-	// time from CreatedAt to the assignment.
+	// time from the moment the task last entered the pending queue to that
+	// assignment.
 	EventQueueWait = "queue_wait"
 	// EventCompleted, EventFailed and EventCancelled fire on the terminal
 	// transitions; seconds carries the time from assignment to the
-	// transition, or NoDuration when the task never left PENDING.
+	// transition, or noDuration when the task never left PENDING.
 	EventCompleted = "completed"
 	EventFailed    = "failed"
 	EventCancelled = "cancelled"
 )
 
-// NoDuration is passed to TaskObserver.Observe when the event has no time
+// TaskEvents lists every lifecycle event the orchestrator can emit. It exists
+// so pkg/metrics can assert in CI that its translation covers the whole set:
+// a new Event* constant added without a case there fails a test instead of
+// being dropped in silence (issue #262 review).
+func TaskEvents() []string {
+	return []string{
+		EventSubmitted,
+		EventDeduplicated,
+		EventRequeued,
+		EventQueueWait,
+		EventCompleted,
+		EventFailed,
+		EventCancelled,
+	}
+}
+
+// noDuration is passed to TaskObserver.Observe when the event has no time
 // window to measure (e.g. cancelling a task that was never assigned). It is
 // NaN so it can never be mistaken for a real number of seconds; observers
 // must test it with math.IsNaN (NaN is not equal to itself) and skip the
 // observation when they see it.
-var NoDuration = math.NaN()
+var noDuration = math.NaN()
 
 // TaskObserver receives task lifecycle events from the orchestrator. It is
 // satisfied by the collectors in pkg/metrics and by test fakes; the
 // orchestrator depends on nothing beyond this one method.
 type TaskObserver interface {
-	// Observe records one event. seconds is a duration in seconds, or
-	// NoDuration when the event carries none.
+	// Observe records one event. seconds is a duration in seconds, or NaN
+	// (see noDuration) when the event carries none.
 	Observe(event string, seconds float64)
 }
 
@@ -107,6 +124,12 @@ type Orchestrator struct {
 func (o *Orchestrator) SetTaskObserver(obs TaskObserver) {
 	o.mu.Lock()
 	defer o.mu.Unlock()
+	if o.observer != nil && obs != nil {
+		// Last writer wins, so say so: a second registry built for the same
+		// orchestrator would otherwise read zeros forever while the process
+		// counted into the first (issue #262 review).
+		o.logf("task observer replaced; the previous one stops seeing events")
+	}
 	o.observer = obs
 }
 
@@ -119,25 +142,30 @@ func (o *Orchestrator) observe(event string, seconds float64) {
 	}
 }
 
-// queueWaitSeconds is the time from the task's submission to now, for
-// EventQueueWait. CreatedAt is set by Add and preserved by Restore, so a
-// zero here means a hand-built task; the event then carries NoDuration
-// rather than a duration measured from the epoch.
+// queueWaitSeconds is the time the task spent waiting to be assigned, for
+// EventQueueWait. PendingSince is stamped by Add and Restore and re-stamped
+// every time the task re-enters PENDING, so a task that ran before being
+// requeued is not credited with its own run time. A task hand-built in a test
+// carries neither stamp; the event then carries noDuration rather than a
+// duration measured from the epoch.
 func queueWaitSeconds(task *queue.Task) float64 {
-	if task.CreatedAt.IsZero() {
-		return NoDuration
+	since := task.PendingSince
+	if since.IsZero() {
+		since = task.CreatedAt
 	}
-	return time.Since(task.CreatedAt).Seconds()
+	if since.IsZero() {
+		return noDuration
+	}
+	return time.Since(since).Seconds()
 }
 
 // runSeconds is the time from the task's assignment to now, for the
 // terminal events (issue #262: duration is assignment to terminal state,
 // which is the window the task was actually in a guest's hands). A task
-// cancelled straight from PENDING was never assigned and carries
-// NoDuration.
+// cancelled straight from PENDING was never assigned and carries noDuration.
 func runSeconds(task *queue.Task) float64 {
 	if task.AssignedAt.IsZero() {
-		return NoDuration
+		return noDuration
 	}
 	return time.Since(task.AssignedAt).Seconds()
 }
@@ -253,7 +281,7 @@ func (o *Orchestrator) AddTask(task *queue.Task) error {
 		return err
 	}
 	o.persistTask(task)
-	o.observe(EventSubmitted, NoDuration)
+	o.observe(EventSubmitted, noDuration)
 	return nil
 }
 
@@ -269,10 +297,10 @@ func (o *Orchestrator) AddTaskOrDedup(task *queue.Task) (*queue.Task, bool, erro
 		return nil, false, err
 	}
 	if deduplicated {
-		o.observe(EventDeduplicated, NoDuration)
+		o.observe(EventDeduplicated, noDuration)
 	} else {
 		o.persistTask(existing)
-		o.observe(EventSubmitted, NoDuration)
+		o.observe(EventSubmitted, noDuration)
 	}
 	return existing, deduplicated, nil
 }
@@ -551,7 +579,7 @@ func (o *Orchestrator) RequeueTask(taskID string) error {
 	if guestID != "" {
 		o.releaseGuestInternal(guestID)
 	}
-	o.observe(EventRequeued, NoDuration)
+	o.observe(EventRequeued, noDuration)
 
 	return nil
 }
@@ -590,7 +618,7 @@ func (o *Orchestrator) DeclineTask(taskID, guestID string) error {
 	}
 
 	o.releaseGuestInternal(guestID)
-	o.observe(EventRequeued, NoDuration)
+	o.observe(EventRequeued, noDuration)
 
 	statusFrom := "ASSIGNED"
 	if task.Status == queue.TaskStatusRunning {
@@ -634,6 +662,10 @@ func (o *Orchestrator) TryAssignNext() bool {
 	guest.LastTaskHeartbeat = time.Time{}
 
 	o.persistTask(task)
+	// This method assigns without going through AssignTask, so the queue-wait
+	// observation belongs here too: the funnel claim is only true if every
+	// assignment path reports it (issue #262 review).
+	o.observe(EventQueueWait, queueWaitSeconds(task))
 	o.logf("task %s auto-assigned to guest %s", task.ID, guest.ID)
 	return true
 }
@@ -1191,6 +1223,9 @@ func (o *Orchestrator) requeueTaskInternal(taskID string) {
 	task.Status = queue.TaskStatusPending
 	task.AssignedTo = ""
 	task.AssignedAt = time.Time{}
+	// The queue window restarts here: everything before this instant belongs
+	// to the task's previous attempt, not to its wait (issue #262 review).
+	task.PendingSince = time.Now()
 	o.persistTask(task)
 }
 

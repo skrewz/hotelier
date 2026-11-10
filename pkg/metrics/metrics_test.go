@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 
@@ -437,6 +438,10 @@ func TestHeldByCapCountsHeldPendingTasks(t *testing.T) {
 }
 
 // --- Counters and histograms (issue #262) ---
+//
+// Seam ownership: this file asserts what the orchestrator's events turn into
+// on /metrics; orchestrator_metrics_test.go asserts which method emits which
+// event. Keep edits in the seam that owns them.
 
 // submitAssign wires the orchestrator into a scrape endpoint first, then runs
 // a task through submit → assign → acknowledge, so every event after the
@@ -580,6 +585,39 @@ func TestCancelPendingTaskCountsFinishWithoutDuration(t *testing.T) {
 	}
 	if got := histogramCount(t, body, "hotelier_task_duration_seconds"); got != 0 {
 		t.Errorf("duration_seconds_count = %d, want 0 — there was no run window", got)
+	}
+}
+
+// The requeue → re-assign journey is the one path where measuring the wait
+// from submission would charge a task's first run to the queue. Rewinding the
+// submission an hour leaves the requeue stamp as the only sane starting point:
+// both observations must still land in the sub-minute buckets.
+func TestReassignedTaskQueueWaitExcludesFirstRun(t *testing.T) {
+	o := newFixture(t)
+	url := submitAssign(t, o, "t1")
+	if err := o.AcknowledgeTask("t1", "guest-a"); err != nil {
+		t.Fatalf("AcknowledgeTask: %v", err)
+	}
+	time.Sleep(150 * time.Millisecond) // a run long enough to be miscounted
+	if err := o.RequeueTask("t1"); err != nil {
+		t.Fatalf("RequeueTask: %v", err)
+	}
+	task, ok := o.GetTask("t1")
+	if !ok {
+		t.Fatal("GetTask t1: not found")
+	}
+	task.CreatedAt = time.Now().Add(-time.Hour)
+	if err := o.AssignTask("t1", "guest-a"); err != nil {
+		t.Fatalf("AssignTask after requeue: %v", err)
+	}
+	_, body := scrape(t, url)
+
+	if got := histogramCount(t, body, "hotelier_task_queue_wait_seconds"); got != 2 {
+		t.Fatalf("queue_wait_seconds_count = %d, want one observation per assignment", got)
+	}
+	assertBucketedWithin(t, body, "hotelier_task_queue_wait_seconds", 60)
+	if got := histogramCount(t, body, "hotelier_task_duration_seconds"); got != 0 {
+		t.Errorf("duration_seconds_count = %d, want 0 — no transition ended this task yet", got)
 	}
 }
 
