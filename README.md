@@ -238,11 +238,46 @@ curl -X POST http://localhost:8080/api/tasks \
 | `GET` | `/api/tasks/:id` | Get task details |
 | `POST` | `/api/tasks/:id/priority` | Change a PENDING task's priority; body `{"priority": "firefighter\|teacher\|orangutan"}` |
 | `GET` | `/api/tasks/:id/download` | Download the task's whole log trace as JSONL |
+| `GET` | `/api/tasks/search` | Search task output text: `q` (required), `status` (optional), window via `days=N` or `from`/`to` dates |
 | `GET` | `/api/guests` | List connected guests (UID, host, state, tags) and the claim counters |
 | `GET` | `/api/guests/:id` | Get guest details |
 | `GET` | `/api/health` | Health check |
 | `GET` | `/metrics` | Prometheus scrape endpoint: live server state as gauges, plus task-transition counters and histograms |
 | `WS` | `/ws` | WebSocket (JSON-RPC) |
+
+`/api/tasks/search` reads matches through the date-partitioned log store,
+so searching output text never requires downloading whole traces. Lookback
+is enforced server-side: with no window supplied the last 5 days are
+searched, and a window wider than 14 days is rejected with `400` and an
+explanatory body — an explicit rejection rather than a silent clamp, so a
+client never believes it searched further than it did. The 14-day cap is
+independent of log retention pruning: dates already pruned simply yield no
+matches, and pruning never widens a window. Days are the server's calendar
+days, the same ones the log store names its partitions by.
+
+Two response fields say how complete an answer is. A search reads traces as
+a stream and costs at most 64 MiB of decompressed log text per request, and
+at most 200 matches come back — both bounds are the server's, not the
+query's, so one request can neither read nor hold the whole window — and
+`truncated: true` says the scan stopped at one of those bounds and newer
+hits in the window exist that are not listed (the scan walks oldest
+first, so what it omits is what comes after the cut).
+`partial: true` says some partition or trace could not be read; the rest of
+the window was scanned normally and the reason went to the server log, so a
+partial answer is not a failed one.
+
+Each match carries the task's *current* title and status from the queue, plus
+two lines of context either side. The `status` filter matches against that
+current status only: a trace whose task the server has since forgotten comes
+back with empty `title` and `status` and never satisfies the filter, so a
+client searching history should retry without it.
+
+Reach worth stating plainly: like every other route here, this endpoint is
+unauthenticated, and unlike `/api/tasks/:id/download` — one known task per
+request — it greps every task's output in the window at once and returns the
+ID, title and status of each hit. An operator who wants that aggregate read
+restricted must front the port themselves; nothing here distinguishes one
+caller from another.
 
 `/api/guests` also carries a `stats` object. The two action counters,
 `cancelled_while_running` and `cancelled_before_start`, cover every `task.cancel`

@@ -14,6 +14,7 @@ package logstore
 
 import (
 	"bufio"
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -64,6 +65,12 @@ type Entry struct {
 type LogStore struct {
 	dir string
 	mu  sync.Mutex
+
+	// searchBudget is the scanned-bytes budget SearchDates enforces. New
+	// returns every store with MaxSearchScannedBytes; tests that need to
+	// exhaust it override the field on their own instance, so the bound the
+	// README quotes is always the one production code consults.
+	searchBudget int64
 }
 
 // New creates a new LogStore backed by the given directory.
@@ -72,7 +79,7 @@ func New(dir string) (*LogStore, error) {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return nil, fmt.Errorf("create log store dir %s: %w", dir, err)
 	}
-	return &LogStore{dir: dir}, nil
+	return &LogStore{dir: dir, searchBudget: MaxSearchScannedBytes}, nil
 }
 
 // CloseAll is a no-op for the current implementation.
@@ -624,4 +631,285 @@ func isEmptyLine(b []byte) bool {
 		}
 	}
 	return true
+}
+
+// searchContextLines is how many lines either side of a match the store
+// returns. Two is what the API documents, so it lives here as the store's
+// own policy rather than as a parameter every caller repeats.
+const searchContextLines = 2
+
+// MaxSearchMatches bounds how many matches one search may collect, and so
+// what one request may make the server hold in memory and put on the wire. A
+// query is a substring, so the cheapest possible needle can match every line
+// of every trace in the window; the 14-day lookback cap bounds how many dates
+// are scanned, not how many bytes those dates hold, so the scan needs its own
+// bound. It is a property of the server rather than of the query: a caller
+// asking for more is answered with the earliest MaxSearchMatches hits and
+// SearchResult.Truncated set, never with a silent cut.
+const MaxSearchMatches = 200
+
+// MaxSearchScannedBytes bounds how many decompressed bytes one search may
+// read. The match cap bounds what a scan can accumulate, but not what it can
+// cost: a needle matching little or nothing still has to read every trace in
+// the window before the answer can be "no matches", and each trace must be
+// decompressed to be searched at all. The 14-day lookback caps the number of
+// date partitions, not their size, and retention pruning can be disabled
+// entirely, so without a read-side bound one cheap unauthenticated request
+// could still make the server decompress the whole window. A scan that
+// exhausts the budget stops there and reports itself truncated, the same
+// way one that hits MaxSearchMatches does.
+const MaxSearchScannedBytes int64 = 64 << 20
+
+// Match is one log line that satisfied a search query, together with up to
+// searchContextLines neighbouring lines from the same trace on either side.
+type Match struct {
+	TaskID        string    `json:"task_id"`
+	Date          string    `json:"date"`
+	Timestamp     time.Time `json:"timestamp"`
+	Line          string    `json:"line"`
+	ContextBefore []string  `json:"context_before"`
+	ContextAfter  []string  `json:"context_after"`
+}
+
+// SearchResult is one scan's outcome: the matches it collected, whether the
+// cap cut the scan short, and what it could not read.
+type SearchResult struct {
+	Matches []Match
+
+	// Truncated reports the scan stopped early — at MaxSearchMatches or at
+	// the scanned-bytes budget. The walk goes oldest first, so newer hits
+	// in the window exist that this result does not carry.
+	Truncated bool
+
+	// Errors describes partitions or traces the scan could not read. The
+	// scan kept walking past them — the same stance PruneOlderThan takes —
+	// so Matches is a partial answer rather than nothing. The messages quote
+	// filesystem paths and are for the server log, never for a client.
+	Errors []string
+}
+
+// SearchDates scans the given date partitions for log lines containing the
+// query (case-insensitive substring) and returns the matches ordered by
+// date, then task ID, then position within the trace. Only the dates handed
+// in are read — window enforcement is the caller's job (issue #269 keeps it
+// server-side in the HTTP handler), and a date that has been pruned or never
+// existed simply yields no matches. Context lines come from the same trace
+// and are clipped at either end; how many is the store's policy, not a knob
+// each caller re-picks.
+//
+// Input validation is the caller's job, exactly like window enforcement:
+// dates must be partition directory names as ListDates returns them
+// (YYYY-MM-DD), since they are joined into filesystem paths verbatim, and
+// an empty query matches every line, so a caller that must not search for
+// nothing has to reject it itself.
+//
+// Everything the scan cannot do reports through SearchResult.Errors: there
+// is no separate failure channel. The scan stops at MaxSearchMatches or at
+// the scanned-bytes budget and says so through Truncated, so no query can
+// make it accumulate or even read the whole window, and a partition or
+// trace it cannot read costs its own matches and nothing else: the walk
+// continues and the problem is recorded for the caller to log.
+func (s *LogStore) SearchDates(dates []string, query string) SearchResult {
+	ss := &searchScan{store: s, needle: strings.ToLower(query)}
+	for _, date := range dates {
+		tasks, err := s.ListTasks(date)
+		if err != nil {
+			ss.res.Errors = append(ss.res.Errors, fmt.Sprintf("date %s: %v", date, err))
+			continue
+		}
+		sort.Strings(tasks)
+		for _, taskID := range tasks {
+			if ss.scanned >= ss.store.searchBudget {
+				ss.res.Truncated = true
+				return ss.res
+			}
+			ss.trace(date, taskID)
+			if ss.stopped {
+				return ss.res
+			}
+		}
+	}
+	return ss.res
+}
+
+// searchScan is one SearchDates pass: the shared needle, the result being
+// built, and the running count of bytes read that enforces the budget.
+type searchScan struct {
+	store   *LogStore
+	needle  string
+	res     SearchResult
+	scanned int64
+	stopped bool
+}
+
+// emit appends a finished match, or reports the scan truncated and stops it
+// when the match cap is reached. It returns whether the scan may continue.
+func (ss *searchScan) emit(m Match) bool {
+	if len(ss.res.Matches) == MaxSearchMatches {
+		ss.res.Truncated = true
+		ss.stopped = true
+		return false
+	}
+	ss.res.Matches = append(ss.res.Matches, m)
+	return true
+}
+
+// pendingMatch is a match whose after-context is still streaming in.
+type pendingMatch struct {
+	match Match
+	after []string
+}
+
+// countingReader tallies the bytes a search consumes, so the scanned-bytes
+// budget prices the decompression work rather than the size of the
+// compressed file on disk.
+type countingReader struct {
+	r io.Reader
+	n *int64
+}
+
+func (c *countingReader) Read(p []byte) (int, error) {
+	n, err := c.r.Read(p)
+	*c.n += int64(n)
+	return n, err
+}
+
+// openTaskLog opens a task's trace for streaming, applying the same rule
+// as ReadLogs for which file is the trace: the bzip2 file when it yields
+// content, the legacy uncompressed file when it does not. The bzip2 wrapper
+// only surfaces a corrupt stream on the first read, so the probe happens
+// here. A stream that starts with content is the trace; one that is empty
+// or corrupt yields none, and the legacy file takes over — the
+// crash-mid-append state ReadRawJSONL's docblock names. With a corrupt
+// bzip2 stream and no legacy file, the bzip2 error stands as ReadRawJSONL
+// would report it: a present-but-unreadable trace is not a missing one. A
+// task with no trace in either file simply has no logs, which is not an
+// error.
+func (s *LogStore) openTaskLog(date, taskID string) (io.ReadCloser, error) {
+	jsonlPath := filepath.Join(s.dir, date, taskID, "logs.jsonl")
+	bz2Path := jsonlPath + ".bz2"
+	var bz2Err error
+	if info, err := os.Stat(bz2Path); err == nil && info.Size() > 0 {
+		rc, err := openLogFile(bz2Path, true)
+		if err == nil {
+			probe := make([]byte, 1)
+			n, perr := rc.Read(probe)
+			if perr == nil || errors.Is(perr, io.EOF) {
+				if n > 0 {
+					return &compressReadCloser{Reader: io.MultiReader(bytes.NewReader(probe[:n]), rc), closer: rc}, nil
+				}
+				// A stream that reads empty yields no trace, exactly like the
+				// zero entries ReadLogs reads from it: not an error, and the
+				// legacy file stands as the trace if it exists.
+				rc.Close()
+			} else {
+				rc.Close()
+				bz2Err = fmt.Errorf("read log file %s: %w", bz2Path, perr)
+			}
+		} else {
+			bz2Err = fmt.Errorf("read log file %s: %w", bz2Path, err)
+		}
+	}
+	rc, err := openLogFile(jsonlPath, false)
+	if os.IsNotExist(err) {
+		if bz2Err != nil {
+			return nil, bz2Err
+		}
+		return io.NopCloser(strings.NewReader("")), nil
+	}
+	return rc, err
+}
+
+// trace streams one task's trace through the search without materialising
+// it: the decompressed bytes are pulled one JSONL line at a time and
+// counted against the scanned-bytes budget, so a search costs a read of the
+// window rather than a window-sized allocation. Matches carry up to
+// searchContextLines neighbouring lines of the same trace on either side:
+// the before-context is snapshotted when the match is seen, the
+// after-context streams in over the lines that follow and is clipped at the
+// end of the trace or at the budget. A trace that cannot be opened, or that
+// stops parsing partway, costs its unreadable remainder and nothing else:
+// it is recorded in Errors and the matches already read still come back.
+func (ss *searchScan) trace(date, taskID string) {
+	rc, err := ss.store.openTaskLog(date, taskID)
+	if err != nil {
+		ss.res.Errors = append(ss.res.Errors, fmt.Sprintf("logs for %s/%s: %v", date, taskID, err))
+		return
+	}
+	defer rc.Close()
+
+	br := bufio.NewReader(&countingReader{r: rc, n: &ss.scanned})
+	var (
+		last    []string        // the searchContextLines entry lines before the one being read
+		pending []*pendingMatch // matches whose after-context is still arriving
+	)
+	flush := func() {
+		defer func() { pending = nil }()
+		for _, p := range pending {
+			p.match.ContextAfter = p.after
+			if !ss.emit(p.match) {
+				return
+			}
+		}
+	}
+
+	for {
+		raw, rerr := br.ReadString('\n')
+		if strings.TrimSpace(raw) != "" {
+			var e Entry
+			if perr := json.Unmarshal([]byte(raw), &e); perr != nil {
+				ss.res.Errors = append(ss.res.Errors, fmt.Sprintf("logs for %s/%s: unmarshal log entry: %v", date, taskID, perr))
+				flush()
+				return
+			}
+			// An entry completes the after-context of every match still
+			// waiting for it; those complete are emitted oldest first.
+			var waiting []*pendingMatch
+			for _, p := range pending {
+				if len(p.after) < searchContextLines {
+					p.after = append(p.after, e.Line)
+				}
+				if len(p.after) == searchContextLines {
+					p.match.ContextAfter = p.after
+					if !ss.emit(p.match) {
+						return
+					}
+				} else {
+					waiting = append(waiting, p)
+				}
+			}
+			pending = waiting
+			if strings.Contains(strings.ToLower(e.Line), ss.needle) {
+				before := make([]string, len(last))
+				copy(before, last)
+				pending = append(pending, &pendingMatch{
+					match: Match{
+						TaskID:        taskID,
+						Date:          date,
+						Timestamp:     e.Timestamp,
+						Line:          e.Line,
+						ContextBefore: before,
+					},
+					after: make([]string, 0, searchContextLines),
+				})
+			}
+			last = append(last, e.Line)
+			if len(last) > searchContextLines {
+				last = last[1:]
+			}
+			if ss.scanned >= ss.store.searchBudget {
+				ss.res.Truncated = true
+				ss.stopped = true
+				flush()
+				return
+			}
+		}
+		if rerr != nil {
+			if !errors.Is(rerr, io.EOF) {
+				ss.res.Errors = append(ss.res.Errors, fmt.Sprintf("logs for %s/%s: %v", date, taskID, rerr))
+			}
+			break
+		}
+	}
+	flush()
 }
