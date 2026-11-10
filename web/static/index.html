@@ -944,9 +944,11 @@
             }
         }
 
-        // The field is trimmed here and nowhere else, so the list filter and
-        // the value the backend is handed are the same string: a stray space
-        // must not make the dashboard hide the tasks the queue drains first.
+        // The trimmed string is the only form this value ever takes — on
+        // the way in here, and on the way back out of the fragment in
+        // readPrefFilterHash — so the list filter and the value handed to
+        // the backend are one string: a stray space must not make the
+        // dashboard hide the tasks the queue drains first.
         function onPrefFilterInput(value) {
             prefFilterText = value.trim();
             updatePrefFilterURL();
