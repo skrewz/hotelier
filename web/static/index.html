@@ -682,13 +682,17 @@
         }
 
         // showPanel makes exactly one tab panel visible. Every view that
-        // changes which panel the user is looking at goes through here, so
-        // the toggles cannot drift as panels are added: with three panels a
-        // call site that only knew about two would leave stale results on
-        // screen above the view it switched to.
+        // changes which panel the user is looking at goes through here, and
+        // the panels it toggles are read from the markup rather than listed
+        // here, so a panel added to the page cannot be forgotten: a hand-
+        // kept list would leave stale results on screen above the view it
+        // switched to, which is the bug this helper replaced. A panel is any
+        // element whose id is 'tab-<name>', the same naming the lookup above
+        // used; an element with that prefix that is not a panel would have to
+        // be renamed (or given a class to select on) to stay out of this loop.
         function showPanel(tab) {
-            for (const name of ['tasks', 'logs', 'search']) {
-                document.getElementById('tab-' + name).style.display = tab === name ? 'block' : 'none';
+            for (const panel of document.querySelectorAll('[id^="tab-"]')) {
+                panel.style.display = panel.id === 'tab-' + tab ? 'block' : 'none';
             }
         }
 
