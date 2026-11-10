@@ -459,9 +459,10 @@ func TestValidateToolUI(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/ws", srv.HandleWebSocket)
 	mux.HandleFunc("/api/tasks", srv.HandleTasks)
-	// Registered before the "/api/tasks/" subtree so a search is never
-	// mistaken for a task ID, exactly as server.Routes() orders them
-	// (issue #269).
+	// The exact "/api/tasks/search" pattern is preferred over the
+	// "/api/tasks/" subtree whatever the registration order, as
+	// server.Routes() notes (issue #269); it is declared first only to
+	// mirror that file. Keep the two in step if the set ever changes.
 	mux.HandleFunc("/api/tasks/search", srv.HandleTaskSearch)
 	mux.HandleFunc("/api/tasks/", srv.HandleTaskDetail)
 	mux.HandleFunc("/api/guests", srv.HandleGuests)
@@ -3878,6 +3879,40 @@ const { chromium } = require('playwright');
   }
   console.log('PASS: going back from a search leaves one panel visible');
   await takeScreenshot('13f-search-back-to-task');
+
+  // The completeness banners are the only branch here a journey cannot
+  // provoke: they render straight off the response's truncated and partial
+  // flags, and whether those flags are set at all is the server's call —
+  // internal/server/task_search_test.go asserts the cap sets truncated and
+  // an unreadable trace sets partial. So drive the renderer one flag at a
+  // time: a renamed field, an inverted condition or a banner swapped for the
+  // other one fails here.
+  const banners = await page.evaluate(() => {
+    const shown = (flags) => {
+      renderSearchResults(Object.assign(
+        { query: 'flagged', from: '2026-05-01', to: '2026-05-06', matches: [] }, flags));
+      const text = document.getElementById('search-results').textContent;
+      return {
+        truncated: text.indexOf('scan stopped at the server') !== -1,
+        partial: text.indexOf('could not be read') !== -1,
+      };
+    };
+    return {
+      truncatedOnly: shown({ truncated: true }),
+      partialOnly: shown({ partial: true }),
+      neither: shown({}),
+    };
+  });
+  if (!banners.truncatedOnly.truncated || banners.truncatedOnly.partial) {
+    fail('a capped answer must show the truncation banner alone, got: ' + JSON.stringify(banners.truncatedOnly));
+  }
+  if (!banners.partialOnly.partial || banners.partialOnly.truncated) {
+    fail('an unreadable window must show the partial banner alone, got: ' + JSON.stringify(banners.partialOnly));
+  }
+  if (banners.neither.truncated || banners.neither.partial) {
+    fail('a complete answer must show no completeness banner, got: ' + JSON.stringify(banners.neither));
+  }
+  console.log('PASS: completeness banners follow the response flags');
 
   if (searchPageErrors.length > 0) {
     fail('search journey raised page JS errors: ' + searchPageErrors.join('; '));
