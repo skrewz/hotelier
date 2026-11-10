@@ -505,6 +505,15 @@ persisted entry's age.
 
 The web UI includes a **Logs** tab for browsing persisted task logs.
 
+It also includes a **Search** tab over that persisted output. A query and a
+lookback window go to `GET /api/tasks/search` (see [API
+Endpoints](#api-endpoints)); the matches come back with the task, the date and
+a little context, each linking to the log view of the task it came from. The
+lookback field defaults to the server's own 5-day default and is sent as typed:
+how wide a window is allowed is the server's decision, so a window beyond the
+14-day cap is reported back as the server's rejection rather than quietly
+clamped in the page.
+
 Run with log persistence:
 
 ```bash

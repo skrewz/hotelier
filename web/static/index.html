@@ -262,6 +262,25 @@
         .log-task-item:hover { background: #334155; }
         .log-task-id { font-size: 0.85rem; color: #e2e8f0; }
         .log-task-count { font-size: 0.7rem; color: #64748b; }
+        /* Task output search (issue #270). The form carries a query and a
+           lookback window and nothing else: the window rules (default, cap,
+           rejection) live in the server, so the page never pre-judges them. */
+        .search-form { display: flex; gap: 0.5rem; align-items: flex-end; margin-bottom: 0.75rem; flex-wrap: wrap; }
+        .search-form label { display: block; font-size: 0.75rem; color: #94a3b8; margin-bottom: 0.25rem; }
+        .search-form input { width: 100%; padding: 0.5rem; background: #0f172a; border: 1px solid #334155; border-radius: 0.375rem; color: #e2e8f0; font-family: inherit; }
+        .search-form .search-query-group { flex: 1; min-width: 200px; }
+        .search-form .search-days-group { width: 9rem; }
+        .search-note { padding: 0.5rem 0.75rem; margin-bottom: 0.75rem; background: #1e293b; border-radius: 0.375rem; font-size: 0.8rem; color: #94a3b8; }
+        .search-note.error { background: #450a0a; color: #fca5a5; }
+        .search-match { padding: 0.5rem 0.75rem; margin-bottom: 0.5rem; background: #1e293b; border-radius: 0.375rem; cursor: pointer; }
+        .search-match:hover { background: #334155; }
+        .search-match-head { display: flex; justify-content: space-between; gap: 0.5rem; flex-wrap: wrap; margin-bottom: 0.375rem; font-size: 0.75rem; color: #64748b; }
+        .search-match-task { color: #e2e8f0; font-size: 0.85rem; }
+        .search-match-status { display: inline-block; padding: 0.05rem 0.35rem; border-radius: 0.25rem; font-size: 0.6rem; font-weight: 700; text-transform: uppercase; background: #1e3a5f; color: #38bdf8; margin-left: 0.35rem; }
+        .search-match-lines { font-family: 'SF Mono', 'Fira Code', monospace; font-size: 0.75rem; line-height: 1.4; }
+        .search-match-line { white-space: pre-wrap; word-break: break-word; color: #cbd5e1; }
+        .search-match-line.context { color: #64748b; }
+        .search-match-line mark { background: #0ea5e9; color: #0f172a; border-radius: 0.15rem; }
         .log-entry-line { padding: 0.375rem 0.75rem; border-bottom: 1px solid #1e293b; font-size: 0.8rem; line-height: 1.5; white-space: pre-wrap; word-break: break-word; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; }
         .log-entry-line:last-child { border-bottom: none; }
         .log-entry-line .log-level-badge { display: inline-block; padding: 0.05rem 0.35rem; border-radius: 0.25rem; font-size: 0.6rem; font-weight: 700; text-transform: uppercase; margin-right: 0.5rem; min-width: 3.5em; text-align: center; vertical-align: middle; }
@@ -478,6 +497,7 @@
             <div class="tab-bar">
                 <div class="tab active" onclick="showTab('tasks')">Tasks</div>
                 <div class="tab" onclick="showTab('logs')">Logs</div>
+                <div class="tab" onclick="showTab('search')">Search</div>
             </div>
             <div id="tab-tasks" style="display:flex;flex-direction:column;flex:1;overflow-y:auto;min-height:0;">
                 <div id="task-summary" class="task-summary"></div>
@@ -488,6 +508,22 @@
                 <div id="log-view" style="position:absolute;top:0;left:0;right:0;bottom:0;display:flex;flex-direction:column;">
                     <div class="empty-state"><span>📋</span>No logs configured</div>
                 </div>
+            </div>
+            <!-- Task output search (issue #270): a thin client over
+                 GET /api/tasks/search. No scanning logic lives here. -->
+            <div id="tab-search" style="display:none;flex:1;overflow-y:auto;min-height:0;">
+                <div class="search-form">
+                    <div class="search-query-group">
+                        <label for="search-query">Search task output</label>
+                        <input type="text" id="search-query" placeholder="substring to look for…" onkeydown="if (event.key === 'Enter') runTaskSearch()">
+                    </div>
+                    <div class="search-days-group">
+                        <label for="search-days">Lookback (days)</label>
+                        <input type="number" id="search-days" value="5" min="1" onkeydown="if (event.key === 'Enter') runTaskSearch()">
+                    </div>
+                    <button class="btn" id="search-go" onclick="runTaskSearch()">Search</button>
+                </div>
+                <div id="search-results"><div class="empty-state"><span>🔎</span>Enter a query to search task output</div></div>
             </div>
         </div>
     </div>
@@ -562,6 +598,13 @@
                 if (parts[0] === 'logs' && parts[1]) {
                     return { view: 'logs', date: parts[1], taskID: parts[2] || null };
                 }
+                // /search[?q=&days=] is the task output search (issue #270).
+                // The query lives in the query string so a search is
+                // shareable and survives a reload, like every other view.
+                if (parts[0] === 'search') {
+                    const params = new URLSearchParams(location.search);
+                    return { view: 'search', q: params.get('q') || '', days: params.get('days') || '' };
+                }
                 return { view: 'tasks' };
             },
 
@@ -581,6 +624,17 @@
                         if (route.taskID) {
                             await loadLogEntries(route.date, route.taskID, fromInitialLoad);
                         }
+                    }
+                    break;
+                case 'search':
+                    showTab('search', true, fromInitialLoad);
+                    // A URL that carries a query replays the search; the URL
+                    // already says what the search was, so runTaskSearch must
+                    // not touch it again (that would double-push on popstate).
+                    if (route.q) {
+                        document.getElementById('search-query').value = route.q;
+                        if (route.days) document.getElementById('search-days').value = route.days;
+                        await runTaskSearch(true);
                     }
                     break;
                 default:
@@ -616,11 +670,14 @@
             setLogsFullscreen(false);
             if (!skipUrl) {
                 if (tab === 'tasks') router.push('/tasks');
-                // 'logs' — loadLogDates() pushes /logs, so skip here
+                // 'logs' — loadLogDates() pushes /logs, so skip here.
+                // 'search' — runTaskSearch() pushes /search only once a search
+                // actually runs, so an empty tab click keeps the history clean.
             }
-            activateTabByName(tab === 'tasks' ? 'Tasks' : 'Logs');
+            activateTabByName(tab === 'tasks' ? 'Tasks' : tab === 'search' ? 'Search' : 'Logs');
             document.getElementById('tab-tasks').style.display = tab === 'tasks' ? 'block' : 'none';
             document.getElementById('tab-logs').style.display = tab === 'logs' ? 'block' : 'none';
+            document.getElementById('tab-search').style.display = tab === 'search' ? 'block' : 'none';
             if (tab === 'logs') {
                 loadLogDates(fromInitialLoad);
             }
@@ -2745,6 +2802,147 @@
                     if (spinner) spinner.style.transform = `rotate(${count % 360}deg)`;
                 }
             }
+        }
+
+        // =====================================================================
+        // Task output search (issue #270)
+        // =====================================================================
+        // A thin client over GET /api/tasks/search (issue #269). The page
+        // supplies a query and the window the user asked for; the server owns
+        // every rule about that window — the 5-day default, the 14-day cap,
+        // the 400 it answers when the cap is exceeded — and this code repeats
+        // none of them. In particular the lookback field is sent verbatim:
+        // clamping it here would quietly search less than the user asked for
+        // while telling them it searched the whole window, which is the one
+        // outcome issue #269 ruled out.
+
+        // runTaskSearch issues one search. fromRouter is true when the call
+        // came from router.dispatch, where the URL already describes this
+        // search and must be left alone.
+        async function runTaskSearch(fromRouter) {
+            const query = document.getElementById('search-query').value.trim();
+            const days = document.getElementById('search-days').value.trim();
+            const params = new URLSearchParams();
+            if (query) params.set('q', query);
+            if (days) params.set('days', days);
+            if (!fromRouter) router.push('/search' + (params.toString() ? '?' + params.toString() : ''));
+            const results = document.getElementById('search-results');
+
+            // An empty query would make the server match every line in the
+            // window, so do not send it.
+            if (!query) {
+                results.innerHTML = '<div class="search-note">Enter a query to search task output.</div>';
+                return;
+            }
+
+            results.innerHTML = '<div class="empty-state"><span>🔎</span>Searching…</div>';
+            let res;
+            try {
+                res = await fetch('/api/tasks/search?' + params.toString());
+            } catch (e) {
+                results.innerHTML = '<div class="search-note error">Search failed: ' + escapeHtml(e.message) + '</div>';
+                return;
+            }
+            if (!res.ok) {
+                // The server rejects bad or over-wide windows with a plain-text
+                // reason; that reason is the message for the user, so show it
+                // rather than second-guessing the request client-side.
+                let reason = '';
+                try { reason = (await res.text()).trim(); } catch (e) { reason = ''; }
+                results.innerHTML = '<div class="search-note error">Search rejected (' + res.status + '): '
+                    + escapeHtml(reason || res.statusText) + '</div>';
+                return;
+            }
+            let data;
+            try {
+                data = await res.json();
+            } catch (e) {
+                results.innerHTML = '<div class="search-note error">Search returned an unreadable response.</div>';
+                return;
+            }
+            renderSearchResults(data);
+        }
+
+        function renderSearchResults(data) {
+            const matches = data.matches || [];
+            let html = '<div class="search-note">' + matches.length + ' match(es) between '
+                + escapeHtml(data.from || '') + ' and ' + escapeHtml(data.to || '')
+                + ' for “' + escapeHtml(data.query || '') + '”</div>';
+            // Both completeness flags come straight off the response; neither
+            // is the page's judgement.
+            if (data.truncated) {
+                html += '<div class="search-note">The scan stopped at the server’s cap — newer matches in the window are not listed.</div>';
+            }
+            if (data.partial) {
+                html += '<div class="search-note">Part of the window could not be read; the reason is in the server log.</div>';
+            }
+            if (matches.length === 0) {
+                html += '<div class="empty-state"><span>🔎</span>No matches in that window</div>';
+            } else {
+                html += '<div id="search-matches">'
+                    + matches.map(m => searchMatchHTML(m, data.query || '')).join('')
+                    + '</div>';
+            }
+            document.getElementById('search-results').innerHTML = html;
+        }
+
+        // searchMatchHTML renders one hit: which task, when, and the line with
+        // its neighbours. The row is the link — it opens the existing log view
+        // for exactly that task and date, where the whole trace (and its
+        // download) already lives.
+        function searchMatchHTML(m, query) {
+            const label = m.title ? getFirstLine(m.title, 80) : m.task_id;
+            const status = m.status ? '<span class="search-match-status">' + escapeHtml(m.status) + '</span>' : '';
+            const when = m.timestamp ? formatTimestamp(m.timestamp) : '';
+            const lines = (m.context_before || []).map(l => searchLineHTML(l, query, true))
+                .concat([searchLineHTML(m.line, query, false)])
+                .concat((m.context_after || []).map(l => searchLineHTML(l, query, true)));
+            return `
+                <div class="search-match" data-date="${escapeAttr(m.date)}" data-task-id="${escapeAttr(m.task_id)}" onclick="openSearchHit(this.dataset.date, this.dataset.taskId)">
+                    <div class="search-match-head">
+                        <span class="search-match-task">🔖 ${escapeHtml(label)}${status}</span>
+                        <span class="search-match-date">${escapeHtml(m.date || '')}${when ? ' ' + escapeHtml(when) : ''}</span>
+                    </div>
+                    <div class="search-match-lines">${lines.join('')}</div>
+                </div>`;
+        }
+
+        function searchLineHTML(line, query, isContext) {
+            return `<div class="search-match-line${isContext ? ' context' : ''}">${highlightMatch(line || '', query)}</div>`;
+        }
+
+        // highlightMatch escapes the line into HTML and wraps each occurrence
+        // of the query in <mark>. It slices the *raw* text and escapes each
+        // fragment, so neither the log text nor the query can inject markup;
+        // a plain string scan also sidesteps any regex metacharacters the
+        // query happens to contain.
+        function highlightMatch(line, query) {
+            if (!query) return escapeHtml(line);
+            const haystack = line.toLowerCase();
+            const needle = query.toLowerCase();
+            let out = '';
+            let i = 0;
+            for (;;) {
+                const at = haystack.indexOf(needle, i);
+                if (at === -1) { out += escapeHtml(line.slice(i)); break; }
+                out += escapeHtml(line.slice(i, at))
+                    + '<mark>' + escapeHtml(line.slice(at, at + needle.length)) + '</mark>';
+                i = at + needle.length;
+            }
+            return out;
+        }
+
+        // openSearchHit leaves the search panel for the log browser's entry
+        // view of the matched trace. Like selectTask it shows the Logs tab
+        // without loadLogDates() — the latter would render the date list in
+        // the same pane and race the entries for innerHTML.
+        function openSearchHit(date, taskID) {
+            setLogsFullscreen(false);
+            activateTabByName('Logs');
+            document.getElementById('tab-tasks').style.display = 'none';
+            document.getElementById('tab-search').style.display = 'none';
+            document.getElementById('tab-logs').style.display = 'block';
+            loadLogEntries(date, taskID);
         }
 
         // =====================================================================

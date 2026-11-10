@@ -459,6 +459,10 @@ func TestValidateToolUI(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/ws", srv.HandleWebSocket)
 	mux.HandleFunc("/api/tasks", srv.HandleTasks)
+	// Registered before the "/api/tasks/" subtree so a search is never
+	// mistaken for a task ID, exactly as server.Routes() orders them
+	// (issue #269).
+	mux.HandleFunc("/api/tasks/search", srv.HandleTaskSearch)
 	mux.HandleFunc("/api/tasks/", srv.HandleTaskDetail)
 	mux.HandleFunc("/api/guests", srv.HandleGuests)
 	mux.HandleFunc("/api/guests/", srv.HandleGuestDetail)
@@ -1021,10 +1025,13 @@ const { chromium } = require('playwright');
   // Restore the live picture before any later screenshots.
   await page.evaluate(async () => { await refresh(); });
 
-  // Verify only 2 tabs exist (Tasks + Logs, no Task Detail)
-  const tabCount = await page.evaluate(() => document.querySelectorAll('.tab').length);
-  if (tabCount !== 2) fail('Should have exactly 2 tabs (Tasks + Logs), got ' + tabCount);
-  console.log('PASS: Only 2 tabs present (Task Detail removed)');
+  // Verify the tab set is Tasks + Logs + Search and nothing else (the task
+  // detail view is a state of the Logs tab, never a tab of its own; the
+  // Search tab is issue #270).
+  const tabs = await page.evaluate(() => Array.from(document.querySelectorAll('.tab')).map(t => t.textContent.trim()));
+  if (tabs.length !== 3) fail('Should have exactly 3 tabs (Tasks + Logs + Search), got ' + tabs.join(', '));
+  if (tabs.join(',') !== 'Tasks,Logs,Search') fail('Unexpected tab set: ' + tabs.join(','));
+  console.log('PASS: Tabs are Tasks, Logs and Search');
 
   // =====================================================================
   // Phase 1a: Scroll fix — html/body must NOT have overflow:hidden
@@ -3696,6 +3703,157 @@ const { chromium } = require('playwright');
   console.log('PASS: polled task detail meta keeps the guest host');
 
   await takeScreenshot('13d-guest-host');
+
+  // =====================================================================
+  // Phase 13f: Search task output from the web UI (issue #270)
+  // =====================================================================
+  // The search box is a thin client over GET /api/tasks/search: the page
+  // supplies a query and a lookback window and the server decides what that
+  // window may be. The journey below is the one a human follows — open the
+  // Search tab, type, search, click a hit — with no DOM injection.
+  console.log('=== Phase 13f: Task output search ===');
+
+  const searchPageErrors = [];
+  page.on('pageerror', err => searchPageErrors.push(err.message));
+
+  await page.goto(baseURL + '/tasks');
+  await page.waitForLoadState('networkidle');
+
+  // Opening the Search tab shows the form, and the lookback control
+  // defaults to the server's own default of 5 days.
+  const searchForm = await page.evaluate(() => {
+    const tab = Array.from(document.querySelectorAll('.tab'))
+      .find(t => t.textContent.trim() === 'Search');
+    if (!tab) return null;
+    tab.click();
+    return {
+      active: tab.classList.contains('active'),
+      panelShown: document.getElementById('tab-search').style.display !== 'none',
+      days: document.getElementById('search-days').value,
+      hasQueryField: document.getElementById('search-query') !== null,
+      taskPanelHidden: document.getElementById('tab-tasks').style.display === 'none',
+    };
+  });
+  if (!searchForm) fail('Search tab should be present in the tab bar');
+  if (!searchForm.active) fail('Search tab should be active after clicking it');
+  if (!searchForm.panelShown) fail('Search panel should be shown after clicking the tab');
+  if (!searchForm.taskPanelHidden) fail('Tasks panel should be hidden on the Search tab');
+  if (!searchForm.hasQueryField) fail('Search form should carry a query field');
+  if (searchForm.days !== '5') fail('lookback should default to 5 days, got: ' + searchForm.days);
+  console.log('PASS: Search tab renders with a 5-day default lookback');
+
+  // An empty query must not reach the server at all.
+  await page.fill('#search-query', '');
+  await clickEl('#search-go');
+  const emptyQuery = await page.evaluate(() => ({
+    text: document.getElementById('search-results').textContent,
+    url: window.location.pathname,
+  }));
+  if (!emptyQuery.text.toLowerCase().includes('query')) {
+    fail('empty query should ask for a query, got: ' + emptyQuery.text);
+  }
+  if (emptyQuery.url !== '/search') fail('empty query should still be on /search, got: ' + emptyQuery.url);
+  console.log('PASS: empty query asks for one instead of searching');
+  await takeScreenshot('13f-search-empty-query');
+
+  // Searching for a string present in a recent task's output returns that
+  // task. The failed task's ID is the natural needle: it is unique per run,
+  // it appears in that task's own trace ("Executing task <id>", its clone
+  // path), and no other task's trace can contain it — so the match set is
+  // exactly one task's hits.
+  await page.fill('#search-query', failedTaskId);
+  await clickEl('#search-go');
+  await page.waitForSelector('#search-results .search-match', { timeout: 10000 });
+  const searchChecks = await page.evaluate((needle) => {
+    const rows = Array.from(document.querySelectorAll('#search-results .search-match'));
+    const first = rows[0];
+    return {
+      rows: rows.length,
+      foreignTasks: rows.filter(r => r.dataset.taskId !== needle).length,
+      firstHasDate: /\d{4}-\d{2}-\d{2}/.test(first.querySelector('.search-match-date').textContent),
+      firstHasStatus: first.querySelector('.search-match-status') !== null,
+      contextLines: first.querySelectorAll('.search-match-line').length,
+      marks: first.querySelectorAll('.search-match-line mark').length,
+      markText: first.querySelector('.search-match-line mark')
+        ? first.querySelector('.search-match-line mark').textContent : '',
+      url: window.location.pathname + window.location.search,
+    };
+  }, failedTaskId);
+  if (searchChecks.rows === 0) fail('search should return at least one match');
+  if (searchChecks.foreignTasks !== 0) {
+    fail('every match should belong to the searched-for task, ' + searchChecks.foreignTasks + ' did not');
+  }
+  if (!searchChecks.firstHasDate) fail('first match should carry the date it was found on');
+  if (!searchChecks.firstHasStatus) fail('first match should carry the task status');
+  if (searchChecks.contextLines < 2) {
+    fail('a match should render context around the matching line, got ' + searchChecks.contextLines + ' lines');
+  }
+  if (searchChecks.marks === 0) fail('the matched substring should be highlighted');
+  if (searchChecks.markText !== failedTaskId) {
+    fail('highlight should carry the query verbatim, got: ' + searchChecks.markText);
+  }
+  if (!searchChecks.url.startsWith('/search?q=')) {
+    fail('a search should be reflected in the URL, got: ' + searchChecks.url);
+  }
+  console.log('PASS: search returns the task with date, status, context and highlight');
+  await takeScreenshot('13f-search-results');
+
+  // Clicking a match lands on that task's log view — the existing detail /
+  // download surface for the trace the match came from.
+  await clickEl('#search-results .search-match');
+  await page.waitForSelector('#log-entries-list .log-msg', { timeout: 10000 });
+  const hitChecks = await page.evaluate((needle) => {
+    return {
+      url: window.location.pathname,
+      logs: document.querySelectorAll('#log-entries-list .log-msg').length,
+      showsNeedle: document.getElementById('log-view').textContent.includes(needle),
+    };
+  }, failedTaskId);
+  if (hitChecks.url !== '/logs/' + logDate + '/' + failedTaskId) {
+    fail('clicking a match should open its log view, expected /logs/' + logDate + '/' + failedTaskId + ', was: ' + hitChecks.url);
+  }
+  if (hitChecks.logs === 0) fail('the log view opened from a match should show entries');
+  if (!hitChecks.showsNeedle) fail('the log view opened from a match should contain the matched text');
+  console.log('PASS: a match links through to the task log view');
+  await takeScreenshot('13f-search-hit-logs');
+
+  // A window wider than the server's cap is the server's decision to make:
+  // the page sends days=30 and shows the 400 body it gets back rather than
+  // quietly clamping the number (issue #269 policy).
+  await page.goto(baseURL + '/search?q=' + encodeURIComponent(failedTaskId) + '&days=30');
+  await page.waitForLoadState('networkidle');
+  const overCap = await page.evaluate(() => ({
+    days: document.getElementById('search-days').value,
+    text: document.getElementById('search-results').textContent,
+  }));
+  if (overCap.days !== '30') {
+    fail('the page must not clamp the lookback client-side, field read back as: ' + overCap.days);
+  }
+  if (!overCap.text.includes('exceeds the maximum of 14 days')) {
+    fail('the server rejection should be surfaced, got: ' + overCap.text);
+  }
+  console.log('PASS: an over-wide lookback surfaces the server rejection');
+  await takeScreenshot('13f-search-over-cap');
+
+  // A shared search URL replays itself: loading /search?q=... runs the
+  // search without the user touching the form.
+  await page.goto(baseURL + '/search?q=' + encodeURIComponent(failedTaskId));
+  await page.waitForSelector('#search-results .search-match', { timeout: 10000 });
+  const replayed = await page.evaluate((needle) => ({
+    rows: document.querySelectorAll('#search-results .search-match').length,
+    query: document.getElementById('search-query').value,
+    firstTask: document.querySelector('#search-results .search-match').dataset.taskId,
+  }), failedTaskId);
+  if (replayed.rows === 0) fail('loading a /search URL should replay the search');
+  if (replayed.query !== failedTaskId) fail('the query field should be filled from the URL, got: ' + replayed.query);
+  if (replayed.firstTask !== failedTaskId) fail('replayed search should hit the same task');
+  console.log('PASS: /search?q= replays the search on load');
+  await takeScreenshot('13f-search-direct-url');
+
+  if (searchPageErrors.length > 0) {
+    fail('search journey raised page JS errors: ' + searchPageErrors.join('; '));
+  }
+  console.log('PASS: search journey raised no page JS errors');
 
   // =====================================================================
   // Phase 14: Mobile viewport — mobile-friendly UI (issue #203)
