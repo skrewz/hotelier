@@ -338,15 +338,23 @@ only, so a server restart clears it.
 Reach worth stating plainly: like every other route here this endpoint is
 unauthenticated too, and it is the one route that changes scheduling for
 everyone at once — a single `POST` reorders the pending drain for every
-guest and every dashboard, and stands until someone clears it. It leaves no
+guest and every dashboard, and stands until someone clears it. Because
+that effect is global and lasting, the endpoint also refuses forged
+browser requests: a request whose `Origin` names another host, or which
+reports `Sec-Fetch-Site: cross-site`, is answered `403`, so a third-party
+page an operator happens to visit cannot bend or reset the order from the
+operator's own browser. Non-browser clients carry neither header and are
+judged as before. It leaves no
 mark on any task, and the applied state is not broadcast to other open
-dashboards (they pick the filter up when they next reload), so the one log
+dashboards (a reload there restores the field from the fragment but not
+the applied mark, so the page cannot tell them the order is bent), so the one log
 line naming the filter is the record of when the order was bent — and,
 since nothing here distinguishes one caller from another, not of by whom. A
 deployment that must keep the write to operators enforces that at the
-network edge. The filter text is capped at 256 bytes — a fragment of a
-repository name or title has no use past that — and an oversized value is
-refused rather than stored.
+network edge; the fetch-metadata check above covers the one path that
+does not pass through the edge — the operator's own browser. The filter
+text is capped at 256 bytes — a fragment of a repository name or title has
+no use past that — and an oversized value is refused rather than stored.
 
 `/api/guests` also carries a `stats` object. The two action counters,
 `cancelled_while_running` and `cancelled_before_start`, cover every `task.cancel`

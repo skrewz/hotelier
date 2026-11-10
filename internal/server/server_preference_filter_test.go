@@ -73,6 +73,53 @@ func TestHandleTaskFilter_LogsOnce(t *testing.T) {
 	}
 }
 
+// The preference filter is the first global, persistent scheduler control,
+// so a browser request to it must come from this server's own origin: a
+// cross-origin form post needs no CORS preflight and json.Decoder ignores
+// the content type, so without this check any page an operator visited
+// could bend or reset the drain order (CSRF). Non-browser clients send no
+// fetch metadata and are unaffected — the endpoint stays unauthenticated,
+// as every route here is.
+func TestHandleTaskFilter_RejectsCrossSiteRequests(t *testing.T) {
+	srv := newTestServer(t)
+
+	for _, tc := range []struct {
+		name   string
+		origin string
+		sfs    string
+		wantOK bool
+	}{
+		{"hostile origin", "https://evil.example", "", false},
+		{"undeclarable origin", "null", "", false},
+		{"cross-site fetch metadata", "", "cross-site", false},
+		{"same-origin origin", "http://example.com", "", true},
+		{"same-origin fetch metadata", "", "same-origin", true},
+		{"no fetch metadata (non-browser client)", "", "", true},
+	} {
+		req := httptest.NewRequest(http.MethodPost, "/api/tasks/filter", strings.NewReader(`{"filter":"widget"}`))
+		if tc.origin != "" {
+			req.Header.Set("Origin", tc.origin)
+		}
+		if tc.sfs != "" {
+			req.Header.Set("Sec-Fetch-Site", tc.sfs)
+		}
+		w := httptest.NewRecorder()
+		srv.HandleTaskFilter(w, req)
+
+		want := http.StatusOK
+		if !tc.wantOK {
+			want = http.StatusForbidden
+			if got := srv.Orchestrator().PreferenceFilter(); got != "" {
+				t.Fatalf("%s: rejected request changed the filter: %q", tc.name, got)
+			}
+		}
+		if w.Code != want {
+			t.Fatalf("%s: expected %d, got %d: %s", tc.name, want, w.Code, w.Body.String())
+		}
+		srv.Orchestrator().SetPreferenceFilter("")
+	}
+}
+
 func TestHandleTaskFilter_RejectsBadInput(t *testing.T) {
 	srv := newTestServer(t)
 

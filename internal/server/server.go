@@ -2686,13 +2686,23 @@ const (
 // so a server restart clears it. Reach worth stating plainly: like every
 // other route on this server it is unauthenticated, and unlike the
 // per-task controls it is a *global* one — one POST reorders the pending
-// drain for every guest, and it stands until someone clears it. The
-// README's preference-filter section states what that means operationally.
+// drain for every guest, and it stands until someone clears it. Because
+// the effect is global and lasting, the route is also the first place a
+// forged browser request would pay off, so it applies the fetch-metadata
+// check in rejectsCrossSite before touching the queue: a request a
+// browser attributes to another site is refused with 403 whatever its
+// content type or submission style. The README's preference-filter
+// section states what all this means operationally.
 func (s *Server) HandleTaskFilter(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	if rejectsCrossSite(r) {
+		http.Error(w, "cross-site requests are refused", http.StatusForbidden)
 		return
 	}
 
@@ -2719,6 +2729,28 @@ func (s *Server) HandleTaskFilter(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(map[string]interface{}{
 		"filter": s.orchestrator.PreferenceFilter(),
 	})
+}
+
+// rejectsCrossSite reports whether the request was forged by a third-party
+// page — the CSRF case this route is uniquely exposed to, because its
+// effect is global and lasting. A form submission is a *simple* request:
+// the browser sends it cross-site without a CORS preflight, and the JSON
+// decoder here would parse its body whatever the content type said, so
+// content-type sniffing is not a defence. The check follows the
+// fetch-metadata policy OWASP recommends for this case (see
+// https://cheatsheetseries.owasp.org/cheatsheets/Cross_Site_Request_Forgery_Prevention_Cheat_Sheet.html#fetch-metadata-based-origin-validation):
+// a browser-supplied Origin must name this server's own host, and a
+// request declaring Sec-Fetch-Site: cross-site is refused even if the
+// Origin is withheld. Browsers always supply one of the two on a POST.
+// Non-browser clients (curl, service integrations, this server's own
+// guests) send neither header and pass through: the route stays
+// unauthenticated, as every route on this listener is.
+func rejectsCrossSite(r *http.Request) bool {
+	if origin := r.Header.Get("Origin"); origin != "" {
+		u, err := url.Parse(origin)
+		return err != nil || !strings.EqualFold(u.Host, r.Host)
+	}
+	return r.Header.Get("Sec-Fetch-Site") == "cross-site"
 }
 
 // HandleTaskSearch handles GET /api/tasks/search: a substring search over
