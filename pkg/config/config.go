@@ -336,15 +336,27 @@ type ConcurrencyStatus struct {
 	// whose entries all carry the same cap. A boundary that repeats the
 	// current cap is not a change.
 	NextChangeAt time.Time
-	// NextAt is the wall-clock "HH:MM" of NextChangeAt in Timezone, empty
-	// when there is no change to report.
-	NextAt string
 	// NextCap is the cap in force from NextChangeAt.
 	NextCap int
 }
 
 // HasNextChange reports whether the cap is scheduled to change.
 func (s ConcurrencyStatus) HasNextChange() bool { return !s.NextChangeAt.IsZero() }
+
+// NextAt is the wall-clock "HH:MM" of NextChangeAt in Timezone — the
+// rendering of a fact the status already carries, derived so no edit can
+// make the string and the instant disagree. Empty when there is no change
+// to report.
+func (s ConcurrencyStatus) NextAt() string {
+	if s.NextChangeAt.IsZero() {
+		return ""
+	}
+	loc, err := loadLocation(s.Timezone)
+	if err != nil {
+		return ""
+	}
+	return s.NextChangeAt.In(loc).Format("15:04")
+}
 
 // ConcurrencyStatus resolves the cap in force at now together with the entry
 // it came from and the next change. See EffectiveConcurrency for what the
@@ -360,7 +372,7 @@ func (c ServerConfig) ConcurrencyStatus(now time.Time) ConcurrencyStatus {
 		Source:   fmt.Sprintf("concurrency_schedule at %q", entries[chosen].at),
 		Timezone: loc.String(),
 	}
-	status.NextChangeAt, status.NextAt, status.NextCap = nextScheduleChange(entries, loc, now, status.Cap)
+	status.NextChangeAt, status.NextCap = nextScheduleChange(entries, loc, now, status.Cap)
 	return status
 }
 
@@ -453,15 +465,14 @@ func chosenEntry(entries []scheduleEntry, wallMinutes int) int {
 // the gap once, and quotes at each step the cap resolveSchedule gives
 // there — an entry in a gap is thus placed at the transition, which is
 // where the wall-clock comparison flips.
-func nextScheduleChange(entries []scheduleEntry, loc *time.Location, now time.Time, cap int) (time.Time, string, int) {
+func nextScheduleChange(entries []scheduleEntry, loc *time.Location, now time.Time, cap int) (time.Time, int) {
 	end := now.Add(48 * time.Hour)
 	for t := now.Truncate(time.Minute).Add(time.Minute); t.Before(end); t = t.Add(time.Minute) {
 		if c := capAt(entries, t.In(loc)); c != cap {
-			local := t.In(loc)
-			return t, fmt.Sprintf("%02d:%02d", local.Hour(), local.Minute()), c
+			return t, c
 		}
 	}
-	return time.Time{}, "", cap
+	return time.Time{}, cap
 }
 
 // capAt is the cap chosenEntry names at a wall clock, for callers holding

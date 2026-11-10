@@ -449,8 +449,8 @@ func TestConcurrencyStatus_NamesScheduleEntryInForce(t *testing.T) {
 	if status.Source != `concurrency_schedule at "07:00"` {
 		t.Errorf("expected the source to name the 07:00 entry, got %q", status.Source)
 	}
-	if status.NextAt != "23:00" || status.NextCap != 4 {
-		t.Errorf("expected the next change at 23:00 to 4, got %q -> %d", status.NextAt, status.NextCap)
+	if status.NextAt() != "23:00" || status.NextCap != 4 {
+		t.Errorf("expected the next change at 23:00 to 4, got %q -> %d", status.NextAt(), status.NextCap)
 	}
 	if want := utc(15, 23, 0); !status.NextChangeAt.Equal(want) {
 		t.Errorf("expected the next change at %s, got %s", want, status.NextChangeAt)
@@ -472,8 +472,8 @@ func TestConcurrencyStatus_NextChangeWrapsPastMidnight(t *testing.T) {
 	if want := utc(16, 7, 0); !status.NextChangeAt.Equal(want) {
 		t.Errorf("expected the next change to be tomorrow's 07:00 (%s), got %s", want, status.NextChangeAt)
 	}
-	if status.NextAt != "07:00" || status.NextCap != 2 {
-		t.Errorf("expected the next change to be 07:00 -> 2, got %q -> %d", status.NextAt, status.NextCap)
+	if status.NextAt() != "07:00" || status.NextCap != 2 {
+		t.Errorf("expected the next change to be 07:00 -> 2, got %q -> %d", status.NextAt(), status.NextCap)
 	}
 }
 
@@ -538,8 +538,8 @@ func TestConcurrencyStatus_InZoneAcrossDST(t *testing.T) {
 	if want := time.Date(2026, 7, 6, 21, 0, 0, 0, time.UTC); !status.NextChangeAt.Equal(want) {
 		t.Errorf("expected the 07:00 AEST boundary at %s, got %s", want, status.NextChangeAt)
 	}
-	if status.NextAt != "07:00" || status.NextCap != 2 {
-		t.Errorf("expected 07:00 -> 2, got %q -> %d", status.NextAt, status.NextCap)
+	if status.NextAt() != "07:00" || status.NextCap != 2 {
+		t.Errorf("expected 07:00 -> 2, got %q -> %d", status.NextAt(), status.NextCap)
 	}
 	if status.Timezone != "Australia/Sydney" {
 		t.Errorf("expected the reported timezone to be Australia/Sydney, got %q", status.Timezone)
@@ -678,8 +678,8 @@ func TestConcurrencyStatus_SpringForwardBoundaryIsQuotedAtTheTransition(t *testi
 	if !status.NextChangeAt.Equal(transition) {
 		t.Errorf("expected the next change at the transition (%s), got %s", transition, status.NextChangeAt)
 	}
-	if status.NextAt != "03:00" {
-		t.Errorf("expected the next change quoted at 03:00, the first wall clock past the boundary, got %q", status.NextAt)
+	if status.NextAt() != "03:00" {
+		t.Errorf("expected the next change quoted at 03:00, the first wall clock past the boundary, got %q", status.NextAt())
 	}
 	if status.NextCap != 1 {
 		t.Errorf("expected the next change to the 02:30 entry's cap 1, got %d", status.NextCap)

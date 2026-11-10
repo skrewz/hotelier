@@ -2374,7 +2374,7 @@ func (s *Server) concurrencyStatus(now time.Time) map[string]interface{} {
 	var next interface{}
 	if status.HasNextChange() {
 		next = map[string]interface{}{
-			"at":       status.NextAt,
+			"at":       status.NextAt(),
 			"cap":      status.NextCap,
 			"timezone": status.Timezone,
 		}
