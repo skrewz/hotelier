@@ -14,6 +14,7 @@ package logstore
 
 import (
 	"bufio"
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -774,17 +775,42 @@ func (c *countingReader) Read(p []byte) (int, error) {
 	return n, err
 }
 
-// openTaskLog opens a task's trace for streaming, preferring the bzip2 file
-// the way ReadLogs does. A task with neither a present non-empty compressed
-// file nor a legacy uncompressed one simply has no logs, which is not an
-// error.
+// openTaskLog opens a task's trace for streaming, applying the same rule
+// as ReadLogs for which file is the trace: the bzip2 file when it reads,
+// the legacy uncompressed file when it does not. The bzip2 wrapper only
+// surfaces a corrupt stream on the first read, so the probe happens here:
+// a stream that starts (even empty) is the trace, one that does not is
+// unreadable and the legacy file takes over — the crash-mid-append state
+// ReadRawJSONL's docblock names. With no readable bzip2 stream and no
+// legacy file, the bzip2 error stands as ReadRawJSONL would report it: a
+// present-but-unreadable trace is not a missing one. A task with neither
+// file simply has no logs, which is not an error.
 func (s *LogStore) openTaskLog(date, taskID string) (io.ReadCloser, error) {
-	bz2Path := filepath.Join(s.dir, date, taskID, "logs.jsonl.bz2")
+	jsonlPath := filepath.Join(s.dir, date, taskID, "logs.jsonl")
+	bz2Path := jsonlPath + ".bz2"
+	var bz2Err error
 	if info, err := os.Stat(bz2Path); err == nil && info.Size() > 0 {
-		return openLogFile(bz2Path, true)
+		rc, err := openLogFile(bz2Path, true)
+		if err == nil {
+			probe := make([]byte, 1)
+			n, perr := rc.Read(probe)
+			if perr == nil || errors.Is(perr, io.EOF) {
+				if n > 0 {
+					return &compressReadCloser{Reader: io.MultiReader(bytes.NewReader(probe[:n]), rc), closer: rc}, nil
+				}
+				return rc, nil
+			}
+			rc.Close()
+			bz2Err = fmt.Errorf("read log file %s: %w", bz2Path, perr)
+		} else {
+			bz2Err = fmt.Errorf("read log file %s: %w", bz2Path, err)
+		}
 	}
-	rc, err := openLogFile(filepath.Join(s.dir, date, taskID, "logs.jsonl"), false)
+	rc, err := openLogFile(jsonlPath, false)
 	if os.IsNotExist(err) {
+		if bz2Err != nil {
+			return nil, bz2Err
+		}
 		return io.NopCloser(strings.NewReader("")), nil
 	}
 	return rc, err

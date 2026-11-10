@@ -269,3 +269,52 @@ func TestSearchDates_KeepsMatchesReadBeforeACorruptLine(t *testing.T) {
 		t.Error("expected the corrupt line to be reported")
 	}
 }
+
+// TestSearchDates_FallsBackToLegacyLogWhenBzip2Unreadable verifies the
+// search agrees with ReadLogs about which file is a task's trace when a
+// crash left a corrupt-but-non-empty bzip2 beside an intact legacy file
+// (the state ReadRawJSONL's docblock names). ReadLogs prefers the bzip2
+// only when it reads; so does the streaming scan, and the legacy entries
+// come back rather than an empty partial answer.
+func TestSearchDates_FallsBackToLegacyLogWhenBzip2Unreadable(t *testing.T) {
+	s := mustStore(t)
+	taskDir := filepath.Join(s.dir, "2026-05-10", "task-a")
+	if err := os.MkdirAll(taskDir, 0o755); err != nil {
+		t.Fatalf("create task dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(taskDir, "logs.jsonl.bz2"),
+		[]byte("not a bzip2 stream at all"), 0o644); err != nil {
+		t.Fatalf("write corrupt bzip2: %v", err)
+	}
+	f, err := os.Create(filepath.Join(taskDir, "logs.jsonl"))
+	if err != nil {
+		t.Fatalf("create legacy log: %v", err)
+	}
+	for _, line := range []string{"clean", "needle legacy"} {
+		raw, err := json.Marshal(Entry{TaskID: "task-a", Line: line, Timestamp: dayOne})
+		if err != nil {
+			t.Fatalf("marshal entry: %v", err)
+		}
+		if _, err := f.Write(append(raw, '\n')); err != nil {
+			t.Fatalf("write legacy entry: %v", err)
+		}
+	}
+	if err := f.Close(); err != nil {
+		t.Fatalf("close legacy log: %v", err)
+	}
+
+	res := s.SearchDates([]string{"2026-05-10"}, "needle")
+	if len(res.Matches) != 1 || res.Matches[0].Line != "needle legacy" {
+		t.Fatalf("expected the legacy trace's match, got %+v", res.Matches)
+	}
+	if len(res.Errors) != 0 {
+		t.Errorf("expected no errors once the intact legacy file answered, got %v", res.Errors)
+	}
+	entries, err := s.ReadLogs("2026-05-10", "task-a")
+	if err != nil {
+		t.Fatalf("ReadLogs: %v", err)
+	}
+	if len(entries) != 2 {
+		t.Errorf("the endpoints disagree about the trace: ReadLogs read %d entries, the search matched %d of them", len(entries), len(res.Matches))
+	}
+}
