@@ -333,7 +333,11 @@
         .task-pref-row { display: flex; flex-wrap: wrap; gap: 0.375rem; padding: 0.5rem 1rem; background: #0f172a; border-bottom: 1px solid #334155; align-items: center; }
         .task-pref-input { flex: 1; min-width: 8rem; background: #1e293b; border: 1px solid #334155; border-radius: 0.375rem; color: #e2e8f0; padding: 0.3rem 0.5rem; font-size: 0.8rem; }
         .task-pref-input:focus { outline: none; border-color: #38bdf8; }
-        .task-pref-applied { background: #1e3a5f; color: #38bdf8; border-color: #38bdf8; }
+        /* .btn:hover carries a pseudo-class and so outranks a lone class —
+           and the cursor is on this button precisely when the operator
+           checks whether the backend is set. Repeating the hover selector
+           keeps the mark visible under the cursor. */
+        .task-pref-applied, .task-pref-applied:hover { background: #1e3a5f; color: #38bdf8; }
 
         /* Pending-expand button — shown below task list when pending tasks are hidden */
         .pending-expand-btn { display: block; width: 100%; margin-top: 0.5rem; padding: 0.6rem 1rem;
@@ -549,9 +553,11 @@
         };
 
         // Task preference filter (issue #281). prefFilterText is the live
-        // client-side substring filter, persisted to the address bar as
-        // #filter=<encoded>; prefFilterApplied is the filter the backend is
-        // currently acting on, read from /api/tasks/filter.
+        // client-side substring filter, trimmed once as it enters state and
+        // persisted to the address bar as #filter=<encoded>. The fragment is
+        // the field's only persistence path. prefFilterApplied is the filter
+        // the last Prioritise submitted, i.e. what the backend is acting on;
+        // it lives in the page alone.
         let prefFilterText = '';
         let prefFilterApplied = '';
 
@@ -851,25 +857,28 @@
         // substring and is persisted to the address bar as a #filter=...
         // fragment. "Prioritise" sends it to the backend, where matching
         // pending tasks drain before the rest until none are left (then
-        // normal queue semantics apply). "Clear" clears field and backend.
+        // normal queue semantics apply). "Clear" clears field, fragment and
+        // backend.
         // =====================================================================
 
         // matchesPrefFilter reports whether a task survives the client-side
-        // substring filter. The fields searched mirror the backend's: repo,
-        // title, prompt, persona and tags.
+        // substring filter. The fields searched are the ones the backend
+        // weighs (queue.matchesPreference): repo, title, prompt, persona and
+        // tags.
         function matchesPrefFilter(t) {
             if (!prefFilterText) return true;
             const needle = prefFilterText.toLowerCase();
-            const haystack = [t.id, t.title || '', t.prompt || '', t.repo_ref || '', t.persona || '', (t.tags || []).join(' ')].join(' ').toLowerCase();
+            const haystack = [t.title || '', t.prompt || '', t.repo_ref || '', t.persona || '', (t.tags || []).join(' ')].join(' ').toLowerCase();
             return haystack.includes(needle);
         }
 
-        // readPrefFilterHash returns the #filter=... fragment, or '' when the
-        // address bar carries none (or one that cannot be decoded).
+        // readPrefFilterHash returns the #filter=... fragment, trimmed as
+        // every other path into this value is, or '' when the address bar
+        // carries none (or one that cannot be decoded).
         function readPrefFilterHash() {
             if (!location.hash.startsWith('#filter=')) return '';
             try {
-                return decodeURIComponent(location.hash.slice('#filter='.length));
+                return decodeURIComponent(location.hash.slice('#filter='.length)).trim();
             } catch (e) {
                 return '';
             }
@@ -885,7 +894,8 @@
         }
 
         // syncPrefFilterFromURL adopts the field value from the address bar
-        // (initial load and hash navigation).
+        // (initial load and hash navigation), the field's only persistence
+        // path.
         function syncPrefFilterFromURL() {
             const v = readPrefFilterHash();
             if (v !== prefFilterText) {
@@ -906,41 +916,28 @@
                 : 'Send this filter to the backend so matching tasks are prioritised';
         }
 
-        // syncPrefFilterFromBackend reads the live backend filter on load.
-        // When the address bar carries no fragment, the field seeds from the
-        // backend so an operator opening the dashboard sees what is in force.
-        async function syncPrefFilterFromBackend() {
-            try {
-                const res = await fetch('/api/tasks/filter');
-                const data = await res.json();
-                prefFilterApplied = data.filter || '';
-                if (!prefFilterText && prefFilterApplied) {
-                    prefFilterText = prefFilterApplied;
-                    const el = document.getElementById('task-pref-filter');
-                    if (el) el.value = prefFilterText;
-                    updatePrefFilterURL();
-                }
-            } catch (e) {
-                console.error('preference filter sync failed:', e);
-            }
-            updatePrefFilterControls();
-        }
-
+        // The field is trimmed here and nowhere else, so the list filter and
+        // the value the backend is handed are the same string: a stray space
+        // must not make the dashboard hide the tasks the queue drains first.
         function onPrefFilterInput(value) {
-            prefFilterText = value;
+            prefFilterText = value.trim();
             updatePrefFilterURL();
             fetch('/api/tasks').then(r => r.json()).then(data => renderTasks(data));
         }
 
         async function applyPrefFilter() {
-            const el = document.getElementById('task-pref-filter');
-            const value = (el ? el.value : prefFilterText).trim();
-            if (!value) return; // the Clear button owns the clear path
+            // An empty field means "no filter", so Prioritise takes the
+            // route Clear takes rather than swallowing the click and leaving
+            // the button describing a filter it no longer holds.
+            if (!prefFilterText) {
+                await clearPrefFilter();
+                return;
+            }
             try {
                 const res = await fetch('/api/tasks/filter', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ filter: value })
+                    body: JSON.stringify({ filter: prefFilterText })
                 });
                 if (!res.ok) throw new Error('HTTP ' + res.status);
                 const data = await res.json();
@@ -958,19 +955,21 @@
             if (el) el.value = '';
             prefFilterText = '';
             updatePrefFilterURL();
-            if (prefFilterApplied !== '') {
-                try {
-                    const res = await fetch('/api/tasks/filter', {
-                        method: 'POST',
-                        headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({ filter: '' })
-                    });
-                    if (!res.ok) throw new Error('HTTP ' + res.status);
-                    prefFilterApplied = '';
-                } catch (e) {
-                    alert('Failed to clear the preference filter: ' + e.message);
-                    return;
-                }
+            try {
+                // Always post the clear, whether or not this page believes a
+                // filter is live: the applied mark is page state, so a page
+                // reloaded from a fragment would otherwise skip the one
+                // request that stops the backend prioritising the old filter.
+                const res = await fetch('/api/tasks/filter', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ filter: '' })
+                });
+                if (!res.ok) throw new Error('HTTP ' + res.status);
+                prefFilterApplied = '';
+            } catch (e) {
+                alert('Failed to clear the preference filter: ' + e.message);
+                return;
             }
             updatePrefFilterControls();
             refresh();
@@ -3298,7 +3297,6 @@
             syncPrefFilterFromURL();
             connectWS();
             refreshInterval = setInterval(refresh, 5000);
-            await syncPrefFilterFromBackend();
             await refresh();
             await router.dispatch(true);
             updatePrefFilterURL();

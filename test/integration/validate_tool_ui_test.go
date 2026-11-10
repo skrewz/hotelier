@@ -459,7 +459,6 @@ func TestValidateToolUI(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/ws", srv.HandleWebSocket)
 	mux.HandleFunc("/api/tasks", srv.HandleTasks)
-	mux.HandleFunc("/api/tasks/filter", srv.HandleTaskFilter)
 	mux.HandleFunc("/api/tasks/", srv.HandleTaskDetail)
 	mux.HandleFunc("/api/guests", srv.HandleGuests)
 	mux.HandleFunc("/api/guests/", srv.HandleGuestDetail)

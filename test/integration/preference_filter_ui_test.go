@@ -86,13 +86,16 @@ func TestPreferenceFilterUI(t *testing.T) {
 	specs := []taskSpec{
 		// Created in this order so FIFO without a filter puts pref-miss
 		// first, and the filter's effect on the order is observable.
-		{"pref-miss", "Unrelated chore", "https://example.com/other/repo.git"},
-		{"pref-hit", "Polish the widget", "https://example.com/org/s-habit-tracker.git"},
+		{"pref-miss", "Unrelated chore", "https://example.com/org/other-repo.git"},
+		// The needle below appears in this task's repo_ref alone, so the
+		// client-side list filter and the backend match exercise the same
+		// field list.
+		{"pref-hit", "Polish the widget", "https://example.com/org/pref-hit-repo.git"},
 	}
 	for i, s := range specs {
 		body, _ := json.Marshal(map[string]interface{}{
 			"id":       s.id,
-			"prompt":   "preference filter fixture " + s.id,
+			"prompt":   "preference filter fixture",
 			"title":    s.title,
 			"repo_ref": s.repoRef,
 			// Stagger creation so FIFO order is deterministic and, absent
@@ -134,7 +137,17 @@ func TestPreferenceFilterUI(t *testing.T) {
 	}
 	res.Body.Close()
 
-	screenshotDir := t.TempDir()
+	// Allow overriding the screenshot directory via env var for manual
+	// inspection. When set, screenshots survive t.TempDir() cleanup.
+	var screenshotDir string
+	if overrideDir := os.Getenv("SCREENSHOT_DIR"); overrideDir != "" {
+		screenshotDir = overrideDir
+	} else {
+		screenshotDir = t.TempDir()
+	}
+	if err := os.MkdirAll(screenshotDir, 0o755); err != nil {
+		t.Fatalf("create screenshot dir: %v", err)
+	}
 	script := fmt.Sprintf(`
 const { chromium } = require('playwright');
 (async () => {
@@ -159,10 +172,10 @@ const { chromium } = require('playwright');
   }
 
   // Typing filters the list client-side and persists to the address bar.
-  await page.fill('#task-pref-filter', 's-habit');
+  await page.fill('#task-pref-filter', 'pref-hit');
   await page.waitForFunction(() => document.querySelectorAll('#task-list .task-item').length === 1, { timeout: 10000 });
   const hash = await page.evaluate(() => location.hash);
-  if (hash !== '#filter=s-habit') {
+  if (hash !== '#filter=pref-hit') {
     throw new Error('expected the filter in the address bar, got: ' + hash);
   }
   const shown = await page.$eval('#task-list .task-item .task-id', e => e.textContent);
@@ -171,47 +184,65 @@ const { chromium } = require('playwright');
   }
   await page.screenshot({ path: screenshotDir + '/01-client-filter.png', fullPage: true });
 
-  // Prioritise pushes the filter to the backend.
+  // Prioritise pushes the filter to the backend. The endpoint is a write,
+  // so the backend's side of the bargain is read where it is observable:
+  // the order GET /api/tasks comes back in.
   await page.click('#task-pref-apply');
-  await page.waitForFunction(async () => {
-    const res = await fetch('/api/tasks/filter');
-    const data = await res.json();
-    return data.filter === 's-habit';
-  }, { timeout: 10000 }).catch(async () => {
-    const res = await fetch(baseURL + '/api/tasks/filter');
-    const data = await res.json();
-    throw new Error('backend filter not applied, got: ' + data.filter);
-  });
-  const applied = await page.$eval('#task-pref-apply', e => e.classList.contains('task-pref-applied'));
-  if (!applied) {
-    throw new Error('expected the Prioritise button to show the live backend filter');
+  await page.waitForFunction(() => document.getElementById('task-pref-apply').classList.contains('task-pref-applied'), { timeout: 10000 });
+  // The mark is the only thing on screen saying the backend is set, so
+  // assert it renders — .btn:hover would otherwise silently outrank it.
+  const appliedBg = await page.$eval('#task-pref-apply', e => getComputedStyle(e).backgroundColor);
+  if (appliedBg !== 'rgb(30, 58, 95)') {
+    throw new Error('expected the applied button to be visibly marked, got background: ' + appliedBg);
+  }
+  const drainOrder = await page.evaluate(async () => (await fetch('/api/tasks')).json().then(d => d.tasks.map(t => t.id)));
+  if (!drainOrder[0].includes('pref-hit')) {
+    throw new Error('expected the backend to drain the matching task first, got: ' + JSON.stringify(drainOrder));
   }
   await page.screenshot({ path: screenshotDir + '/02-backend-applied.png', fullPage: true });
 
-  // A reload restores the field from the fragment.
+  // Select-all-and-delete, then Prioritise: an empty field means "no
+  // filter", so the click must take the clear route rather than be
+  // swallowed with the button still marking a filter the field no longer
+  // holds.
+  await page.fill('#task-pref-filter', '');
+  await page.click('#task-pref-apply');
+  await page.waitForFunction(() => !document.getElementById('task-pref-apply').classList.contains('task-pref-applied'), { timeout: 10000 });
+  const plainBg = await page.$eval('#task-pref-apply', e => getComputedStyle(e).backgroundColor);
+  if (plainBg === 'rgb(30, 58, 95)') {
+    throw new Error('expected the applied mark to be gone once the filter was cleared');
+  }
+  await page.waitForFunction(() => document.querySelectorAll('#task-list .task-item').length === 2, { timeout: 10000 });
+  await page.screenshot({ path: screenshotDir + '/02b-empty-prioritise-clears.png', fullPage: true });
+
+  // A reload restores the field from the fragment. Which filter the backend
+  // is acting on is page state, not persisted state, so the button starts
+  // unmarked again — the fragment, not the backend, is the persistence path.
+  await page.fill('#task-pref-filter', 'pref-hit');
+  await page.click('#task-pref-apply');
+  await page.waitForFunction(() => document.getElementById('task-pref-apply').classList.contains('task-pref-applied'), { timeout: 10000 });
   await page.reload();
   await page.evaluate(() => toggleTaskFilter('PENDING'));
   await page.waitForFunction(() => document.querySelectorAll('#task-list .task-item').length === 1, { timeout: 10000 });
   const seeded = await page.$eval('#task-pref-filter', e => e.value);
-  if (seeded !== 's-habit') {
+  if (seeded !== 'pref-hit') {
     throw new Error('expected the field to seed from the fragment, got: ' + seeded);
+  }
+  const relit = await page.$eval('#task-pref-apply', e => e.classList.contains('task-pref-applied'));
+  if (relit) {
+    throw new Error('expected the applied mark to be page state, not re-read on load');
   }
 
   // Clear resets field, fragment and backend.
   await page.click('text=✖ Clear');
-  await page.waitForFunction(async () => {
-    const res = await fetch('/api/tasks/filter');
-    const data = await res.json();
-    return data.filter === '';
-  }, { timeout: 10000 }).catch(async () => {
-    const res = await fetch(baseURL + '/api/tasks/filter');
-    const data = await res.json();
-    throw new Error('backend filter not cleared, got: ' + data.filter);
-  });
   await page.waitForFunction(() => document.querySelectorAll('#task-list .task-item').length === 2, { timeout: 10000 });
   const clearedHash = await page.evaluate(() => location.hash);
   if (clearedHash !== '') {
     throw new Error('expected the fragment to be cleared, got: ' + clearedHash);
+  }
+  const drainOrderAfterClear = await page.evaluate(async () => (await fetch('/api/tasks')).json().then(d => d.tasks.map(t => t.id)));
+  if (!drainOrderAfterClear[0].includes('pref-miss')) {
+    throw new Error('expected the backend to fall back to FIFO once cleared, got: ' + JSON.stringify(drainOrderAfterClear));
   }
   await page.screenshot({ path: screenshotDir + '/03-cleared.png', fullPage: true });
 
