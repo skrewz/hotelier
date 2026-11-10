@@ -66,11 +66,10 @@ type LogStore struct {
 	dir string
 	mu  sync.Mutex
 
-	// searchBudget is the scanned-bytes budget SearchDates enforces.
-	// It is MaxSearchScannedBytes for every store New returns; tests
-	// that need to exhaust it override the field on their own instance
-	// instead of rewriting a shared global, so the bound the README
-	// quotes is always the one production code consults.
+	// searchBudget is the scanned-bytes budget SearchDates enforces. New
+	// returns every store with MaxSearchScannedBytes; tests that need to
+	// exhaust it override the field on their own instance, so the bound the
+	// README quotes is always the one production code consults.
 	searchBudget int64
 }
 
