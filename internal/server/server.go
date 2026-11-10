@@ -2691,8 +2691,9 @@ const (
 // the effect is global and lasting, the route is also the first place a
 // forged browser request would pay off, so it applies the fetch-metadata
 // check in rejectsCrossSite before touching the queue: a request a
-// browser attributes to another site is refused with 403 whatever its
-// content type or submission style. The README's preference-filter
+// browser cannot attribute to this server's own origin — scheme and host
+// alike — is refused with 403 whatever its content type or submission
+// style. The README's preference-filter
 // section states what all this means operationally.
 func (s *Server) HandleTaskFilter(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
@@ -2740,18 +2741,50 @@ func (s *Server) HandleTaskFilter(w http.ResponseWriter, r *http.Request) {
 // content-type sniffing is not a defence. The check follows the
 // fetch-metadata policy OWASP recommends for this case (see
 // https://cheatsheetseries.owasp.org/cheatsheets/Cross_Site_Request_Forgery_Prevention_Cheat_Sheet.html#fetch-metadata-based-origin-validation):
-// a browser-supplied Origin must name this server's own host, and a
-// request declaring Sec-Fetch-Site: cross-site is refused even if the
-// Origin is withheld. Browsers always supply one of the two on a POST.
+// a browser-supplied Origin must name this server's own *origin* — scheme
+// included, not just the host — and a request declaring
+// Sec-Fetch-Site: cross-site is refused even if the Origin is withheld.
+// Browsers always supply one of the two on a POST.
+//
+// The scheme matters because "site" in fetch-metadata terms is
+// scheme-blind: a page served over plain HTTP under this server's own
+// hostname is "same-site" to it (see
+// https://developer.mozilla.org/en-US/docs/Web/HTTP/Reference/Headers/Sec-Fetch-Site),
+// so a host-only Origin match would let such a page forge the write
+// through the Sec-Fetch-Site fallback. Binding the scheme closes that
+// downgrade path.
 // Non-browser clients (curl, service integrations, this server's own
 // guests) send neither header and pass through: the route stays
 // unauthenticated, as every route on this listener is.
 func rejectsCrossSite(r *http.Request) bool {
 	if origin := r.Header.Get("Origin"); origin != "" {
 		u, err := url.Parse(origin)
-		return err != nil || !strings.EqualFold(u.Host, r.Host)
+		if err != nil {
+			return true
+		}
+		return !strings.EqualFold(u.Host, r.Host) || !strings.EqualFold(u.Scheme, requestScheme(r))
 	}
 	return r.Header.Get("Sec-Fetch-Site") == "cross-site"
+}
+
+// requestScheme names the scheme the request arrived on: https when this
+// server terminated TLS itself, when a TLS-terminating edge says so with
+// X-Forwarded-Proto (first hop wins), or plain http otherwise. The server
+// listens for TLS itself nowhere, so behind no edge that "otherwise" is the
+// whole story; X-Forwarded-Proto only lets a fronting proxy state the
+// client-facing scheme honestly. Forgery of that header by a non-browser
+// client changes nothing — such a client can withhold Origin entirely and
+// be judged by the Sec-Fetch-Site branch anyway.
+func requestScheme(r *http.Request) string {
+	if r.TLS != nil {
+		return "https"
+	}
+	if proto := r.Header.Get("X-Forwarded-Proto"); proto != "" {
+		if first, _, _ := strings.Cut(proto, ","); strings.EqualFold(strings.TrimSpace(first), "https") {
+			return "https"
+		}
+	}
+	return "http"
 }
 
 // HandleTaskSearch handles GET /api/tasks/search: a substring search over

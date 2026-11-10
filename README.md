@@ -340,11 +340,15 @@ unauthenticated too, and it is the one route that changes scheduling for
 everyone at once — a single `POST` reorders the pending drain for every
 guest and every dashboard, and stands until someone clears it. Because
 that effect is global and lasting, the endpoint also refuses forged
-browser requests: a request whose `Origin` names another host, or which
-reports `Sec-Fetch-Site: cross-site`, is answered `403`, so a third-party
-page an operator happens to visit cannot bend or reset the order from the
-operator's own browser. Non-browser clients carry neither header and are
-judged as before. It leaves no
+browser requests: a request whose `Origin` names another *origin* — scheme
+or host differing from this server's own — or which reports
+`Sec-Fetch-Site: cross-site`, is answered `403`, so neither a third-party
+page an operator happens to visit nor a page served over plain HTTP under
+this server's own hostname can bend or reset the order from the operator's
+own browser (in fetch-metadata terms "site" is scheme-blind, so the Origin
+match binds the scheme too: https arrives only where TLS was terminated —
+here or at an edge announcing it with `X-Forwarded-Proto`). Non-browser
+clients carry neither header and are judged as before. It leaves no
 mark on any task, and the applied state is not broadcast to other open
 dashboards (a reload there restores the field from the fragment but not
 the applied mark, so the page cannot tell them the order is bent), so the one log

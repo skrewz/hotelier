@@ -2,6 +2,7 @@ package server
 
 import (
 	"bytes"
+	"crypto/tls"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -87,14 +88,24 @@ func TestHandleTaskFilter_RejectsCrossSiteRequests(t *testing.T) {
 		name   string
 		origin string
 		sfs    string
+		xfp    string
+		tls    bool
 		wantOK bool
 	}{
-		{"hostile origin", "https://evil.example", "", false},
-		{"undeclarable origin", "null", "", false},
-		{"cross-site fetch metadata", "", "cross-site", false},
-		{"same-origin origin", "http://example.com", "", true},
-		{"same-origin fetch metadata", "", "same-origin", true},
-		{"no fetch metadata (non-browser client)", "", "", true},
+		{"hostile origin", "https://evil.example", "", "", false, false},
+		{"undeclarable origin", "null", "", "", false, false},
+		{"cross-site fetch metadata", "", "cross-site", "", false, false},
+		{"same-origin origin", "http://example.com", "", "", false, true},
+		{"same-origin fetch metadata", "", "same-origin", "", false, true},
+		{"no fetch metadata (non-browser client)", "", "", "", false, true},
+		// "Site" in fetch-metadata terms is scheme-blind, so a same-host
+		// origin differing in scheme must not pass on the host match alone.
+		{"https origin over plain http", "https://example.com", "", "", false, false},
+		{"http origin on a TLS request", "http://example.com", "", "", true, false},
+		// The TLS-terminating-edge case: X-Forwarded-Proto states the
+		// client-facing scheme, and the Origin must agree with it.
+		{"https origin behind a TLS edge", "https://example.com", "", "https", false, true},
+		{"http origin behind a TLS edge", "http://example.com", "", "https", false, false},
 	} {
 		req := httptest.NewRequest(http.MethodPost, "/api/tasks/filter", strings.NewReader(`{"filter":"widget"}`))
 		if tc.origin != "" {
@@ -102,6 +113,12 @@ func TestHandleTaskFilter_RejectsCrossSiteRequests(t *testing.T) {
 		}
 		if tc.sfs != "" {
 			req.Header.Set("Sec-Fetch-Site", tc.sfs)
+		}
+		if tc.xfp != "" {
+			req.Header.Set("X-Forwarded-Proto", tc.xfp)
+		}
+		if tc.tls {
+			req.TLS = &tls.ConnectionState{}
 		}
 		w := httptest.NewRecorder()
 		srv.HandleTaskFilter(w, req)
