@@ -318,3 +318,49 @@ func TestSearchDates_FallsBackToLegacyLogWhenBzip2Unreadable(t *testing.T) {
 		t.Errorf("the endpoints disagree about the trace: ReadLogs read %d entries, the search matched %d of them", len(entries), len(res.Matches))
 	}
 }
+
+// TestSearchDates_KeepsPendingMatchWhenTheBudgetStopsTheScan pins the other
+// half of the budget path: the hits already read are handed back even when
+// their after-context had not streamed in. The trace is laid out so the
+// budget can only run out on its last line — the one match is still
+// pending when the scan stops — and without the budget path's flush the
+// result would report truncated with nothing, describing the hit before
+// the cut as if it too had been lost past it.
+func TestSearchDates_KeepsPendingMatchWhenTheBudgetStopsTheScan(t *testing.T) {
+	s := mustStore(t)
+
+	// Filler first: its exact decompressed size is the byte count the
+	// scan logs before the matching line even starts, so a budget that
+	// sits above it — but below filler plus the oversized last line —
+	// can only be exhausted by that last line, whatever chunking the
+	// buffered read happens to use.
+	var fillerBytes int64
+	for i := range 100 {
+		line := fmt.Sprintf("filler %03d %s", i, strings.Repeat(".", 200))
+		raw, err := json.Marshal(Entry{TaskID: "task-a", Line: line, Timestamp: dayOne.Add(time.Duration(i) * time.Second)})
+		if err != nil {
+			t.Fatalf("marshal filler: %v", err)
+		}
+		fillerBytes += int64(len(raw)) + 1
+		appendLines(t, s, "task-a", dayOne.Add(time.Duration(i)*time.Second), []string{line})
+	}
+
+	lastLine := "needle at the budget's edge " + strings.Repeat("y", 20000)
+	appendLines(t, s, "task-a", dayOne.Add(100*time.Second), []string{lastLine})
+
+	s.searchBudget = fillerBytes + 5000
+
+	res := s.SearchDates([]string{"2026-05-10"}, "needle")
+	if !res.Truncated {
+		t.Fatal("expected the oversized last line to exhaust the budget and truncate the scan")
+	}
+	if len(res.Errors) != 0 {
+		t.Fatalf("expected no errors, got %v", res.Errors)
+	}
+	if len(res.Matches) != 1 {
+		t.Fatalf("expected the one match read before the budget cut to come back, got %d", len(res.Matches))
+	}
+	if m := res.Matches[0]; m.Line != lastLine || len(m.ContextAfter) != 0 {
+		t.Errorf("expected the pending match with no after-context streamed in, got %+v", m)
+	}
+}
