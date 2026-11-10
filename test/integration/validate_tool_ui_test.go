@@ -3936,6 +3936,53 @@ const { chromium } = require('playwright');
   await takeScreenshot('13f-search-url-window');
   page.off('request', logSearchRequest);
 
+  // Only the newest search may paint the results, because a search is the one
+  // request here that can take seconds — the server walks up to 14 days of
+  // traces — so two really can be in flight. Nothing else in this suite proves
+  // it: every other search is issued one at a time, so deleting the guards
+  // would stay green. Delay only the first response, fire both searches, and
+  // require the pane, its header and the field to describe the second one even
+  // after the slow first one lands.
+  let firstSearchDelayed = true;
+  await page.route('**/api/tasks/search**', async (route) => {
+    const slow = firstSearchDelayed;
+    firstSearchDelayed = false;
+    if (slow) await new Promise(r => setTimeout(r, 3000));
+    await route.continue();
+  });
+  await page.goto(baseURL + '/tasks');
+  await page.waitForLoadState('networkidle');
+  await page.evaluate(() => {
+    const tab = Array.from(document.querySelectorAll('.tab'))
+      .find(t => t.textContent.trim() === 'Search');
+    tab.click();
+  });
+  await page.fill('#search-query', failedTaskId);
+  await clickEl('#search-go');            // the slow one
+  await page.fill('#search-query', completedTaskId);
+  await clickEl('#search-go');            // the newest one
+  await searchSettled();
+  // Give the delayed response time to arrive and, if the guards are gone, to
+  // overwrite the pane with a search the user already replaced.
+  await page.waitForTimeout(4000);
+  const newestWins = await page.evaluate((needle) => ({
+    rows: document.querySelectorAll('#search-results .search-match').length,
+    superseded: Array.from(document.querySelectorAll('#search-results .search-match'))
+      .filter(r => r.dataset.taskId !== needle).length,
+    note: document.querySelector('#search-results .search-note').textContent,
+    query: document.getElementById('search-query').value,
+  }), completedTaskId);
+  if (newestWins.rows === 0) fail('the newest search should render its matches');
+  if (newestWins.superseded !== 0) {
+    fail('a superseded search must not paint the results, ' + newestWins.superseded + ' row(s) came from the earlier one');
+  }
+  if (!newestWins.note.includes(completedTaskId) || newestWins.query !== completedTaskId) {
+    fail('the results header and the field must describe the newest search, header read: ' + newestWins.note);
+  }
+  console.log('PASS: the newest search owns the results pane');
+  await takeScreenshot('13f-search-newest-wins');
+  await page.unroute('**/api/tasks/search**');
+
   // Panel state: leaving a search for another view must not leave two panels
   // visible at once. This is the reviewer-reachable path — Back from a
   // search to an earlier task detail — driven without touching the DOM.
