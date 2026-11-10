@@ -794,10 +794,13 @@ func (o *Orchestrator) capErrorInternal(taskID string) error {
 		taskID, o.inFlightCountInternal(), o.concurrencyCap)
 }
 
-// PendingHeldByCapCount reports how many PENDING tasks there is no room for
-// under the cap at this instant (issue #250): the pending queue beyond the
-// room the cap leaves. It is the number that tells "the queue is held behind
-// the cap" apart from "the queue is empty".
+// pendingHeldByCapCountInternal reports how many PENDING tasks there is no
+// room for under the cap at this instant (issue #250): the pending queue
+// beyond the room the cap leaves. It is the number that tells "the queue is
+// held behind the cap" apart from "the queue is empty", and the third
+// return of ConcurrencyCounts is its only entry point — reading it outside
+// the cap and the in-flight count would state a fact measured against a
+// cap the same response might not name.
 //
 // The count is arithmetic on the cap and the live in-flight and pending
 // counts, not a per-task verdict on why each task waits. Deriving it from
@@ -809,16 +812,7 @@ func (o *Orchestrator) capErrorInternal(taskID string) error {
 //
 // In flight can exceed the cap right after a boundary drops below the running
 // count; the room is then clamped to zero and the answer is the whole queue,
-// never more than the queue holds.
-func (o *Orchestrator) PendingHeldByCapCount() int {
-	o.mu.Lock()
-	defer o.mu.Unlock()
-
-	return o.pendingHeldByCapCountInternal()
-}
-
-// pendingHeldByCapCountInternal is PendingHeldByCapCount for callers that
-// already hold o.mu.
+// never more than the queue holds. The caller must hold o.mu.
 func (o *Orchestrator) pendingHeldByCapCountInternal() int {
 	// An unlimited cap holds nothing back, whatever the queue looks like.
 	if o.concurrencyCap < 0 {
