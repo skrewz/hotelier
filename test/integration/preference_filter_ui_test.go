@@ -232,6 +232,25 @@ const { chromium } = require('playwright');
   if (relit) {
     throw new Error('expected the applied mark to be page state, not re-read on load');
   }
+  // The mark being gone must not read as "no filter applied": the page
+  // cannot know after a reload, and the title is what says so.
+  const relitTitle = await page.$eval('#task-pref-apply', e => e.title);
+  if (!relitTitle.includes('unknown')) {
+    throw new Error('expected the button title to flag the unknown applied state after reload, got: ' + relitTitle);
+  }
+
+  // Router navigation must not strip the field's persistence path: clicking
+  // a task from the filtered list changes the path, but the fragment must
+  // survive the push and a reload from there must still seed the field.
+  await page.click('#task-list .task-item');
+  await page.waitForFunction(() => location.pathname.startsWith('/task/') && location.hash === '#filter=pref-hit', { timeout: 10000 });
+  await page.screenshot({ path: screenshotDir + '/03-task-click-keeps-fragment.png', fullPage: true });
+  await page.reload();
+  await page.waitForFunction(() => document.getElementById('task-pref-filter').value === 'pref-hit', { timeout: 10000 });
+  // Back to the task list for the Clear step below.
+  await page.goto(baseURL + '/tasks#filter=pref-hit');
+  await page.evaluate(() => toggleTaskFilter('PENDING'));
+  await page.waitForFunction(() => document.querySelectorAll('#task-list .task-item').length === 1, { timeout: 10000 });
 
   // Clear resets field, fragment and backend.
   await page.click('text=✖ Clear');
@@ -244,7 +263,7 @@ const { chromium } = require('playwright');
   if (!drainOrderAfterClear[0].includes('pref-miss')) {
     throw new Error('expected the backend to fall back to FIFO once cleared, got: ' + JSON.stringify(drainOrderAfterClear));
   }
-  await page.screenshot({ path: screenshotDir + '/03-cleared.png', fullPage: true });
+  await page.screenshot({ path: screenshotDir + '/04-cleared.png', fullPage: true });
 
   if (errors.length) {
     throw new Error('page errors observed: ' + errors.join(' | '));

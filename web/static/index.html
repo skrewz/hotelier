@@ -566,10 +566,15 @@
             // When routerReplaceMode is true (initial dispatch), uses
             // replaceState instead to avoid polluting the history stack.
             push(path) {
+                // The #filter=... fragment is the preference field's only
+                // persistence path (issue #281), and router pushes own the
+                // path half of the URL — so the push re-appends the current
+                // fragment and path and fragment survive each other.
+                const url = path + prefFilterFragment();
                 if (routerReplaceMode) {
-                    history.replaceState({ path }, '', path);
+                    history.replaceState({ path }, '', url);
                 } else {
-                    history.pushState({ path }, '', path);
+                    history.pushState({ path }, '', url);
                 }
             },
 
@@ -884,10 +889,18 @@
             }
         }
 
+        // prefFilterFragment renders the field's persistence path: the
+        // #filter=... fragment, or '' when the field is empty. The router
+        // and the field share this one rendering so a push cannot strip the
+        // fragment and an edit cannot strip the path.
+        function prefFilterFragment() {
+            return prefFilterText ? '#filter=' + encodeURIComponent(prefFilterText) : '';
+        }
+
         // updatePrefFilterURL mirrors the field into the address bar without
         // adding a history entry per keystroke.
         function updatePrefFilterURL() {
-            const frag = prefFilterText ? '#filter=' + encodeURIComponent(prefFilterText) : '';
+            const frag = prefFilterFragment();
             if (location.hash !== frag) {
                 history.replaceState(null, '', location.pathname + frag);
             }
@@ -903,6 +916,11 @@
                 const el = document.getElementById('task-pref-filter');
                 if (el) el.value = v;
             }
+            // Seeding from the fragment must also refresh the controls: the
+            // applied mark is page state, so a page seeded this way (reload,
+            // second tab) needs its button to say the applied state is
+            // unknown rather than imply no filter is live.
+            updatePrefFilterControls();
         }
 
         // updatePrefFilterControls marks the Prioritise button while the
@@ -911,9 +929,17 @@
             const btn = document.getElementById('task-pref-apply');
             if (!btn) return;
             btn.classList.toggle('task-pref-applied', prefFilterApplied !== '');
-            btn.title = prefFilterApplied !== ''
-                ? 'Backend is prioritising tasks matching: ' + prefFilterApplied
-                : 'Send this filter to the backend so matching tasks are prioritised';
+            if (prefFilterApplied !== '') {
+                btn.title = 'Backend is prioritising tasks matching: ' + prefFilterApplied;
+            } else if (prefFilterText !== '') {
+                // The applied mark is page state and nothing reads it back,
+                // so a page seeded from the fragment cannot tell whether the
+                // backend is still acting on this filter. Say so — the one
+                // log line naming the filter is the record.
+                btn.title = 'Filter in the field; whether the backend is applying it is unknown on this page — check the server log, or press Prioritise';
+            } else {
+                btn.title = 'Send this filter to the backend so matching tasks are prioritised';
+            }
         }
 
         // The field is trimmed here and nowhere else, so the list filter and
