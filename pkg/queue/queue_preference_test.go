@@ -152,10 +152,8 @@ func TestPreferenceFilter_MatchesFieldsCaseInsensitively(t *testing.T) {
 		{"persona", &Task{ID: "t", Persona: "implementer"}, "plem", true},
 		{"tags", &Task{ID: "t", Tags: []string{"android", "frontend"}}, "FRONTEND", true},
 		{"no match", &Task{ID: "t", Prompt: "something else", RepoRef: "https://example.com/other.git"}, "no-match", false},
-		// The documented rule is a substring of *each* field, so a needle
-		// straddling two fields must not match — joining the fields into one
-		// haystack would match it, and the client-side copy weighs the fields
-		// in its own order, so the list and the drain could diverge.
+		// The documented rule is a substring of *one* field: a needle that
+		// straddles two fields is not a match.
 		{"across a field boundary", &Task{ID: "t", Title: "Finish the polish", Prompt: "prompt the reader"}, "polish prompt", false},
 	}
 
@@ -180,10 +178,9 @@ func TestPreferenceFilter_MatchesFieldsCaseInsensitively(t *testing.T) {
 
 func TestPreferenceFilter_AcrossFieldNeedleDoesNotMatch(t *testing.T) {
 	base := time.Now().Add(-time.Hour)
-	// The needle straddles the title/prompt boundary: a haystack built by
-	// joining the fields would call this a match and drain late first,
-	// while the client (which weighs the fields in its own order) would
-	// hide nothing — the list and the drain drifting apart again.
+	// The needle straddles the title/prompt boundary, so it is a substring
+	// of neither field and matches nothing: ordinary order — FIFO here —
+	// decides.
 	q := newRestoredQueue(t, []*Task{
 		{ID: "early", Title: "Unrelated", Prompt: "nothing of note", CreatedAt: base},
 		{ID: "late", Title: "Finish the polish", Prompt: "prompt the reader", CreatedAt: base.Add(time.Minute)},
