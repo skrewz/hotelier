@@ -3851,6 +3851,91 @@ const { chromium } = require('playwright');
   console.log('PASS: /search?q= replays the search on load');
   await takeScreenshot('13f-search-direct-url');
 
+  // The URL, not the field, describes a replayed search. A search is pushed
+  // without a days param whenever the field is empty at the time (empty means
+  // "the server's default"), so a history step onto such an entry that left a
+  // wider number in the field would send — and paint a header for — a window
+  // the URL never named. Record what the page actually asks the server for,
+  // because that request is the claim under test.
+  const searchRequestLog = [];
+  const logSearchRequest = (req) => {
+    const u = new URL(req.url());
+    if (u.pathname === '/api/tasks/search') searchRequestLog.push(u.search);
+  };
+  page.on('request', logSearchRequest);
+
+  // Wait for the pane to stop saying "Searching" — it says so synchronously
+  // when a search starts, so this cannot read a render that predates it.
+  const searchSettled = () => page.waitForFunction(() => {
+    const el = document.getElementById('search-results');
+    return el && el.textContent.indexOf('Searching') === -1;
+  }, null, { timeout: 15000 });
+
+  // Wait for the request a history step provokes, and require it to be the
+  // window that URL names.
+  async function expectSearchRequest(from, want, label) {
+    const deadline = Date.now() + 15000;
+    while (searchRequestLog.length === from && Date.now() < deadline) {
+      await page.waitForTimeout(50);
+    }
+    if (searchRequestLog.length === from) fail(label + ' should replay the search');
+    const sent = searchRequestLog[searchRequestLog.length - 1];
+    if (sent !== want) fail(label + ' should ask for ' + want + ', asked for: ' + sent);
+    await searchSettled();
+  }
+
+  await page.goto(baseURL + '/search?q=' + encodeURIComponent(failedTaskId) + '&days=10');
+  await searchSettled();
+  const tenDayWindow = await page.evaluate(() => ({
+    days: document.getElementById('search-days').value,
+    note: document.querySelector('#search-results .search-note').textContent,
+  }));
+  if (tenDayWindow.days !== '10') {
+    fail('a URL naming a 10-day window should fill the field with 10, got: ' + tenDayWindow.days);
+  }
+
+  // The same query searched with an empty field names no window at all.
+  await page.fill('#search-days', '');
+  const beforeNoWindow = searchRequestLog.length;
+  await clickEl('#search-go');
+  await expectSearchRequest(beforeNoWindow, '?q=' + failedTaskId,
+    'a search with an empty lookback');
+  const defaultWindow = await page.evaluate(() => ({
+    url: window.location.pathname + window.location.search,
+    note: document.querySelector('#search-results .search-note').textContent,
+  }));
+  if (defaultWindow.url !== '/search?q=' + encodeURIComponent(failedTaskId)) {
+    fail('an empty lookback should push a URL with no days, got: ' + defaultWindow.url);
+  }
+  if (defaultWindow.note === tenDayWindow.note) {
+    fail('the two windows must be distinguishable in the results header or this test proves nothing');
+  }
+
+  // Back onto the entry that names 10 days, then forward onto the entry that
+  // names none: the field, the request and the header must all follow the URL.
+  const beforeBack = searchRequestLog.length;
+  await page.goBack();
+  await expectSearchRequest(beforeBack, '?q=' + failedTaskId + '&days=10', 'going back to a days URL');
+  const backWindow = await page.evaluate(() => document.getElementById('search-days').value);
+  if (backWindow !== '10') fail('going back to a days URL should restore the field, got: ' + backWindow);
+
+  const beforeForward = searchRequestLog.length;
+  await page.goForward();
+  await expectSearchRequest(beforeForward, '?q=' + failedTaskId, 'going forward to a URL with no days');
+  const forwardWindow = await page.evaluate(() => ({
+    days: document.getElementById('search-days').value,
+    note: document.querySelector('#search-results .search-note').textContent,
+  }));
+  if (forwardWindow.days !== '') {
+    fail('a URL naming no window must clear the lookback field, field read: ' + forwardWindow.days);
+  }
+  if (forwardWindow.note !== defaultWindow.note) {
+    fail('a replayed search must paint the window its URL names, header read: ' + forwardWindow.note);
+  }
+  console.log('PASS: a replayed search takes its window from the URL, not the field');
+  await takeScreenshot('13f-search-url-window');
+  page.off('request', logSearchRequest);
+
   // Panel state: leaving a search for another view must not leave two panels
   // visible at once. This is the reviewer-reachable path — Back from a
   // search to an earlier task detail — driven without touching the DOM.

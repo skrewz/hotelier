@@ -633,7 +633,16 @@
                     // not touch it again (that would double-push on popstate).
                     if (route.q) {
                         document.getElementById('search-query').value = route.q;
-                        if (route.days) document.getElementById('search-days').value = route.days;
+                        // The URL is the whole description of a replayed
+                        // search, window included, so the field is set from it
+                        // even when it carries no days — an empty field means
+                        // "the server's default" everywhere else on this page.
+                        // Keeping a stale value instead would send a window
+                        // wider than the URL names and paint a header for it:
+                        // the same pane/URL disagreement searchSeq exists to
+                        // prevent, on the replay path rather than the
+                        // concurrent one.
+                        document.getElementById('search-days').value = route.days;
                         await runTaskSearch(true);
                     }
                     break;
