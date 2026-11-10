@@ -151,7 +151,10 @@ arithmetic on the queue and the room, not a per-task verdict: a queue that
 also waits on guests with matching tags still counts while it exceeds the
 room, and which of the two holds a given task is what that task's own
 `held_reason` says. `next_change` is `null` while the cap will not move — no
-schedule, or a schedule whose entries all carry the same cap. `source` and
+schedule, or a schedule whose entries all carry the same cap; otherwise it
+names the instant the enforced cap actually flips at, so an entry inside a
+DST gap is quoted at the transition and one inside a fall-back repeated hour
+at its next occurrence. `source` and
 `next_change` are resolved from the schedule directly, so immediately after a
 boundary they can name the new cap up to one 15-second sync tick before `cap`
 and the counts move to it.

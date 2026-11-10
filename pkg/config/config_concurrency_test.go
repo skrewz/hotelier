@@ -581,21 +581,51 @@ func TestConcurrencyStatus_AgreesWithEffectiveConcurrencyAcrossTheDay(t *testing
 }
 
 // TestConcurrencyStatus_NextChangeIsAlwaysInTheFuture is the property the
-// dashboard depends on: a reported boundary must lie ahead of the reading it
-// came from, must not promise the cap already in force, and must be the
-// instant EffectiveConcurrency actually flips at. Sydney's autumn transition
-// (2026-04-05, 03:00 AEDT back to 02:00 AEST) is the day where finding the
-// next boundary by minute alone would point at the past; the spring day
-// (2026-10-04, 02:00 AEST up to 03:00 AEDT) is the day whose normalisation
-// could place a change later than the flip.
+// dashboard depends on: a reported boundary must lie ahead of the reading
+// it came from, must not promise the cap already in force, must be the
+// instant EffectiveConcurrency actually flips at, and — the half a
+// fall-back day breaks — nothing may change before it: the enforced cap
+// stays at the reading's value all the way to the reported instant.
+//
+// Sydney's transitions fall at 16:00Z on their UTC days, so each window
+// opens at 13:00Z three hours ahead of them: the autumn day 2026-04-04
+// repeats the 02:00–02:59 hour (transitioning at 16:00Z from 03:00 AEDT
+// back to 02:00 AEST), the spring day 2026-10-03 removes it (02:00 AEST up
+// to 03:00 AEDT, again at 16:00Z). A 27-hour window is a day, the extra
+// fall-back hour, and the run-up to the transition.
+//
+// The schedule carries entries inside the shifted hour — including a second
+// one, so on the spring day two boundaries collapse onto the transition
+// instant and the tie must be broken by the enforcement rule, not by a
+// sort — and entries outside it, so ordinary days are crossed too.
 func TestConcurrencyStatus_NextChangeIsAlwaysInTheFuture(t *testing.T) {
-	cfg := dayNightSchedule("Australia/Sydney")
+	cfg := ServerConfig{
+		MaxConcurrentTasks: 9,
+		ScheduleTimezone:   "Australia/Sydney",
+		ConcurrencySchedule: []ConcurrencyScheduleEntry{
+			{At: "02:15", Concurrency: 1},
+			{At: "02:45", Concurrency: 3},
+			{At: "07:00", Concurrency: 2},
+			{At: "23:00", Concurrency: 4},
+		},
+	}
+
+	const window = 27 * 60
 
 	for _, start := range []time.Time{
-		time.Date(2026, 4, 4, 20, 0, 0, 0, time.UTC),  // across the fall-back
-		time.Date(2026, 10, 3, 20, 0, 0, 0, time.UTC), // across the spring-forward
+		time.Date(2026, 4, 4, 13, 0, 0, 0, time.UTC),  // across the fall-back
+		time.Date(2026, 10, 3, 13, 0, 0, 0, time.UTC), // across the spring-forward
 	} {
-		for minute := 0; minute < 26*60; minute++ {
+		// The enforced cap across the window plus the horizon a reported
+		// next change can reach into (at most 26 hours past the reading),
+		// precomputed once so the loop below compares rather than
+		// re-resolves the schedule millions of times.
+		horizon := make([]int, window+26*60)
+		for i := range horizon {
+			horizon[i] = cfg.EffectiveConcurrency(start.Add(time.Duration(i) * time.Minute))
+		}
+
+		for minute := 0; minute < window; minute++ {
 			now := start.Add(time.Duration(minute) * time.Minute)
 			status := cfg.ConcurrencyStatus(now)
 			if !status.HasNextChange() {
@@ -610,6 +640,13 @@ func TestConcurrencyStatus_NextChangeIsAlwaysInTheFuture(t *testing.T) {
 			if got := cfg.EffectiveConcurrency(status.NextChangeAt); got != status.NextCap {
 				t.Fatalf("at %s: enforcement at the reported change (%s) gives %d, not %d",
 					now, status.NextChangeAt, got, status.NextCap)
+			}
+			at := int(status.NextChangeAt.Sub(start).Round(time.Minute) / time.Minute)
+			for m := minute; m < at && m < len(horizon); m++ {
+				if horizon[m] != status.Cap {
+					t.Fatalf("at %s: enforcement already changed to %d at %s, before the reported change to %d at %s",
+						now, horizon[m], start.Add(time.Duration(m)*time.Minute), status.NextCap, status.NextChangeAt)
+				}
 			}
 		}
 	}

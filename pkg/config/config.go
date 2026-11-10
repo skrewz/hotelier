@@ -416,75 +416,58 @@ func (c ServerConfig) resolveSchedule(now time.Time) ([]scheduleEntry, *time.Loc
 		return nil, nil, 0, false
 	}
 	local := now.In(loc)
-	cur := local.Hour()*60 + local.Minute()
-
-	// Default: the last entry of the day holds through midnight to the
-	// first entry. Walk forward to the last boundary at or before now.
-	chosen := len(entries) - 1
-	for i, e := range entries {
-		if e.minutes <= cur {
-			chosen = i
-		}
-	}
+	chosen := chosenEntry(entries, local.Hour()*60+local.Minute())
 	return entries, loc, chosen, true
 }
 
-// nextScheduleChange finds the next boundary after now whose cap differs from
-// the cap in force. The schedule repeats daily, so looking one day ahead is
-// enough: a boundary that would change the cap later than that repeats one
-// already looked at. Boundaries are located on the wall clock in loc, so they
-// follow the zone across DST; one inside a spring-forward gap is located at
-// the transition itself, which is where resolveSchedule's wall-clock
-// comparison flips.
-func nextScheduleChange(entries []scheduleEntry, loc *time.Location, now time.Time, cap int) (time.Time, string, int) {
-	local := now.In(loc)
-	midnight := time.Date(local.Year(), local.Month(), local.Day(), 0, 0, 0, 0, loc)
-
-	type candidate struct {
-		when time.Time
-		at   string
-		cap  int
-	}
-	candidates := make([]candidate, 0, 2*len(entries))
-	for day := 0; day <= 1; day++ {
-		onset := midnight.AddDate(0, 0, day)
-		for _, e := range entries {
-			// Filter on the instant rather than the minute: a DST fall-back
-			// repeats an hour of wall clock, so "already passed today" is not
-			// something the minute alone can answer.
-			when := time.Date(onset.Year(), onset.Month(), onset.Day(), e.minutes/60, e.minutes%60, 0, 0, loc)
-			at := e.at
-			if m := when.Hour()*60 + when.Minute(); m != e.minutes {
-				// time.Date normalised a wall clock the spring-forward gap
-				// removed onto the far side of the gap. resolveSchedule
-				// compares wall-clock minutes, so the cap in force flips at
-				// the transition, not at the normalised instant: walk back to
-				// the first instant whose wall clock is at or past the
-				// boundary, and quote that — the entry's own minute never
-				// appears on a clock that day.
-				for {
-					prev := when.Add(-time.Minute)
-					if prev.Before(onset) || prev.Hour()*60+prev.Minute() < e.minutes {
-						break
-					}
-					when = prev
-				}
-				at = fmt.Sprintf("%02d:%02d", when.Hour(), when.Minute())
-			}
-			if !when.After(now) {
-				continue
-			}
-			candidates = append(candidates, candidate{when: when, at: at, cap: e.value})
+// chosenEntry is the entry in force at a wall clock: the last entry at or
+// before that minute, wrapping around to the last entry of the day before
+// the first one. resolveSchedule and nextScheduleChange share the rule, so
+// the cap the status surface quotes and the cap enforcement obeys at an
+// instant cannot drift apart.
+func chosenEntry(entries []scheduleEntry, wallMinutes int) int {
+	chosen := len(entries) - 1
+	for i, e := range entries {
+		if e.minutes <= wallMinutes {
+			chosen = i
 		}
 	}
-	sort.Slice(candidates, func(i, j int) bool { return candidates[i].when.Before(candidates[j].when) })
+	return chosen
+}
 
-	for _, c := range candidates {
-		if c.cap != cap {
-			return c.when, c.at, c.cap
+// nextScheduleChange finds the next instant after now at which the cap
+// differs from the cap in force. The schedule repeats daily and a cap that
+// differs from the current one recurs within one repetition, so a horizon
+// of two days of instants always contains any real change (a fall-back day
+// is 25 hours long, which the extra day covers).
+//
+// The horizon is walked on the instant axis, minute by minute, with the
+// wall-clock rule of chosenEntry applied at each step — the returned
+// instant is by construction the instant EffectiveConcurrency flips. Wall
+// clocks cannot be walked instead: on a fall-back day the shifted hour
+// occurs twice, and time.Date resolves its ambiguous minute to the later
+// occurrence, so the first pass would never become a candidate; and every
+// entry inside a spring-forward gap normalises onto the same instant,
+// leaving the quoted cap to an unstable sort rather than to the rule
+// enforcement obeys. Walking instants visits the repeated hour twice and
+// the gap once, and quotes at each step the cap resolveSchedule gives
+// there — an entry in a gap is thus placed at the transition, which is
+// where the wall-clock comparison flips.
+func nextScheduleChange(entries []scheduleEntry, loc *time.Location, now time.Time, cap int) (time.Time, string, int) {
+	end := now.Add(48 * time.Hour)
+	for t := now.Truncate(time.Minute).Add(time.Minute); t.Before(end); t = t.Add(time.Minute) {
+		if c := capAt(entries, t.In(loc)); c != cap {
+			local := t.In(loc)
+			return t, fmt.Sprintf("%02d:%02d", local.Hour(), local.Minute()), c
 		}
 	}
 	return time.Time{}, "", cap
+}
+
+// capAt is the cap chosenEntry names at a wall clock, for callers holding
+// the instant rather than the minute.
+func capAt(entries []scheduleEntry, local time.Time) int {
+	return entries[chosenEntry(entries, local.Hour()*60+local.Minute())].value
 }
 
 // staticConcurrency states the static cap in the resolver's vocabulary:
