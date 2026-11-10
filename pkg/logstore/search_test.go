@@ -205,9 +205,7 @@ func TestSearchDates_MissingDateIsNotAnError(t *testing.T) {
 // that would exhaust the production constant.
 func TestSearchDates_StopsWhenTheScannedBytesBudgetRunsOut(t *testing.T) {
 	s := mustStore(t)
-	original := searchScannedBudget
-	searchScannedBudget = 4096
-	t.Cleanup(func() { searchScannedBudget = original })
+	s.searchBudget = 4096
 
 	long := strings.Repeat("x", 60)
 	var lines []string

@@ -64,6 +64,13 @@ type Entry struct {
 type LogStore struct {
 	dir string
 	mu  sync.Mutex
+
+	// searchBudget is the scanned-bytes budget SearchDates enforces.
+	// It is MaxSearchScannedBytes for every store New returns; tests
+	// that need to exhaust it override the field on their own instance
+	// instead of rewriting a shared global, so the bound the README
+	// quotes is always the one production code consults.
+	searchBudget int64
 }
 
 // New creates a new LogStore backed by the given directory.
@@ -72,7 +79,7 @@ func New(dir string) (*LogStore, error) {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return nil, fmt.Errorf("create log store dir %s: %w", dir, err)
 	}
-	return &LogStore{dir: dir}, nil
+	return &LogStore{dir: dir, searchBudget: MaxSearchScannedBytes}, nil
 }
 
 // CloseAll is a no-op for the current implementation.
@@ -653,11 +660,6 @@ const MaxSearchMatches = 200
 // way one that hits MaxSearchMatches does.
 const MaxSearchScannedBytes int64 = 64 << 20
 
-// searchScannedBudget is the budget SearchDates enforces. It is
-// MaxSearchScannedBytes in production and exists so tests can exhaust the
-// budget without writing tens of megabytes of traces.
-var searchScannedBudget = MaxSearchScannedBytes
-
 // Match is one log line that satisfied a search query, together with up to
 // searchContextLines neighbouring lines from the same trace on either side.
 type Match struct {
@@ -717,7 +719,7 @@ func (s *LogStore) SearchDates(dates []string, query string) SearchResult {
 		}
 		sort.Strings(tasks)
 		for _, taskID := range tasks {
-			if ss.scanned >= searchScannedBudget {
+			if ss.scanned >= ss.store.searchBudget {
 				ss.res.Truncated = true
 				return ss.res
 			}
@@ -865,7 +867,7 @@ func (ss *searchScan) trace(date, taskID string) {
 			if len(last) > searchContextLines {
 				last = last[1:]
 			}
-			if ss.scanned >= searchScannedBudget {
+			if ss.scanned >= ss.store.searchBudget {
 				ss.res.Truncated = true
 				ss.stopped = true
 				flush()
