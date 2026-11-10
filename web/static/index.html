@@ -519,7 +519,7 @@
                     </div>
                     <div class="search-days-group">
                         <label for="search-days">Lookback (days)</label>
-                        <input type="number" id="search-days" value="5" min="1" onkeydown="if (event.key === 'Enter') runTaskSearch()">
+                        <input type="number" id="search-days" value="5" onkeydown="if (event.key === 'Enter') runTaskSearch()">
                     </div>
                     <button class="btn" id="search-go" onclick="runTaskSearch()">Search</button>
                 </div>
@@ -2824,10 +2824,19 @@
         // while telling them it searched the whole window, which is the one
         // outcome issue #269 ruled out.
 
+        // searchSeq hands every search a number so that only the newest one
+        // may paint the results. A search is the one request on this page that
+        // can take seconds — the server walks up to 14 days of traces — so two
+        // can genuinely be in flight (Enter twice, or a slow one followed by a
+        // fast one), and whichever resolved last would otherwise win the
+        // results pane and contradict the URL and its own header.
+        let searchSeq = 0;
+
         // runTaskSearch issues one search. fromRouter is true when the call
         // came from router.dispatch, where the URL already describes this
         // search and must be left alone.
         async function runTaskSearch(fromRouter) {
+            const seq = ++searchSeq;
             const query = document.getElementById('search-query').value.trim();
             const days = document.getElementById('search-days').value.trim();
             const params = new URLSearchParams();
@@ -2848,9 +2857,11 @@
             try {
                 res = await fetch('/api/tasks/search?' + params.toString());
             } catch (e) {
+                if (seq !== searchSeq) return; // a newer search owns the pane now
                 results.innerHTML = '<div class="search-note error">Search failed: ' + escapeHtml(e.message) + '</div>';
                 return;
             }
+            if (seq !== searchSeq) return; // superseded while the request was out
             if (!res.ok) {
                 // The server rejects bad or over-wide windows with a plain-text
                 // reason; that reason is the message for the user, so show it
@@ -2865,9 +2876,11 @@
             try {
                 data = await res.json();
             } catch (e) {
+                if (seq !== searchSeq) return;
                 results.innerHTML = '<div class="search-note error">Search returned an unreadable response.</div>';
                 return;
             }
+            if (seq !== searchSeq) return;
             renderSearchResults(data);
         }
 
