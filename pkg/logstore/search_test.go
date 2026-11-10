@@ -8,6 +8,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/dsnet/compress/bzip2"
 )
 
 // appendLines writes one entry per line for taskID on the given date.
@@ -319,6 +321,65 @@ func TestSearchDates_FallsBackToLegacyLogWhenBzip2Unreadable(t *testing.T) {
 	}
 }
 
+// TestSearchDates_FallsBackToLegacyLogWhenBzip2Empty verifies the search
+// keeps agreeing with ReadLogs when the bzip2 file reads but yields
+// nothing: a valid empty stream beside a legacy trace is no trace at all,
+// so the legacy file stands — ReadLogs reads its entries (it prefers the
+// bzip2 only when it yields entries, logstore.go's ReadLogs), and the scan
+// must match the same content rather than answer empty with no error.
+func TestSearchDates_FallsBackToLegacyLogWhenBzip2Empty(t *testing.T) {
+	s := mustStore(t)
+	taskDir := filepath.Join(s.dir, "2026-05-10", "task-a")
+	if err := os.MkdirAll(taskDir, 0o755); err != nil {
+		t.Fatalf("create task dir: %v", err)
+	}
+	bz2File, err := os.Create(filepath.Join(taskDir, "logs.jsonl.bz2"))
+	if err != nil {
+		t.Fatalf("create empty bzip2: %v", err)
+	}
+	w, err := bzip2.NewWriter(bz2File, nil)
+	if err != nil {
+		t.Fatalf("bzip2 writer: %v", err)
+	}
+	if err := w.Close(); err != nil {
+		t.Fatalf("close bzip2 stream: %v", err)
+	}
+	if err := bz2File.Close(); err != nil {
+		t.Fatalf("close bzip2 file: %v", err)
+	}
+	f, err := os.Create(filepath.Join(taskDir, "logs.jsonl"))
+	if err != nil {
+		t.Fatalf("create legacy log: %v", err)
+	}
+	for _, line := range []string{"clean", "needle legacy"} {
+		raw, err := json.Marshal(Entry{TaskID: "task-a", Line: line, Timestamp: dayOne})
+		if err != nil {
+			t.Fatalf("marshal entry: %v", err)
+		}
+		if _, err := f.Write(append(raw, '\n')); err != nil {
+			t.Fatalf("write legacy entry: %v", err)
+		}
+	}
+	if err := f.Close(); err != nil {
+		t.Fatalf("close legacy log: %v", err)
+	}
+
+	res := s.SearchDates([]string{"2026-05-10"}, "needle")
+	if len(res.Matches) != 1 || res.Matches[0].Line != "needle legacy" {
+		t.Fatalf("expected the legacy trace's match, got %+v", res.Matches)
+	}
+	if len(res.Errors) != 0 {
+		t.Errorf("expected an empty bzip2 stream to be no trace and no error, got %v", res.Errors)
+	}
+	entries, err := s.ReadLogs("2026-05-10", "task-a")
+	if err != nil {
+		t.Fatalf("ReadLogs: %v", err)
+	}
+	if len(entries) != 2 {
+		t.Errorf("the endpoints disagree about the trace: ReadLogs read %d entries, the search matched %d of them", len(entries), len(res.Matches))
+	}
+}
+
 // TestSearchDates_KeepsPendingMatchWhenTheBudgetStopsTheScan pins the other
 // half of the budget path: the hits already read are handed back even when
 // their after-context had not streamed in. The trace is laid out so the
@@ -364,3 +425,4 @@ func TestSearchDates_KeepsPendingMatchWhenTheBudgetStopsTheScan(t *testing.T) {
 		t.Errorf("expected the pending match with no after-context streamed in, got %+v", m)
 	}
 }
+

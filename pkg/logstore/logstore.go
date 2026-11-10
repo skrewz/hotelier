@@ -776,15 +776,16 @@ func (c *countingReader) Read(p []byte) (int, error) {
 }
 
 // openTaskLog opens a task's trace for streaming, applying the same rule
-// as ReadLogs for which file is the trace: the bzip2 file when it reads,
-// the legacy uncompressed file when it does not. The bzip2 wrapper only
-// surfaces a corrupt stream on the first read, so the probe happens here:
-// a stream that starts (even empty) is the trace, one that does not is
-// unreadable and the legacy file takes over — the crash-mid-append state
-// ReadRawJSONL's docblock names. With no readable bzip2 stream and no
-// legacy file, the bzip2 error stands as ReadRawJSONL would report it: a
-// present-but-unreadable trace is not a missing one. A task with neither
-// file simply has no logs, which is not an error.
+// as ReadLogs for which file is the trace: the bzip2 file when it yields
+// content, the legacy uncompressed file when it does not. The bzip2 wrapper
+// only surfaces a corrupt stream on the first read, so the probe happens
+// here. A stream that starts with content is the trace; one that is empty
+// or corrupt yields none, and the legacy file takes over — the
+// crash-mid-append state ReadRawJSONL's docblock names. With a corrupt
+// bzip2 stream and no legacy file, the bzip2 error stands as ReadRawJSONL
+// would report it: a present-but-unreadable trace is not a missing one. A
+// task with no trace in either file simply has no logs, which is not an
+// error.
 func (s *LogStore) openTaskLog(date, taskID string) (io.ReadCloser, error) {
 	jsonlPath := filepath.Join(s.dir, date, taskID, "logs.jsonl")
 	bz2Path := jsonlPath + ".bz2"
@@ -798,10 +799,14 @@ func (s *LogStore) openTaskLog(date, taskID string) (io.ReadCloser, error) {
 				if n > 0 {
 					return &compressReadCloser{Reader: io.MultiReader(bytes.NewReader(probe[:n]), rc), closer: rc}, nil
 				}
-				return rc, nil
+				// A stream that reads empty yields no trace, exactly like the
+				// zero entries ReadLogs reads from it: not an error, and the
+				// legacy file stands as the trace if it exists.
+				rc.Close()
+			} else {
+				rc.Close()
+				bz2Err = fmt.Errorf("read log file %s: %w", bz2Path, perr)
 			}
-			rc.Close()
-			bz2Err = fmt.Errorf("read log file %s: %w", bz2Path, perr)
 		} else {
 			bz2Err = fmt.Errorf("read log file %s: %w", bz2Path, err)
 		}
