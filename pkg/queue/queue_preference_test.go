@@ -1,6 +1,9 @@
 package queue
 
 import (
+	"bytes"
+	"fmt"
+	"strings"
 	"testing"
 	"time"
 )
@@ -27,8 +30,8 @@ func TestPreferenceFilterRoundTrip(t *testing.T) {
 		t.Fatalf("expected empty filter by default, got %q", got)
 	}
 
-	q.SetPreferenceFilter("  s-habit-tracker  ")
-	if got := q.PreferenceFilter(); got != "s-habit-tracker" {
+	q.SetPreferenceFilter("  example-repo  ")
+	if got := q.PreferenceFilter(); got != "example-repo" {
 		t.Fatalf("expected trimmed filter, got %q", got)
 	}
 
@@ -38,14 +41,61 @@ func TestPreferenceFilterRoundTrip(t *testing.T) {
 	}
 }
 
+// One operator action is one log line, and the line says whether the
+// filter was set or cleared: "filter set to \"\"" is the last thing an
+// operator wants to read after a restart mystery.
+func TestSetPreferenceFilter_LogsOnceAndNamesTheAction(t *testing.T) {
+	var log bytes.Buffer
+	q := NewTaskQueue(func(format string, args ...interface{}) {
+		fmt.Fprintf(&log, format+"\n", args...)
+	})
+
+	q.SetPreferenceFilter("example-repo")
+	if got := log.String(); strings.Count(got, "preference filter") != 1 {
+		t.Fatalf("expected one log line per set, got:\n%s", got)
+	}
+
+	log.Reset()
+	q.SetPreferenceFilter("")
+	if got := log.String(); !strings.Contains(got, "clear") {
+		t.Fatalf("expected clearing to be named in the log, got:\n%s", got)
+	}
+	if strings.Count(log.String(), "preference filter") != 1 {
+		t.Fatalf("expected one log line per clear, got:\n%s", log.String())
+	}
+}
+
+// A settled task's text must not influence the pending band: only pending
+// tasks are weighed against the filter.
+func TestPreferenceFilter_IgnoresSettledTasks(t *testing.T) {
+	base := time.Now().Add(-time.Hour)
+	q := newRestoredQueue(t, []*Task{
+		{ID: "settled-match", Title: "Widget polish", CreatedAt: base},
+		{ID: "pending-plain", Prompt: "unrelated", CreatedAt: base.Add(time.Minute)},
+	})
+	if err := q.Assign("settled-match", "guest-1"); err != nil {
+		t.Fatalf("Assign: %v", err)
+	}
+	if err := q.Start("settled-match"); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	q.SetPreferenceFilter("widget")
+
+	ordered := q.GetAllTasksOrdered()
+	if len(ordered) != 2 || ordered[0].ID != "settled-match" || ordered[1].ID != "pending-plain" {
+		t.Fatalf("expected the running task first and the pending one after it, got %v", ordered)
+	}
+}
+
 func TestNextPendingTask_PreferenceMatchFirst(t *testing.T) {
 	base := time.Now().Add(-time.Hour)
 	q := newRestoredQueue(t, []*Task{
 		{ID: "older-other", Prompt: "unrelated work", CreatedAt: base},
-		{ID: "newer-match", Prompt: "fix the widget", RepoRef: "https://example.com/org/s-habit-tracker.git", CreatedAt: base.Add(time.Minute)},
+		{ID: "newer-match", Prompt: "fix the widget", RepoRef: "https://example.com/org/example-repo.git", CreatedAt: base.Add(time.Minute)},
 	})
 
-	q.SetPreferenceFilter("s-habit-tracker")
+	q.SetPreferenceFilter("example-repo")
 
 	if got := q.NextPendingTask(); got == nil || got.ID != "newer-match" {
 		t.Fatalf("expected preference-matching task first, got %v", got)
@@ -96,7 +146,7 @@ func TestPreferenceFilter_MatchesFieldsCaseInsensitively(t *testing.T) {
 		filter string
 		match  bool
 	}{
-		{"repo", &Task{ID: "t", RepoRef: "https://example.com/Org/S-Habit-Tracker.git"}, "s-habit", true},
+		{"repo", &Task{ID: "t", RepoRef: "https://example.com/Org/Example-Repo.git"}, "example", true},
 		{"title", &Task{ID: "t", Title: "Fix Login Flow"}, "login", true},
 		{"prompt", &Task{ID: "t", Prompt: "Refactor the parser"}, "PARSER", true},
 		{"persona", &Task{ID: "t", Persona: "implementer"}, "plem", true},

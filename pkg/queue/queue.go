@@ -468,8 +468,9 @@ func (q *TaskQueue) CountHeldPending() int {
 	return held
 }
 
-// GetPendingTasks returns all pending tasks, sorted by priority
-// (highest first) and then by creation time (FIFO within same priority).
+// GetPendingTasks returns all pending tasks by the queue's drain key:
+// preference-filter matches first, then priority (highest first), then
+// creation time (FIFO within same priority).
 func (q *TaskQueue) GetPendingTasks() []*Task {
 	q.mu.RLock()
 	defer q.mu.RUnlock()
@@ -528,15 +529,17 @@ func processingRank(status TaskStatus) int {
 // GetAllTasksOrdered returns every task in the order the queue will get
 // processed (issue #268): RUNNING first, then ASSIGNED (claimed, about to
 // start), then PENDING in the same order NextPendingTask would drain them
-// (priority first, FIFO within a priority), and finally settled tasks
-// oldest first. Priority changes take effect on the next read, so a
-// re-prioritised task leaves its old slot without any reshuffle.
+// (preference-filter matches first, then priority, then FIFO within a
+// priority), and finally settled tasks oldest first. Priority changes take
+// effect on the next read, so a re-prioritised task leaves its old slot
+// without any reshuffle.
 func (q *TaskQueue) GetAllTasksOrdered() []*Task {
 	q.mu.RLock()
 	defer q.mu.RUnlock()
 
 	result := make([]*Task, 0, len(q.ordered))
 	result = append(result, q.ordered...)
+	matches := q.preferenceMatches(result)
 	sort.SliceStable(result, func(i, j int) bool {
 		ri, rj := processingRank(result[i].Status), processingRank(result[j].Status)
 		if ri != rj {
@@ -545,7 +548,7 @@ func (q *TaskQueue) GetAllTasksOrdered() []*Task {
 		if ri == processingRank(TaskStatusPending) {
 			// Within the pending band the queue drains by the same key
 			// NextPendingTask uses.
-			return q.lessPendingByPriority(result[i], result[j])
+			return lessPending(matches, result[i], result[j])
 		}
 		return result[i].CreatedAt.Before(result[j].CreatedAt)
 	})
@@ -646,19 +649,20 @@ func (q *TaskQueue) validTransition(from, to TaskStatus) bool {
 	return false
 }
 
-// lessPendingByPriority is the queue's single definition of pending drain
-// order: tasks matching the preference filter first (issue #281), then
-// priority (lower priorityValue = higher priority), then FIFO by creation
-// time. sortPending and GetAllTasksOrdered share it so the
-// displayed order cannot drift from what NextPendingTask drains (issue #268).
-// When the filter is empty, or no pending task matches it, the ordering is
-// exactly the pre-#281 one — the filter is a preference, never a suppression.
-func (q *TaskQueue) lessPendingByPriority(a, b *Task) bool {
-	if q.prefFilter != "" {
-		am, bm := q.matchesPreference(a), q.matchesPreference(b)
-		if am != bm {
-			return am // matches drain first, in ordinary order among themselves
-		}
+// lessPending is the queue's single definition of pending drain order:
+// tasks matching the preference filter first (issue #281), then priority
+// (lower priorityValue = higher priority), then FIFO by creation time.
+// matches is the table built by preferenceMatches for the tasks being
+// ordered, so a task's text is weighed against the filter once per read
+// rather than once per comparison. sortPending and GetAllTasksOrdered share
+// this comparator so the displayed order cannot drift from what
+// NextPendingTask drains (issue #268). Tasks absent from the table — any
+// task at all when no filter is set, and every task when none matches —
+// order by priority and FIFO alone: the filter is a preference, never a
+// suppression.
+func lessPending(matches map[*Task]bool, a, b *Task) bool {
+	if am, bm := matches[a], matches[b]; am != bm {
+		return am // matches drain first, in ordinary order among themselves
 	}
 	vi, vj := priorityValue(a.Priority), priorityValue(b.Priority)
 	if vi != vj {
@@ -676,7 +680,11 @@ func (q *TaskQueue) SetPreferenceFilter(filter string) {
 	defer q.mu.Unlock()
 
 	q.prefFilter = strings.TrimSpace(filter)
-	q.logf("preference filter set: %q", q.prefFilter)
+	if q.prefFilter == "" {
+		q.logf("task preference filter cleared")
+	} else {
+		q.logf("task preference filter set to %q", q.prefFilter)
+	}
 }
 
 // PreferenceFilter returns the current preference filter as set, or the
@@ -688,32 +696,50 @@ func (q *TaskQueue) PreferenceFilter() string {
 	return q.prefFilter
 }
 
-// matchesPreference reports whether a task's text carries the preference
-// filter substring (case-insensitively). The fields searched are those an
-// operator would type a fragment of: repository, title, prompt, persona and
-// tags. The caller must hold at least q.mu.RLock.
-func (q *TaskQueue) matchesPreference(task *Task) bool {
+// preferenceMatches decides the preference filter once per pending task in
+// a single O(N) pass, so a sort costs one haystack per task rather than one
+// per comparison. Tasks that are not pending are left out of the table:
+// only the pending band consults it, and their text is never scanned.
+// The needle is lowercased once here rather than per call. The caller must
+// hold at least q.mu.RLock.
+func (q *TaskQueue) preferenceMatches(tasks []*Task) map[*Task]bool {
 	if q.prefFilter == "" {
-		return false
+		return nil
 	}
+	needle := strings.ToLower(q.prefFilter)
+	matches := make(map[*Task]bool, len(tasks))
+	for _, task := range tasks {
+		if task.Status == TaskStatusPending {
+			matches[task] = matchesPreference(task, needle)
+		}
+	}
+	return matches
+}
+
+// matchesPreference reports whether the task's text carries the lowercased
+// filter needle. The fields searched are those an operator would type a
+// fragment of: repository, title, prompt, persona and tags.
+func matchesPreference(task *Task, needle string) bool {
 	haystack := strings.ToLower(strings.Join([]string{
 		task.RepoRef, task.Title, task.Prompt, task.Persona, strings.Join(task.Tags, " "),
 	}, " "))
-	return strings.Contains(haystack, strings.ToLower(q.prefFilter))
+	return strings.Contains(haystack, needle)
 }
 
 // sortPending sorts pending tasks by the queue's drain key: preference
 // filter matches first, then priority (highest first), then creation time
 // (FIFO within same priority). The caller must hold at least q.mu.RLock.
 func (q *TaskQueue) sortPending(tasks []*Task) []*Task {
+	matches := q.preferenceMatches(tasks)
 	sort.SliceStable(tasks, func(i, j int) bool {
-		return q.lessPendingByPriority(tasks[i], tasks[j])
+		return lessPending(matches, tasks[i], tasks[j])
 	})
 	return tasks
 }
 
-// NextPendingTask returns the next pending task, ordered by priority
-// (highest first) and then by creation time (FIFO within same priority).
+// NextPendingTask returns the next pending task by the queue's drain key:
+// preference-filter matches first, then priority (highest first), then
+// creation time (FIFO within same priority).
 func (q *TaskQueue) NextPendingTask() *Task {
 	q.mu.RLock()
 	defer q.mu.RUnlock()
@@ -732,8 +758,9 @@ func (q *TaskQueue) NextPendingTask() *Task {
 }
 
 // NextPendingTaskForTags returns the next pending task that matches the
-// required tags, ordered by priority (highest first) and then by creation
-// time (FIFO within same priority).
+// required tags, ordered by the queue's drain key: preference-filter
+// matches first, then priority (highest first), then creation time (FIFO
+// within same priority).
 func (q *TaskQueue) NextPendingTaskForTags(requiredTags []string) *Task {
 	q.mu.RLock()
 	defer q.mu.RUnlock()

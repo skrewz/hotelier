@@ -17,11 +17,11 @@ func TestSetPreferenceFilter_DelegatesToQueue(t *testing.T) {
 		t.Fatalf("expected no filter by default, got %q", got)
 	}
 
-	orch.SetPreferenceFilter("s-habit-tracker")
-	if got := orch.PreferenceFilter(); got != "s-habit-tracker" {
+	orch.SetPreferenceFilter("example-repo")
+	if got := orch.PreferenceFilter(); got != "example-repo" {
 		t.Fatalf("expected filter to round-trip, got %q", got)
 	}
-	if got := orch.Queue().PreferenceFilter(); got != "s-habit-tracker" {
+	if got := orch.Queue().PreferenceFilter(); got != "example-repo" {
 		t.Fatalf("expected the queue to hold the filter, got %q", got)
 	}
 
