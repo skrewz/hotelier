@@ -3850,6 +3850,35 @@ const { chromium } = require('playwright');
   console.log('PASS: /search?q= replays the search on load');
   await takeScreenshot('13f-search-direct-url');
 
+  // Panel state: leaving a search for another view must not leave two panels
+  // visible at once. This is the reviewer-reachable path — Back from a
+  // search to an earlier task detail — driven without touching the DOM.
+  await page.goto(baseURL + '/task/' + completedTaskId);
+  await page.waitForLoadState('networkidle');
+  await page.evaluate(() => {
+    const tab = Array.from(document.querySelectorAll('.tab'))
+      .find(t => t.textContent.trim() === 'Search');
+    tab.click();
+  });
+  await page.fill('#search-query', failedTaskId);
+  await clickEl('#search-go');
+  await page.waitForSelector('#search-results .search-match', { timeout: 10000 });
+  await page.goBack();
+  await page.waitForFunction(() => window.location.pathname.indexOf('/task/') === 0, { timeout: 10000 });
+  const backPanels = await page.evaluate(() => ({
+    url: window.location.pathname,
+    visible: ['tab-tasks', 'tab-logs', 'tab-search']
+      .filter(id => document.getElementById(id).style.display !== 'none'),
+  }));
+  if (backPanels.url !== '/task/' + completedTaskId) {
+    fail('going back should land on the earlier task detail, got: ' + backPanels.url);
+  }
+  if (backPanels.visible.length !== 1) {
+    fail('exactly one panel should be visible after going back from a search, visible: ' + backPanels.visible.join(', '));
+  }
+  console.log('PASS: going back from a search leaves one panel visible');
+  await takeScreenshot('13f-search-back-to-task');
+
   if (searchPageErrors.length > 0) {
     fail('search journey raised page JS errors: ' + searchPageErrors.join('; '));
   }

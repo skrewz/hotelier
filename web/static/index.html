@@ -658,7 +658,7 @@
         }
 
         // showTab switches the visible tab panel.
-        //   tab              — 'tasks' or 'logs'
+        //   tab              — 'tasks', 'logs' or 'search'
         //   skipUrl          — when true, do NOT call router.push (used by
         //                      router dispatch and popstate so we don't
         //                      double-push).
@@ -675,11 +675,20 @@
                 // actually runs, so an empty tab click keeps the history clean.
             }
             activateTabByName(tab === 'tasks' ? 'Tasks' : tab === 'search' ? 'Search' : 'Logs');
-            document.getElementById('tab-tasks').style.display = tab === 'tasks' ? 'block' : 'none';
-            document.getElementById('tab-logs').style.display = tab === 'logs' ? 'block' : 'none';
-            document.getElementById('tab-search').style.display = tab === 'search' ? 'block' : 'none';
+            showPanel(tab);
             if (tab === 'logs') {
                 loadLogDates(fromInitialLoad);
+            }
+        }
+
+        // showPanel makes exactly one tab panel visible. Every view that
+        // changes which panel the user is looking at goes through here, so
+        // the toggles cannot drift as panels are added: with three panels a
+        // call site that only knew about two would leave stale results on
+        // screen above the view it switched to.
+        function showPanel(tab) {
+            for (const name of ['tasks', 'logs', 'search']) {
+                document.getElementById('tab-' + name).style.display = tab === name ? 'block' : 'none';
             }
         }
 
@@ -1683,8 +1692,7 @@
             refresh(true);
             // Show Logs tab but skip loadLogDates (we're showing task detail, not log browser)
             activateTabByName('Logs');
-            document.getElementById('tab-tasks').style.display = 'none';
-            document.getElementById('tab-logs').style.display = 'block';
+            showPanel('logs');
             // Use the task detail API (has structured tool fields) for rich rendering
             refreshTaskDetail(taskId);
         }
@@ -2933,15 +2941,13 @@
         }
 
         // openSearchHit leaves the search panel for the log browser's entry
-        // view of the matched trace. Like selectTask it shows the Logs tab
+        // view of the matched trace. Like selectTask it shows the Logs panel
         // without loadLogDates() — the latter would render the date list in
         // the same pane and race the entries for innerHTML.
         function openSearchHit(date, taskID) {
             setLogsFullscreen(false);
             activateTabByName('Logs');
-            document.getElementById('tab-tasks').style.display = 'none';
-            document.getElementById('tab-search').style.display = 'none';
-            document.getElementById('tab-logs').style.display = 'block';
+            showPanel('logs');
             loadLogEntries(date, taskID);
         }
 
