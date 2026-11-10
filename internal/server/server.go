@@ -1928,17 +1928,22 @@ func capLabel(cap int) interface{} {
 // HandleHealth returns the server health status.
 func (s *Server) HandleHealth(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
-	capNow, inFlight, _ := s.orchestrator.ConcurrencyCounts()
 	json.NewEncoder(w).Encode(map[string]interface{}{
 		"status": "healthy",
 		"guests": s.orchestrator.Registry().Count(),
 		"tasks":  s.orchestrator.Queue().Count(),
 		// The cap and what is in flight against it, so "nothing is moving"
 		// can be read as night mode rather than guessed at (issue #249).
-		// Read in one acquisition with the cap, as on /api/guests, so the
-		// two can never state counts measured against a superseded cap.
-		"in_flight":       inFlight,
-		"concurrency_cap": capLabel(capNow),
+		// Health reads only the two numbers it publishes: running the
+		// pending-count scan ConcurrencyCounts adds for /api/guests here
+		// would make every unauthenticated probe walk the whole queue
+		// under the assignment lock to discard the answer. The cap is the
+		// same enforced value ConcurrencyCounts states, so the two
+		// surfaces state one number; the pair is read in two
+		// acquisitions, a window this endpoint has always had and one
+		// that only an assignment landing between the reads can widen.
+		"in_flight":       s.orchestrator.InFlightCount(),
+		"concurrency_cap": capLabel(s.orchestrator.ConcurrencyCap()),
 	})
 }
 
