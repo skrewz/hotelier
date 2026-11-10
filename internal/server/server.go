@@ -746,6 +746,9 @@ func (s *Server) Start() error {
 	// Exact match: ServeMux prefers "/api/tasks/search" over the
 	// "/api/tasks/" subtree, so a search is never mistaken for a task ID.
 	mux.HandleFunc("/api/tasks/search", s.HandleTaskSearch)
+	// Exact match: as with /api/tasks/search, ServeMux prefers this over the
+	// "/api/tasks/" subtree, so "filter" is never mistaken for a task ID.
+	mux.HandleFunc("/api/tasks/filter", s.HandleTaskFilter)
 	mux.HandleFunc("/api/tasks/", s.HandleTaskDetail)
 	mux.HandleFunc("/api/guests", s.HandleGuests)
 	mux.HandleFunc("/api/guests/", s.HandleGuestDetail)
@@ -2655,6 +2658,46 @@ const (
 	// excerpt carries the rest.
 	maxSearchErrorsLogged = 10
 )
+
+// HandleTaskFilter handles the /api/tasks/filter endpoint (issue #281).
+//
+// GET  returns the live task preference filter: {"filter": "<text>"}.
+// POST sets or clears it: the body must carry {"filter": "<text>"}, and
+// the empty string clears. While a filter is set the queue drains the
+// pending tasks whose text carries the substring first; once no pending
+// task matches, normal queue semantics apply — the filter is a
+// preference, never a suppression.
+//
+// Like the concurrency cap this is a live operator control: it is held
+// in memory and is not persisted, so a server restart clears it.
+func (s *Server) HandleTaskFilter(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+
+	switch r.Method {
+	case http.MethodGet:
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"filter": s.orchestrator.PreferenceFilter(),
+		})
+	case http.MethodPost:
+		var raw map[string]interface{}
+		if err := json.NewDecoder(r.Body).Decode(&raw); err != nil {
+			http.Error(w, "invalid request body", http.StatusBadRequest)
+			return
+		}
+		filter, ok := raw["filter"].(string)
+		if !ok {
+			http.Error(w, `body must carry {"filter": "<text>"}`, http.StatusBadRequest)
+			return
+		}
+		s.orchestrator.SetPreferenceFilter(filter)
+		s.log.Printf("task preference filter set to %q", s.orchestrator.PreferenceFilter())
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"filter": s.orchestrator.PreferenceFilter(),
+		})
+	default:
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
+}
 
 // HandleTaskSearch handles GET /api/tasks/search: a substring search over
 // task output text, read through the date-partitioned log store so callers

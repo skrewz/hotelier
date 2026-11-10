@@ -551,6 +551,20 @@ func (o *Orchestrator) SetTaskPriority(taskID, priority string) error {
 	return nil
 }
 
+// SetPreferenceFilter sets the queue-wide task preference filter (issue #281).
+// While it is set, pending tasks whose text carries the substring are the
+// ones TryAssignNext offers first; once none remain, normal queue semantics
+// apply. Like the concurrency cap this is a live operator control, held in
+// memory and deliberately not persisted.
+func (o *Orchestrator) SetPreferenceFilter(filter string) {
+	o.queue.SetPreferenceFilter(filter)
+}
+
+// PreferenceFilter returns the task preference filter currently in force.
+func (o *Orchestrator) PreferenceFilter() string {
+	return o.queue.PreferenceFilter()
+}
+
 // RequeueTask atomically re-queues a task and clears the guest.
 //
 // Task: ASSIGNED|RUNNING → PENDING (AssignedTo cleared)

@@ -327,6 +327,14 @@
         .task-filter-btn.active[data-status="CANCELLED"] { background: #1c1917; color: #78716c; }
         .task-filter-btn.inactive { opacity: 0.4; }
 
+        /* Task preference filter (issue #281): a substring field that
+           filters the list client-side and, once applied, makes the
+           backend prioritise matching tasks. */
+        .task-pref-row { display: flex; flex-wrap: wrap; gap: 0.375rem; padding: 0.5rem 1rem; background: #0f172a; border-bottom: 1px solid #334155; align-items: center; }
+        .task-pref-input { flex: 1; min-width: 8rem; background: #1e293b; border: 1px solid #334155; border-radius: 0.375rem; color: #e2e8f0; padding: 0.3rem 0.5rem; font-size: 0.8rem; }
+        .task-pref-input:focus { outline: none; border-color: #38bdf8; }
+        .task-pref-applied { background: #1e3a5f; color: #38bdf8; border-color: #38bdf8; }
+
         /* Pending-expand button — shown below task list when pending tasks are hidden */
         .pending-expand-btn { display: block; width: 100%; margin-top: 0.5rem; padding: 0.6rem 1rem;
             background: #1e293b; border: 1px dashed #334155; border-radius: 0.375rem;
@@ -482,6 +490,12 @@
             <div id="tab-tasks" style="display:flex;flex-direction:column;flex:1;overflow-y:auto;min-height:0;">
                 <div id="task-summary" class="task-summary"></div>
                 <div id="task-filter-row" class="task-filter-row"></div>
+                <div class="task-pref-row">
+                    <span class="task-filter-label">Preference:</span>
+                    <input type="text" id="task-pref-filter" class="task-pref-input" placeholder="substring of repo, title, prompt, persona or tags" oninput="onPrefFilterInput(this.value)">
+                    <button id="task-pref-apply" class="btn btn-sm" onclick="applyPrefFilter()">&#127919; Prioritise</button>
+                    <button class="btn btn-sm btn-ghost" onclick="clearPrefFilter()">&#10006; Clear</button>
+                </div>
                 <div id="task-list" style="flex:1;overflow-y:auto;min-height:0;"></div>
             </div>
             <div id="tab-logs" style="display:none;flex:1;overflow-y:auto;min-height:0;position:relative;">
@@ -533,6 +547,13 @@
             FAILED:    true,
             CANCELLED: true,
         };
+
+        // Task preference filter (issue #281). prefFilterText is the live
+        // client-side substring filter, persisted to the address bar as
+        // #filter=<encoded>; prefFilterApplied is the filter the backend is
+        // currently acting on, read from /api/tasks/filter.
+        let prefFilterText = '';
+        let prefFilterApplied = '';
 
         const router = {
             // Push a new URL without reloading the page.
@@ -823,6 +844,145 @@
             fetch('/api/tasks').then(r => r.json()).then(data => renderTasks(data));
         }
 
+        // =====================================================================
+        // Task preference filter (issue #281)
+        //
+        // The text field filters the rendered list by case-insensitive
+        // substring and is persisted to the address bar as a #filter=...
+        // fragment. "Prioritise" sends it to the backend, where matching
+        // pending tasks drain before the rest until none are left (then
+        // normal queue semantics apply). "Clear" clears field and backend.
+        // =====================================================================
+
+        // matchesPrefFilter reports whether a task survives the client-side
+        // substring filter. The fields searched mirror the backend's: repo,
+        // title, prompt, persona and tags.
+        function matchesPrefFilter(t) {
+            if (!prefFilterText) return true;
+            const needle = prefFilterText.toLowerCase();
+            const haystack = [t.id, t.title || '', t.prompt || '', t.repo_ref || '', t.persona || '', (t.tags || []).join(' ')].join(' ').toLowerCase();
+            return haystack.includes(needle);
+        }
+
+        // readPrefFilterHash returns the #filter=... fragment, or '' when the
+        // address bar carries none (or one that cannot be decoded).
+        function readPrefFilterHash() {
+            if (!location.hash.startsWith('#filter=')) return '';
+            try {
+                return decodeURIComponent(location.hash.slice('#filter='.length));
+            } catch (e) {
+                return '';
+            }
+        }
+
+        // updatePrefFilterURL mirrors the field into the address bar without
+        // adding a history entry per keystroke.
+        function updatePrefFilterURL() {
+            const frag = prefFilterText ? '#filter=' + encodeURIComponent(prefFilterText) : '';
+            if (location.hash !== frag) {
+                history.replaceState(null, '', location.pathname + frag);
+            }
+        }
+
+        // syncPrefFilterFromURL adopts the field value from the address bar
+        // (initial load and hash navigation).
+        function syncPrefFilterFromURL() {
+            const v = readPrefFilterHash();
+            if (v !== prefFilterText) {
+                prefFilterText = v;
+                const el = document.getElementById('task-pref-filter');
+                if (el) el.value = v;
+            }
+        }
+
+        // updatePrefFilterControls marks the Prioritise button while the
+        // backend is acting on a filter.
+        function updatePrefFilterControls() {
+            const btn = document.getElementById('task-pref-apply');
+            if (!btn) return;
+            btn.classList.toggle('task-pref-applied', prefFilterApplied !== '');
+            btn.title = prefFilterApplied !== ''
+                ? 'Backend is prioritising tasks matching: ' + prefFilterApplied
+                : 'Send this filter to the backend so matching tasks are prioritised';
+        }
+
+        // syncPrefFilterFromBackend reads the live backend filter on load.
+        // When the address bar carries no fragment, the field seeds from the
+        // backend so an operator opening the dashboard sees what is in force.
+        async function syncPrefFilterFromBackend() {
+            try {
+                const res = await fetch('/api/tasks/filter');
+                const data = await res.json();
+                prefFilterApplied = data.filter || '';
+                if (!prefFilterText && prefFilterApplied) {
+                    prefFilterText = prefFilterApplied;
+                    const el = document.getElementById('task-pref-filter');
+                    if (el) el.value = prefFilterText;
+                    updatePrefFilterURL();
+                }
+            } catch (e) {
+                console.error('preference filter sync failed:', e);
+            }
+            updatePrefFilterControls();
+        }
+
+        function onPrefFilterInput(value) {
+            prefFilterText = value;
+            updatePrefFilterURL();
+            fetch('/api/tasks').then(r => r.json()).then(data => renderTasks(data));
+        }
+
+        async function applyPrefFilter() {
+            const el = document.getElementById('task-pref-filter');
+            const value = (el ? el.value : prefFilterText).trim();
+            if (!value) return; // the Clear button owns the clear path
+            try {
+                const res = await fetch('/api/tasks/filter', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ filter: value })
+                });
+                if (!res.ok) throw new Error('HTTP ' + res.status);
+                const data = await res.json();
+                prefFilterApplied = data.filter || '';
+            } catch (e) {
+                alert('Failed to set the preference filter: ' + e.message);
+                return;
+            }
+            updatePrefFilterControls();
+            refresh();
+        }
+
+        async function clearPrefFilter() {
+            const el = document.getElementById('task-pref-filter');
+            if (el) el.value = '';
+            prefFilterText = '';
+            updatePrefFilterURL();
+            if (prefFilterApplied !== '') {
+                try {
+                    const res = await fetch('/api/tasks/filter', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ filter: '' })
+                    });
+                    if (!res.ok) throw new Error('HTTP ' + res.status);
+                    prefFilterApplied = '';
+                } catch (e) {
+                    alert('Failed to clear the preference filter: ' + e.message);
+                    return;
+                }
+            }
+            updatePrefFilterControls();
+            refresh();
+        }
+
+        // Re-render when the fragment is edited in the address bar or reached
+        // through history navigation.
+        window.addEventListener('hashchange', () => {
+            syncPrefFilterFromURL();
+            fetch('/api/tasks').then(r => r.json()).then(data => renderTasks(data));
+        });
+
         function renderTasks(data) {
             const list = document.getElementById('task-list');
             const tasks = data.tasks || [];
@@ -835,7 +995,7 @@
             renderTaskFilter();
 
             // Apply filter
-            const filtered = tasks.filter(t => taskFilter[t.status] !== false);
+            const filtered = tasks.filter(t => taskFilter[t.status] !== false).filter(t => matchesPrefFilter(t));
 
             if (filtered.length === 0) {
                 if (tasks.length === 0) {
@@ -3126,16 +3286,22 @@
 
         // Handle browser back/forward — re-dispatch to the correct view.
         window.addEventListener('popstate', async () => {
+            syncPrefFilterFromURL();
             await router.dispatch(false);
         });
 
         // Initial load: refresh data, connect WebSocket, then dispatch the
         // current URL to the correct view (restores state after page refresh).
         (async () => {
+            // Read the fragment before dispatch: router.push's replaceState
+            // during dispatch would otherwise drop it from the address bar.
+            syncPrefFilterFromURL();
             connectWS();
             refreshInterval = setInterval(refresh, 5000);
+            await syncPrefFilterFromBackend();
             await refresh();
             await router.dispatch(true);
+            updatePrefFilterURL();
         })();
     </script>
 </body>
