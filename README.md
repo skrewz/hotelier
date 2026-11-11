@@ -114,7 +114,11 @@ no guest poll — the queue drains to the new cap on its own.
 **Changing the cap live.** The dashboard's concurrency field, or
 `POST /api/concurrency` with a JSON body of `{"cap": 3}` — `{"cap": "unlimited"}`
 to lift the cap, `0` to pause new assignments — sets the live cap directly
-(issue #264). Requests must say `Content-Type: application/json` (anything
+(issue #264). Any negative number says the same thing as `"unlimited"`:
+it maps to the same `config.ConcurrencyUnlimited` sentinel the resolver
+reports, and the server's parser is the one owner of that grammar — the
+dashboard posts the field verbatim and shows the server's refusal when a
+value does not parse. Requests must say `Content-Type: application/json` (anything
 else is `415`, a CSRF guard: the endpoint never answers a cross-origin
 simple POST), and bodies are capped at a kilobyte. The route also refuses
 callers who are not the operator (`403`): loopback peers — this machine or
@@ -307,7 +311,7 @@ curl -X POST http://localhost:8080/api/tasks \
 | `POST` | `/api/tasks/filter` | Set or clear the task preference filter; body `{"filter": "<text>"}`, empty string clears, values past 256 bytes rejected with `400` |
 | `GET` | `/api/guests` | List connected guests (UID, host, state, tags), the claim counters and the live concurrency picture |
 | `GET` | `/api/guests/:id` | Get guest details |
-| `POST` | `/api/concurrency` | Set the live concurrency cap; JSON body `{"cap": N}` (whole number, `0` pauses new work) or `{"cap": "unlimited"}`; requires `Content-Type: application/json` and operator identity (loopback peer, or `X-Operator-Token` matching `server.operator_token`); honoured until the next schedule boundary; returns the concurrency picture |
+| `POST` | `/api/concurrency` | Set the live concurrency cap; JSON body `{"cap": N}` (whole number, `0` pauses new work; any negative number or `"unlimited"` lifts the cap); requires `Content-Type: application/json` and operator identity (loopback peer, or `X-Operator-Token` matching `server.operator_token`); honoured until the next schedule boundary; returns the concurrency picture |
 | `GET` | `/api/health` | Health check |
 | `GET` | `/metrics` | Prometheus scrape endpoint: live server state as gauges, plus task-transition counters and histograms |
 | `WS` | `/ws` | WebSocket (JSON-RPC) |

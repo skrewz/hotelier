@@ -1037,17 +1037,23 @@ const { chromium } = require('playwright');
     await settle();
     const health1 = await (await fetch('/api/health')).json();
     const label1 = document.getElementById('concurrency-label').textContent;
+    input.value = '-1';
+    document.querySelector('.concurrency-edit button').click();
+    await settle();
+    const healthNeg = await (await fetch('/api/health')).json();
     input.value = 'unlimited';
     document.querySelector('.concurrency-edit button').click();
     await settle();
     const healthU = await (await fetch('/api/health')).json();
     return {
       cap1: health1.concurrency_cap, label1: label1,
+      capNeg: healthNeg.concurrency_cap,
       capUnlimited: healthU.concurrency_cap, shown: input.value,
     };
   });
   if (capEdit.cap1 !== 1) fail('setting the cap field to 1 should put 1 on /api/health, got ' + JSON.stringify(capEdit.cap1));
   if (!capEdit.label1.includes('Concurrency')) fail('the label should still describe the concurrency picture after an update, got: ' + capEdit.label1);
+  if (capEdit.capNeg !== 'unlimited') fail('a negative cap lifts the cap server-side; the field posts it verbatim, got ' + JSON.stringify(capEdit.capNeg));
   if (capEdit.capUnlimited !== 'unlimited') fail('setting the cap field to "unlimited" should lift the cap on /api/health, got ' + JSON.stringify(capEdit.capUnlimited));
   if (capEdit.shown !== 'unlimited') fail('the field should show the cap the server now states, got: ' + capEdit.shown);
   console.log('PASS: the cap field updates the live concurrency cap end to end');
@@ -1074,11 +1080,11 @@ const { chromium } = require('playwright');
   if (midTyping.value !== '5') fail('a polled refresh must not clobber a cap being typed, field now reads: ' + midTyping.value);
   console.log('PASS: the polled refresh leaves a mid-typing cap field alone');
 
-  // The validation branch in updateConcurrencyCap: invalid text — and a
-  // blank field, which is not a cap the client invents a meaning for —
-  // alerts the operator and posts nothing. /api/health is the arbiter:
-  // the enforced cap must not move. The dialog listener captures the
-  // alert instead of letting it block the script.
+  // Refusals come from the server, which owns the cap grammar: invalid
+  // text — and a blank field — alerts with the server's 400 and posts no
+  // change. /api/health is the arbiter: the enforced cap must not move.
+  // The dialog listener captures the alert instead of letting it block
+  // the script.
   const capAlerts = [];
   const capDialogHandler = dialog => { capAlerts.push(dialog.message()); dialog.dismiss(); };
   page.on('dialog', capDialogHandler);
@@ -1101,7 +1107,7 @@ const { chromium } = require('playwright');
   if (invalidCaps.afterBanana !== invalidCaps.before) fail('"banana" must alert and leave the cap untouched, health moved ' + invalidCaps.before + ' to ' + invalidCaps.afterBanana);
   if (invalidCaps.afterBlank !== invalidCaps.before) fail('a blank field must alert and leave the cap untouched, health moved ' + invalidCaps.before + ' to ' + invalidCaps.afterBlank);
   if (capAlerts.length !== 2) fail('each invalid cap value should alert once, saw ' + capAlerts.length + ' dialogs: ' + JSON.stringify(capAlerts));
-  if (!capAlerts[0].includes('Concurrency cap')) fail('the alert should name the concurrency cap, got: ' + capAlerts[0]);
+  if (!capAlerts[0].includes('oncurrency cap')) fail('the alert should name the concurrency cap, got: ' + capAlerts[0]);
   console.log('PASS: invalid cap values alert and leave the live cap untouched');
 
   // The field must not keep displaying a value that was never applied:

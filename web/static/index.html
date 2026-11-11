@@ -842,18 +842,23 @@
         // scheduled boundary — the schedule's next shrink or expansion
         // still takes over on its own — and nothing about it persists to
         // disk; a config reload or restart returns authority to the file.
+        //
+        // parseCapValue in internal/server/server.go owns the grammar of
+        // the value — a whole number >= 0 (0 pauses new work), any
+        // negative number or the word "unlimited" lifts the cap — and
+        // the field posts whatever was typed straight to it. No client-
+        // side copy of the grammar: a second owner would only disagree
+        // (a typed -1 used to alert here while the same value posted to
+        // the same server lifted the cap), and a refusal surfaces in the
+        // alert with the server's own words.
         async function updateConcurrencyCap() {
             const input = document.getElementById('concurrency-cap-input');
             const raw = input.value.trim();
-            let cap;
-            if (raw.toLowerCase() === 'unlimited') {
-                cap = 'unlimited';
-            } else if (/^\d+$/.test(raw)) {
-                cap = parseInt(raw, 10);
-            } else {
-                alert('Concurrency cap must be a whole number (0 pauses new work) or "unlimited"');
-                return;
-            }
+            // Post a JSON number when the text is one (plain decimal or
+            // exponent — the number grammar parseCapValue reads), the
+            // bare word otherwise; anything else the server refuses with
+            // a 400 and the cap stands still.
+            const cap = /^-?\d+(\.\d+)?([eE][-+]?\d+)?$/.test(raw) ? Number(raw) : raw;
             try {
                 const res = await fetch('/api/concurrency', {
                     method: 'POST',
