@@ -1052,7 +1052,61 @@ const { chromium } = require('playwright');
   if (capEdit.shown !== 'unlimited') fail('the field should show the cap the server now states, got: ' + capEdit.shown);
   console.log('PASS: the cap field updates the live concurrency cap end to end');
 
-  // Restore the live picture before any later screenshots.
+  // The mid-typing guard (issue #264): the polled refresh must not
+  // clobber a value the operator is typing. Type into the focused field
+  // as a user would, force the refresh that the header polls run, and
+  // assert the field still holds what was typed. Without the guard in
+  // renderConcurrency this fails.
+  const capInput = page.locator('#concurrency-cap-input');
+  await capInput.click();
+  await page.keyboard.press('Control+a');
+  await page.keyboard.press('Delete');
+  await page.keyboard.type('5');
+  const midTyping = await page.evaluate(async () => {
+    await refresh();
+    const el = document.getElementById('concurrency-cap-input');
+    return {
+      value: el.value,
+      focused: document.activeElement === el,
+    };
+  });
+  if (!midTyping.focused) fail('the cap field should still be focused after typing into it');
+  if (midTyping.value !== '5') fail('a polled refresh must not clobber a cap being typed, field now reads: ' + midTyping.value);
+  console.log('PASS: the polled refresh leaves a mid-typing cap field alone');
+
+  // The validation branch in updateConcurrencyCap: invalid text — and a
+  // blank field, which is not a cap the client invents a meaning for —
+  // alerts the operator and posts nothing. /api/health is the arbiter:
+  // the enforced cap must not move. The dialog listener captures the
+  // alert instead of letting it block the script.
+  const capAlerts = [];
+  const capDialogHandler = dialog => { capAlerts.push(dialog.message()); dialog.dismiss(); };
+  page.on('dialog', capDialogHandler);
+  const invalidCaps = await page.evaluate(async () => {
+    const el = document.getElementById('concurrency-cap-input');
+    const settle = () => new Promise(r => setTimeout(r, 400));
+    const health = async () => (await (await fetch('/api/health')).json()).concurrency_cap;
+    const before = await health();
+    el.value = 'banana';
+    document.querySelector('.concurrency-edit button').click();
+    await settle();
+    const afterBanana = await health();
+    el.value = '';
+    document.querySelector('.concurrency-edit button').click();
+    await settle();
+    const afterBlank = await health();
+    return { before: before, afterBanana: afterBanana, afterBlank: afterBlank };
+  });
+  page.off('dialog', capDialogHandler);
+  if (invalidCaps.afterBanana !== invalidCaps.before) fail('"banana" must alert and leave the cap untouched, health moved ' + invalidCaps.before + ' to ' + invalidCaps.afterBanana);
+  if (invalidCaps.afterBlank !== invalidCaps.before) fail('a blank field must alert and leave the cap untouched, health moved ' + invalidCaps.before + ' to ' + invalidCaps.afterBlank);
+  if (capAlerts.length !== 2) fail('each invalid cap value should alert once, saw ' + capAlerts.length + ' dialogs: ' + JSON.stringify(capAlerts));
+  if (!capAlerts[0].includes('Concurrency cap')) fail('the alert should name the concurrency cap, got: ' + capAlerts[0]);
+  console.log('PASS: invalid cap values alert and leave the live cap untouched');
+
+  // Restore the live picture before any later screenshots (blur first:
+  // a focused field is deliberately not refreshed by the poll).
+  await page.evaluate(() => document.activeElement.blur());
   await page.evaluate(async () => { await refresh(); });
 
   // Verify the tab set is Tasks + Logs + Search and nothing else (the task
