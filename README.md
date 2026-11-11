@@ -282,6 +282,7 @@ curl -X POST http://localhost:8080/api/tasks \
 | `POST` | `/api/tasks/:id/priority` | Change a PENDING task's priority; body `{"priority": "firefighter\|teacher\|orangutan"}` |
 | `GET` | `/api/tasks/:id/download` | Download the task's whole log trace as JSONL |
 | `GET` | `/api/tasks/search` | Search task output text: `q` (required), `status` (optional), window via `days=N` or `from`/`to` dates |
+| `POST` | `/api/tasks/filter` | Set or clear the task preference filter; body `{"filter": "<text>"}`, empty string clears, values past 256 bytes rejected with `400` |
 | `GET` | `/api/guests` | List connected guests (UID, host, state, tags), the claim counters and the live concurrency picture |
 | `GET` | `/api/guests/:id` | Get guest details |
 | `GET` | `/api/health` | Health check |
@@ -321,6 +322,43 @@ request — it greps every task's output in the window at once and returns the
 ID, title and status of each hit. An operator who wants that aggregate read
 restricted must front the port themselves; nothing here distinguishes one
 caller from another.
+
+The **task preference filter** (issue #281) is a live operator control for
+when inference is tight. The dashboard's *Preference* field filters the task
+list by a case-insensitive substring of each task's repository, title,
+prompt, persona or tags, and persists the text to the address bar as a
+`#filter=...` fragment — the fragment is the field's only persistence path.
+**Prioritise** sends it to the backend (the `POST` endpoint above, a write
+with no read half), where pending tasks matching the substring drain before
+the rest; once no pending task matches, normal queue semantics apply — the
+filter is a preference, never a suppression. **Clear** resets field,
+fragment and backend. Like the concurrency cap the filter is held in memory
+only, so a server restart clears it.
+
+Reach worth stating plainly: like every other route here this endpoint is
+unauthenticated too, and it is the one route that changes scheduling for
+everyone at once — a single `POST` reorders the pending drain for every
+guest and every dashboard, and stands until someone clears it. Because
+that effect is global and lasting, the endpoint also refuses forged
+browser requests: a request whose `Origin` names another *origin* — scheme
+or host differing from this server's own — or which reports
+`Sec-Fetch-Site: cross-site`, is answered `403`, so neither a third-party
+page an operator happens to visit nor a page served over plain HTTP under
+this server's own hostname can bend or reset the order from the operator's
+own browser (in fetch-metadata terms "site" is scheme-blind, so the Origin
+match binds the scheme too: https arrives only where TLS was terminated —
+here or at an edge announcing it with `X-Forwarded-Proto`). Non-browser
+clients carry neither header and are judged as before. It leaves no
+mark on any task, and the applied state is not broadcast to other open
+dashboards (a reload there restores the field from the fragment but not
+the applied mark, so the page cannot tell them the order is bent), so the one log
+line naming the filter is the record of when the order was bent — and,
+since nothing here distinguishes one caller from another, not of by whom. A
+deployment that must keep the write to operators enforces that at the
+network edge; the fetch-metadata check above covers the one path that
+does not pass through the edge — the operator's own browser. The filter
+text is capped at 256 bytes — a fragment of a repository name or title has
+no use past that — and an oversized value is refused rather than stored.
 
 `/api/guests` also carries a `stats` object. The two action counters,
 `cancelled_while_running` and `cancelled_before_start`, cover every `task.cancel`

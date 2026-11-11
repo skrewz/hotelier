@@ -746,6 +746,9 @@ func (s *Server) Start() error {
 	// Exact match: ServeMux prefers "/api/tasks/search" over the
 	// "/api/tasks/" subtree, so a search is never mistaken for a task ID.
 	mux.HandleFunc("/api/tasks/search", s.HandleTaskSearch)
+	// Exact match: as with /api/tasks/search, ServeMux prefers this over the
+	// "/api/tasks/" subtree, so "filter" is never mistaken for a task ID.
+	mux.HandleFunc("/api/tasks/filter", s.HandleTaskFilter)
 	mux.HandleFunc("/api/tasks/", s.HandleTaskDetail)
 	mux.HandleFunc("/api/guests", s.HandleGuests)
 	mux.HandleFunc("/api/guests/", s.HandleGuestDetail)
@@ -2655,6 +2658,134 @@ const (
 	// excerpt carries the rest.
 	maxSearchErrorsLogged = 10
 )
+
+// The task preference filter (issue #281) is a fragment of a repository
+// name, title, prompt, persona or tag, so a few hundred bytes bounds any
+// value an operator would type. The body bound carries the JSON envelope
+// around the filter text; both bounds exist so an oversized request is
+// refused rather than kept in the queue and repeated into the log.
+const (
+	maxPreferenceFilterLen       = 256
+	maxPreferenceFilterBodyBytes = 8 * maxPreferenceFilterLen
+)
+
+// HandleTaskFilter handles POST /api/tasks/filter (issue #281): it sets or
+// clears the live task preference filter. The body must carry
+// {"filter": "<text>"}, and the empty string clears; the response echoes
+// what is now in force, so the caller learns the trimmed value.
+//
+// While a filter is set the queue drains first the pending tasks carrying
+// the substring in one of their fields (repository, title, prompt, persona
+// or tags); once no pending task matches, normal queue
+// semantics apply — the filter is a preference, never a suppression.
+//
+// There is no read half: the dashboard's persistence path for the field is
+// the #filter= fragment in the address bar, so nothing needs the live value
+// back and the endpoint is one write with no read.
+//
+// Like the concurrency cap this is a live operator control held in memory,
+// so a server restart clears it. Reach worth stating plainly: like every
+// other route on this server it is unauthenticated, and unlike the
+// per-task controls it is a *global* one — one POST reorders the pending
+// drain for every guest, and it stands until someone clears it. Because
+// the effect is global and lasting, the route is also the first place a
+// forged browser request would pay off, so it applies the fetch-metadata
+// check in rejectsCrossSite before touching the queue: a request a
+// browser cannot attribute to this server's own origin — scheme and host
+// alike — is refused with 403 whatever its content type or submission
+// style. The README's preference-filter
+// section states what all this means operationally.
+func (s *Server) HandleTaskFilter(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	if rejectsCrossSite(r) {
+		http.Error(w, "cross-site requests are refused", http.StatusForbidden)
+		return
+	}
+
+	// The body bound is the filter bound plus slack for the JSON envelope
+	// (escapes expand); a truncated read fails as a bad body below.
+	var raw map[string]interface{}
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxPreferenceFilterBodyBytes)).Decode(&raw); err != nil {
+		http.Error(w, "invalid request body", http.StatusBadRequest)
+		return
+	}
+	filter, ok := raw["filter"].(string)
+	if !ok {
+		http.Error(w, `body must carry {"filter": "<text>"}`, http.StatusBadRequest)
+		return
+	}
+	if len(strings.TrimSpace(filter)) > maxPreferenceFilterLen {
+		http.Error(w, "filter too long", http.StatusBadRequest)
+		return
+	}
+
+	// The queue owns the one log line this action produces, and it says
+	// whether the filter was set or cleared.
+	s.orchestrator.SetPreferenceFilter(filter)
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"filter": s.orchestrator.PreferenceFilter(),
+	})
+}
+
+// rejectsCrossSite reports whether the request was forged by a third-party
+// page — the CSRF case this route is uniquely exposed to, because its
+// effect is global and lasting. A form submission is a *simple* request:
+// the browser sends it cross-site without a CORS preflight, and the JSON
+// decoder here would parse its body whatever the content type said, so
+// content-type sniffing is not a defence. The check follows the
+// fetch-metadata policy OWASP recommends for this case (see
+// https://cheatsheetseries.owasp.org/cheatsheets/Cross_Site_Request_Forgery_Prevention_Cheat_Sheet.html#fetch-metadata-based-origin-validation):
+// a browser-supplied Origin must name this server's own *origin* — scheme
+// included, not just the host — and a request declaring
+// Sec-Fetch-Site: cross-site is refused even if the Origin is withheld.
+// Browsers always supply one of the two on a POST.
+//
+// The scheme matters because "site" in fetch-metadata terms is
+// scheme-blind: a page served over plain HTTP under this server's own
+// hostname is "same-site" to it (see
+// https://developer.mozilla.org/en-US/docs/Web/HTTP/Reference/Headers/Sec-Fetch-Site),
+// so a host-only Origin match would let such a page forge the write
+// through the Sec-Fetch-Site fallback. Binding the scheme closes that
+// downgrade path.
+// Non-browser clients (curl, service integrations, this server's own
+// guests) send neither header and pass through: the route stays
+// unauthenticated, as every route on this listener is.
+func rejectsCrossSite(r *http.Request) bool {
+	if origin := r.Header.Get("Origin"); origin != "" {
+		u, err := url.Parse(origin)
+		if err != nil {
+			return true
+		}
+		return !strings.EqualFold(u.Host, r.Host) || !strings.EqualFold(u.Scheme, requestScheme(r))
+	}
+	return r.Header.Get("Sec-Fetch-Site") == "cross-site"
+}
+
+// requestScheme names the scheme the request arrived on: https when this
+// server terminated TLS itself, when a TLS-terminating edge says so with
+// X-Forwarded-Proto (first hop wins), or plain http otherwise. The server
+// listens for TLS itself nowhere, so behind no edge that "otherwise" is the
+// whole story; X-Forwarded-Proto only lets a fronting proxy state the
+// client-facing scheme honestly. Forgery of that header by a non-browser
+// client changes nothing — such a client can withhold Origin entirely and
+// be judged by the Sec-Fetch-Site branch anyway.
+func requestScheme(r *http.Request) string {
+	if r.TLS != nil {
+		return "https"
+	}
+	if proto := r.Header.Get("X-Forwarded-Proto"); proto != "" {
+		if first, _, _ := strings.Cut(proto, ","); strings.EqualFold(strings.TrimSpace(first), "https") {
+			return "https"
+		}
+	}
+	return "http"
+}
 
 // HandleTaskSearch handles GET /api/tasks/search: a substring search over
 // task output text, read through the date-partitioned log store so callers
