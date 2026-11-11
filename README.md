@@ -127,7 +127,7 @@ local authenticating proxy forwarding to it — so the route fails closed
 against strangers, and a DNS-rebound web page cannot borrow the
 operator's own browser to move the cap. A shared-secret mechanism for
 operators who are genuinely remote is a cross-route decision and lives
-with the rest of that posture question in the follow-up issue rather
+with the rest of that posture question in issue #285 rather
 than here. The
 change takes effect
 at once, the way a reload does, and is never persisted to disk. It rules

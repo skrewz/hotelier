@@ -2512,8 +2512,8 @@ func isLoopbackPeer(r *http.Request) bool {
 // Host (hostNamesLoopback), which is what stops a DNS-rebound page from
 // borrowing the operator's own browser. A shared-secret mechanism for
 // genuinely remote operators is a cross-route design decision and lives
-// with the rest of the posture question in the follow-up issue, not here
-// with one route's share of it.
+// with the rest of the posture question in issue #285, not here with
+// one route's share of it.
 func (s *Server) operatorAllowed(r *http.Request) bool {
 	if isLoopbackPeer(r) && hostNamesLoopback(r) {
 		return true
@@ -2569,7 +2569,7 @@ func hostNamesLoopback(r *http.Request) bool {
 // Every other surface here keeps the repository's standing posture — the
 // HTTP API performs no authentication; bind to loopback or terminate
 // behind an authenticating proxy — and extending this check to the whole
-// API is tracked as a follow-up.
+// API is tracked in issue #285.
 func (s *Server) HandleConcurrency(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
