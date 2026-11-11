@@ -19,6 +19,7 @@ func postConcurrency(t *testing.T, srv *Server, body string) *httptest.ResponseR
 	t.Helper()
 	req := httptest.NewRequest(http.MethodPost, "/api/concurrency", bytes.NewReader([]byte(body)))
 	req.Header.Set("Content-Type", "application/json")
+	req.RemoteAddr = "127.0.0.1:1234" // the operator by the posture this route enforces
 	w := httptest.NewRecorder()
 	srv.HandleConcurrency(w, req)
 	return w
@@ -176,7 +177,7 @@ func TestConcurrencyOverride_ScheduleBoundaryEndsOverride(t *testing.T) {
 
 	dayStart := time.Date(2026, 6, 15, 6, 0, 0, 0, time.UTC)
 	srv.syncConcurrencyCap(dayStart)
-	if !srv.setConcurrencyCapOverride(6, dayStart) {
+	if !srv.setConcurrencyCapOverride(6, "test", dayStart) {
 		t.Fatal("raising the cap from 4 to 6 is a rise the held queue should act on")
 	}
 	if got := srv.orchestrator.ConcurrencyCap(); got != 6 {
@@ -216,7 +217,7 @@ func TestConcurrencyOverride_ScheduleExpansionIsRespected(t *testing.T) {
 
 	night := time.Date(2026, 6, 15, 22, 0, 0, 0, time.UTC)
 	srv.syncConcurrencyCap(night) // schedule cap 2 in force until 23:00
-	srv.setConcurrencyCapOverride(1, night)
+	srv.setConcurrencyCapOverride(1, "test", night)
 	if got := srv.orchestrator.ConcurrencyCap(); got != 1 {
 		t.Fatalf("expected the override 1 at the orchestrator, got %d", got)
 	}
@@ -236,7 +237,7 @@ func TestConcurrencyOverride_ScheduleExpansionIsRespected(t *testing.T) {
 func TestConcurrencyOverride_WithoutAScheduleLivesUntilReload(t *testing.T) {
 	srv := New(config.ServerConfig{Host: "127.0.0.1", Port: 0, MaxConcurrentTasks: 3})
 	now := time.Now()
-	srv.setConcurrencyCapOverride(5, now)
+	srv.setConcurrencyCapOverride(5, "test", now)
 	srv.syncConcurrencyCap(now.Add(time.Hour))
 	if got := srv.orchestrator.ConcurrencyCap(); got != 5 {
 		t.Fatalf("expected the override to hold without a schedule, got %d", got)
@@ -264,7 +265,7 @@ func TestConcurrencyOverride_ExpiryLabelsTheEnforcedCap(t *testing.T) {
 
 	dayStart := time.Date(2026, 6, 15, 6, 0, 0, 0, time.UTC)
 	srv.syncConcurrencyCap(dayStart)
-	srv.setConcurrencyCapOverride(6, dayStart)
+	srv.setConcurrencyCapOverride(6, "test", dayStart)
 
 	// Past the 07:00 boundary but before any tick has resolved it: the
 	// orchestrator still states 6, so the source must still say so too.
@@ -297,6 +298,7 @@ func TestConcurrencyOverride_RejectsCrossSiteSimplePOSTs(t *testing.T) {
 	srv := capTestServer(t, config.ServerConfig{Host: "127.0.0.1", Port: 0, MaxConcurrentTasks: 3})
 	for _, ct := range []string{"", "text/plain", "application/x-www-form-urlencoded", "application/xml"} {
 		req := httptest.NewRequest(http.MethodPost, "/api/concurrency", strings.NewReader(`{"cap": 0}`))
+		req.RemoteAddr = "127.0.0.1:1234" // identity settled; only the Content-Type is in question
 		if ct != "" {
 			req.Header.Set("Content-Type", ct)
 		}
@@ -314,10 +316,62 @@ func TestConcurrencyOverride_RejectsCrossSiteSimplePOSTs(t *testing.T) {
 	// like must not lock out a correct client).
 	req := httptest.NewRequest(http.MethodPost, "/api/concurrency", strings.NewReader(`{"cap": 1}`))
 	req.Header.Set("Content-Type", "application/json; charset=utf-8")
+	req.RemoteAddr = "127.0.0.1:1234"
 	w := httptest.NewRecorder()
 	srv.HandleConcurrency(w, req)
 	if w.Code != http.StatusOK {
 		t.Fatalf("expected 200 for application/json with a parameter, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+// TestConcurrencyOverride_RequiresOperatorIdentity: reaching the route is
+// not a credential (review 1635). A non-loopback peer with no identity
+// cannot pause the fleet or lift its cap; a wrong token is no better than
+// none. With server.operator_token set, the shared token identifies a
+// remote peer, and a loopback peer is the operator by the documented
+// posture.
+func TestConcurrencyOverride_RequiresOperatorIdentity(t *testing.T) {
+	postFrom := func(t *testing.T, srv *Server, remote, token string) *httptest.ResponseRecorder {
+		t.Helper()
+		req := httptest.NewRequest(http.MethodPost, "/api/concurrency", strings.NewReader(`{"cap": 1}`))
+		req.Header.Set("Content-Type", "application/json")
+		req.RemoteAddr = remote
+		if token != "" {
+			req.Header.Set("X-Operator-Token", token)
+		}
+		w := httptest.NewRecorder()
+		srv.HandleConcurrency(w, req)
+		return w
+	}
+
+	noToken := capTestServer(t, config.ServerConfig{Host: "127.0.0.1", Port: 0, MaxConcurrentTasks: 3})
+	if w := postFrom(t, noToken, "203.0.113.9:5555", ""); w.Code != http.StatusForbidden {
+		t.Fatalf("expected an anonymous remote POST to be refused with 403, got %d: %s", w.Code, w.Body.String())
+	}
+	if got := noToken.orchestrator.ConcurrencyCap(); got != 3 {
+		t.Fatalf("expected a refused request to leave the cap at 3, got %d", got)
+	}
+	if w := postFrom(t, noToken, "[::1]:4321", ""); w.Code != http.StatusOK {
+		t.Fatalf("expected a loopback POST to be admitted, got %d: %s", w.Code, w.Body.String())
+	}
+	if got := noToken.orchestrator.ConcurrencyCap(); got != 1 {
+		t.Fatalf("expected the loopback POST to set the cap to 1, got %d", got)
+	}
+
+	tokened := capTestServer(t, config.ServerConfig{Host: "127.0.0.1", Port: 0, MaxConcurrentTasks: 3, OperatorToken: "s3cret-operator-token"})
+	for _, tok := range []string{"", "wrong-token"} {
+		if w := postFrom(t, tokened, "203.0.113.9:5555", tok); w.Code != http.StatusForbidden {
+			t.Fatalf("token %q: expected 403 from a remote peer, got %d", tok, w.Code)
+		}
+	}
+	if got := tokened.orchestrator.ConcurrencyCap(); got != 3 {
+		t.Fatalf("expected refused tokens to leave the cap at 3, got %d", got)
+	}
+	if w := postFrom(t, tokened, "203.0.113.9:5555", "s3cret-operator-token"); w.Code != http.StatusOK {
+		t.Fatalf("expected the shared token to admit a remote peer, got %d: %s", w.Code, w.Body.String())
+	}
+	if got := tokened.orchestrator.ConcurrencyCap(); got != 1 {
+		t.Fatalf("expected the admitted request to set the cap to 1, got %d", got)
 	}
 }
 
@@ -341,7 +395,7 @@ func TestConcurrencyOverride_RejectsOversizedBody(t *testing.T) {
 func TestConcurrencyOverride_EffectiveConcurrencyAgrees(t *testing.T) {
 	srv := New(config.ServerConfig{Host: "127.0.0.1", Port: 0, MaxConcurrentTasks: 3})
 	now := time.Now()
-	srv.setConcurrencyCapOverride(2, now)
+	srv.setConcurrencyCapOverride(2, "test", now)
 	if got := srv.EffectiveConcurrency(now); got != 2 {
 		t.Fatalf("expected EffectiveConcurrency to honour the override, got %d", got)
 	}

@@ -3,6 +3,13 @@
 # keep this port behind an authenticating proxy (see the README).
 host: "0.0.0.0"
 port: 8080
+# Shared secret for the state-changing concurrency route
+# (POST /api/concurrency). Loopback peers — this machine, or a local
+# authenticating proxy — are admitted without it; a non-loopback peer must
+# present it in the X-Operator-Token header, and with no token configured
+# such a peer is refused outright (403). Enforces nothing on the other
+# routes.
+#operator_token: "a-long-random-secret"
 read_timeout: 30
 write_timeout: 30
 max_log_size: 1048576

@@ -73,6 +73,7 @@ max_concurrent_tasks: 0
 | `concurrency_schedule` | Daily schedule of concurrency caps. Each entry (`{ at: "HH:MM", concurrency: N }`) takes effect at that wall-clock time and holds until the next entry; the last entry of the day holds through midnight to the first. In an entry `0` is a real cap and pauses all new work — the opposite of `max_concurrent_tasks: 0`, which means unlimited. The resolver keeps the two apart: it reports "no cap" as `config.ConcurrencyUnlimited` (`-1`), which no configuration can carry, so a returned `0` always means "start nothing". | — |
 | `schedule_timezone` | IANA zone name the schedule's `at` times are interpreted in, so boundaries follow the wall clock across DST. The server binary embeds the tz database (`time/tzdata`), so a zone name resolves even in the scratch container image, which ships no `/usr/share/zoneinfo`. | `"UTC"` |
 | `log_retention_days` | How many days of task logs the prune sweep keeps. Date directories older than today minus this many days are removed at startup and on the cleanup tick; the current day and any in-window day are left completely alone, and `queue_dir` is never touched. Following the `max_guests` convention, `0` disables pruning. | `14` |
+| `operator_token` | Shared secret admitting non-loopback peers to `POST /api/concurrency` via the `X-Operator-Token` header. Loopback peers are admitted without it; with no token configured, non-loopback requests to that route are refused (`403`). It enforces nothing on the other routes — see “Changing the cap live” below. | _unset_ |
 
 **The HTTP API performs no authentication and there is no TLS.** A server
 bound to `0.0.0.0` serves the dashboard, the guest registry and the task logs
@@ -115,7 +116,12 @@ no guest poll — the queue drains to the new cap on its own.
 to lift the cap, `0` to pause new assignments — sets the live cap directly
 (issue #264). Requests must say `Content-Type: application/json` (anything
 else is `415`, a CSRF guard: the endpoint never answers a cross-origin
-simple POST), and bodies are capped at a kilobyte. The change takes effect
+simple POST), and bodies are capped at a kilobyte. The route also refuses
+callers who are not the operator (`403`): loopback peers — this machine or
+a local authenticating proxy — are admitted, a non-loopback peer must
+present `server.operator_token` in the `X-Operator-Token` header, and with
+no token configured non-loopback requests are refused outright. The
+change takes effect
 at once, the way a reload does, and is never persisted to disk. It rules
 until the next boundary of the concurrency schedule, when the scheduled
 shrink or expansion takes over again; with no schedule it rules until the
@@ -301,7 +307,7 @@ curl -X POST http://localhost:8080/api/tasks \
 | `POST` | `/api/tasks/filter` | Set or clear the task preference filter; body `{"filter": "<text>"}`, empty string clears, values past 256 bytes rejected with `400` |
 | `GET` | `/api/guests` | List connected guests (UID, host, state, tags), the claim counters and the live concurrency picture |
 | `GET` | `/api/guests/:id` | Get guest details |
-| `POST` | `/api/concurrency` | Set the live concurrency cap; JSON body `{"cap": N}` (whole number, `0` pauses new work) or `{"cap": "unlimited"}`; requires `Content-Type: application/json`; honoured until the next schedule boundary; returns the concurrency picture |
+| `POST` | `/api/concurrency` | Set the live concurrency cap; JSON body `{"cap": N}` (whole number, `0` pauses new work) or `{"cap": "unlimited"}`; requires `Content-Type: application/json` and operator identity (loopback peer, or `X-Operator-Token` matching `server.operator_token`); honoured until the next schedule boundary; returns the concurrency picture |
 | `GET` | `/api/health` | Health check |
 | `GET` | `/metrics` | Prometheus scrape endpoint: live server state as gauges, plus task-transition counters and histograms |
 | `WS` | `/ws` | WebSocket (JSON-RPC) |

@@ -2,12 +2,14 @@ package server
 
 import (
 	"context"
+	"crypto/subtle"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
 	"math"
 	"mime"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -634,8 +636,10 @@ func (s *Server) syncConcurrencyCap(now time.Time) bool {
 // setConcurrencyCapOverride installs newCap as the live concurrency cap
 // until the next scheduled boundary after now (issue #264). Like a reload
 // that raises the cap, it reports whether the cap rose, so the caller can
-// drain the queue the old cap was holding back.
-func (s *Server) setConcurrencyCapOverride(newCap int, now time.Time) bool {
+// drain the queue the old cap was holding back. remote names the peer the
+// request came from, recorded on the log line so a cap change is
+// attributable after the fact.
+func (s *Server) setConcurrencyCapOverride(newCap int, remote string, now time.Time) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -650,7 +654,7 @@ func (s *Server) setConcurrencyCapOverride(newCap int, now time.Time) bool {
 
 	rose := capIsGreater(newCap, s.orchestrator.ConcurrencyCap())
 	s.orchestrator.SetConcurrencyCap(newCap)
-	s.log.Printf("concurrency cap set to %v by the API, %s", capLabel(newCap), until)
+	s.log.Printf("concurrency cap set to %v by the API from %s, %s", capLabel(newCap), remote, until)
 	return rose
 }
 
@@ -2493,6 +2497,42 @@ func (s *Server) concurrencyStatus(now time.Time) map[string]interface{} {
 // is an attack or a mistake, not a cap.
 const concurrencyBodyLimit = 1024
 
+// isLoopbackPeer reports whether the peer address of r names a loopback
+// address — the operator's own machine, or an authenticating proxy
+// running beside the server. A peer address the transport does not carry
+// (an empty or unparsable RemoteAddr) is not loopback: it fails closed.
+func isLoopbackPeer(r *http.Request) bool {
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		return false
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
+}
+
+// operatorAllowed is the identity check on the state-changing concurrency
+// route (issue #264 review): whoever moves the fleet-wide cap must be the
+// operator, not merely someone who can open a socket. A loopback peer is
+// the operator by the posture this repository documents (bind to loopback
+// or terminate authentication at a local proxy); anything else must
+// present the shared server.operator_token. With no token configured a
+// non-loopback peer is refused outright — the route fails closed instead
+// of trusting a network posture nothing enforces. The check lives inside
+// the handler, not in a wrapper on one mount of it, so every mount of
+// this route enforces it; extending the same treatment to the other
+// state-changing routes is a follow-up issue.
+func (s *Server) operatorAllowed(r *http.Request) bool {
+	if isLoopbackPeer(r) {
+		return true
+	}
+	if s.cfg.OperatorToken != "" &&
+		subtle.ConstantTimeCompare([]byte(r.Header.Get("X-Operator-Token")), []byte(s.cfg.OperatorToken)) == 1 {
+		return true
+	}
+	s.log.Printf("concurrency cap request from %s refused: no operator identity", r.RemoteAddr)
+	return false
+}
+
 // HandleConcurrency handles the /api/concurrency endpoint (issue #264):
 // POST sets the live concurrency cap at runtime, with no persistence to
 // disk. The value takes effect immediately — the same contract a reload
@@ -2508,13 +2548,25 @@ const concurrencyBodyLimit = 1024
 // string "unlimited" — like any negative number — lifts the cap entirely.
 // The request must say `Content-Type: application/json` (anything else is
 // 415, a CSRF guard: this endpoint must never answer a cross-origin
-// simple POST), and a body beyond a kilobyte is refused.
+// simple POST), and a body beyond a kilobyte is refused. The handler
+// enforces operator identity first (operatorAllowed): a peer that is
+// neither loopback nor holding the configured server.operator_token gets
+// 403 before the cap moves.
 //
-// As on every surface here, the HTTP API performs no authentication; bind
-// to loopback or terminate behind an authenticating proxy.
+// Every other surface here keeps the repository's standing posture — the
+// HTTP API performs no authentication; bind to loopback or terminate
+// behind an authenticating proxy — and extending this check to the whole
+// API is tracked as a follow-up.
 func (s *Server) HandleConcurrency(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	// Identity before anything else (issue #264 review): reaching this
+	// route is not itself a credential.
+	if !s.operatorAllowed(r) {
+		http.Error(w, "operator identity required: connect over loopback or present X-Operator-Token", http.StatusForbidden)
 		return
 	}
 
@@ -2553,7 +2605,7 @@ func (s *Server) HandleConcurrency(w http.ResponseWriter, r *http.Request) {
 	}
 
 	now := time.Now()
-	rose := s.setConcurrencyCapOverride(newCap, now)
+	rose := s.setConcurrencyCapOverride(newCap, r.RemoteAddr, now)
 	if rose {
 		// A raised cap is itself the event the held queue was waiting on;
 		// drain it outside the lock, as reload and the sync tick do
