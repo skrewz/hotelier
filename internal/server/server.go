@@ -589,15 +589,14 @@ func (s *Server) pushConcurrencyCapLocked(cfg config.ServerConfig, now time.Time
 
 // effectiveCapLocked resolves the cap in force at now, honouring a live
 // runtime override of the kind /api/concurrency sets (issue #264). An
-// override expires at the next scheduled boundary that existed when it was
-// set — the schedule's next shrink or expansion is still respected — and
-// with no schedule it holds until a reload clears it. Expiry is decided by
-// overrideRulesLocked, the single owner of that verdict, so the value and
-// its provenance can never split on whether the override still rules.
+// override rules while it is installed and its expiry has not arrived —
+// no expiry instant means no schedule was configured, and the override
+// holds until a reload clears it — so the schedule's next shrink or
+// expansion is still respected. The caller must hold s.mu.
 func (s *Server) effectiveCapLocked(cfg config.ServerConfig, now time.Time) int {
 	scheduled := cfg.EffectiveConcurrency(now)
 	if s.capOverride != nil {
-		if s.overrideRulesLocked(now) {
+		if s.capOverrideExpires.IsZero() || now.Before(s.capOverrideExpires) {
 			return *s.capOverride
 		}
 		s.log.Printf("concurrency cap override %v expired at %s: scheduled cap %v takes over",
@@ -606,18 +605,6 @@ func (s *Server) effectiveCapLocked(cfg config.ServerConfig, now time.Time) int 
 		s.capOverrideExpires = time.Time{}
 	}
 	return scheduled
-}
-
-// overrideRulesLocked reports whether a live cap override (issue #264)
-// still rules at now. It is the single owner of that verdict; the one
-// place provenance is decided (concurrencyStatus) needs no time test
-// because an override is installed exactly while its number is the one
-// enforced — the sync tick that hands the cap back clears the field.
-func (s *Server) overrideRulesLocked(now time.Time) bool {
-	if s.capOverride == nil {
-		return false
-	}
-	return s.capOverrideExpires.IsZero() || now.Before(s.capOverrideExpires)
 }
 
 // syncConcurrencyCap re-resolves the cap against the schedule at now and
