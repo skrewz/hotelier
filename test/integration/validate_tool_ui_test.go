@@ -1104,6 +1104,52 @@ const { chromium } = require('playwright');
   if (!capAlerts[0].includes('Concurrency cap')) fail('the alert should name the concurrency cap, got: ' + capAlerts[0]);
   console.log('PASS: invalid cap values alert and leave the live cap untouched');
 
+  // The field must not keep displaying a value that was never applied:
+  // the poll leaves a mid-typing field alone, but leaving focus restores
+  // the enforced cap, and Enter applies the value (issue #264 review).
+  // Without the blur restore this field would still read 9 while
+  // /api/health says unlimited; without the Enter binding, Enter does
+  // nothing.
+  await capInput.click();
+  await page.keyboard.press('Control+a');
+  await page.keyboard.press('Delete');
+  await page.keyboard.type('9');
+  const capBlur = await page.evaluate(async () => {
+    document.getElementById('concurrency-cap-input').blur();
+    const health = (await (await fetch('/api/health')).json()).concurrency_cap;
+    return { shown: document.getElementById('concurrency-cap-input').value, health: health };
+  });
+  if (capBlur.shown !== String(capBlur.health)) fail('a blurred cap field must show the enforced cap again, field: ' + capBlur.shown + ', health: ' + JSON.stringify(capBlur.health));
+  console.log('PASS: a blurred cap field shows the enforced cap again');
+
+  // Enter in the field applies the value: the same contract the Set
+  // button has, proven against /api/health, then restored the same way.
+  await capInput.click();
+  await page.keyboard.press('Control+a');
+  await page.keyboard.press('Delete');
+  await page.keyboard.type('3');
+  await page.keyboard.press('Enter');
+  const capEnter = await page.evaluate(async () => {
+    await new Promise(r => setTimeout(r, 400));
+    return {
+      health: (await (await fetch('/api/health')).json()).concurrency_cap,
+      shown: document.getElementById('concurrency-cap-input').value,
+    };
+  });
+  if (capEnter.health !== 3) fail('Enter in the cap field should apply the value, /api/health states ' + JSON.stringify(capEnter.health));
+  if (capEnter.shown !== '3') fail('the field should show the applied cap even while focused, got ' + capEnter.shown);
+  await page.keyboard.press('Control+a');
+  await page.keyboard.press('Delete');
+  await page.keyboard.type('unlimited');
+  await page.keyboard.press('Enter');
+  const capRestored = await page.evaluate(async () => {
+    await new Promise(r => setTimeout(r, 400));
+    return (await (await fetch('/api/health')).json()).concurrency_cap;
+  });
+  if (capRestored !== 'unlimited') fail('Enter should restore the unlimited cap, got ' + JSON.stringify(capRestored));
+  await page.evaluate(() => document.activeElement.blur());
+  console.log('PASS: Enter applies the cap field end to end');
+
   // Restore the live picture before any later screenshots (blur first:
   // a focused field is deliberately not refreshed by the poll).
   await page.evaluate(() => document.activeElement.blur());

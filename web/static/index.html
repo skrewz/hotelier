@@ -467,7 +467,9 @@
                 <div class="stat-value concurrency-edit">
                     <input type="text" id="concurrency-cap-input" class="concurrency-input"
                            aria-label="Live concurrency cap: a whole number, or unlimited"
-                           title="Live concurrency cap — a number (0 pauses new work), or 'unlimited'. The next scheduled change still applies.">
+                           title="Live concurrency cap — a number (0 pauses new work), or 'unlimited'. The next scheduled change still applies."
+                           onblur="restoreConcurrencyField()"
+                           onkeydown="if (event.key === 'Enter') updateConcurrencyCap();">
                     <button class="btn btn-sm" onclick="updateConcurrencyCap()">Set</button>
                 </div>
                 <div class="stat-label" id="concurrency-label">Concurrency</div>
@@ -789,12 +791,18 @@
             renderConcurrency(guests.concurrency);
         }
 
+        // lastConcurrency keeps the newest picture the server stated, so
+        // the cap field can be restored to the enforced number when it
+        // loses focus (see restoreConcurrencyField, issue #264).
+        let lastConcurrency = null;
+
         // renderConcurrency draws the concurrency picture (issue #250) into
         // the editable cap field and the label below it (issue #264): the
         // field carries the cap in force — the number an operator can
         // change — and the label carries what the cap is doing: in flight,
         // the next scheduled change, and any queue it is holding back.
         function renderConcurrency(c) {
+            lastConcurrency = c;
             const input = document.getElementById('concurrency-cap-input');
             const label = document.getElementById('concurrency-label');
             if (!c || c.cap === undefined || c.cap === null) {
@@ -813,6 +821,20 @@
                 bits.push(c.waiting_on_cap + ' waiting on cap');
             }
             label.textContent = bits.join(' \u00b7 ');
+        }
+
+        // restoreConcurrencyField puts the server's number back into the
+        // cap field when it loses focus. The poll deliberately leaves a
+        // focused field alone while the operator types, so without this a
+        // typed-but-never-applied value could stay on screen indefinitely
+        // after the operator clicked away — the one way the header could
+        // show a cap that is not in force (issue #264 review). Enter in
+        // the field applies the value instead, so typing has a defined
+        // outcome either way.
+        function restoreConcurrencyField() {
+            const input = document.getElementById('concurrency-cap-input');
+            const c = lastConcurrency;
+            input.value = (!c || c.cap === undefined || c.cap === null) ? '' : c.cap;
         }
 
         // updateConcurrencyCap posts the cap field to /api/concurrency
@@ -843,7 +865,12 @@
                     alert('Failed to set concurrency cap (HTTP ' + res.status + '): ' + errText.trim());
                     return;
                 }
-                renderConcurrency(await res.json());
+                const picture = await res.json();
+                renderConcurrency(picture);
+                // The typed value is now the applied value: state it in the
+                // field even when the field still holds focus (Enter), where
+                // the guard above would otherwise skip the refresh.
+                input.value = picture.cap;
             } catch (e) {
                 alert('Failed to set concurrency cap: ' + e.message);
             }
