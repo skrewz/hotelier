@@ -611,6 +611,10 @@ func (s *Server) effectiveCapLocked(cfg config.ServerConfig, now time.Time) int 
 // pushes it into the orchestrator. It reports whether the cap rose, so the
 // caller can drain the queue (issue #249). Crossing a 07:00 boundary is not an
 // event the server receives from anyone; this is how the schedule is noticed.
+// Resolving may retire an override that has expired at its schedule
+// boundary, so this takes the write lock, can log, and must never be
+// called while the caller holds s.mu (the RWMutex is not reentrant) —
+// the same rule EffectiveConcurrency states.
 func (s *Server) syncConcurrencyCap(now time.Time) bool {
 	// A write lock: resolving the cap may expire and clear a live override
 	// (issue #264), which a read lock must not do.
