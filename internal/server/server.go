@@ -1914,16 +1914,19 @@ func (s *Server) HandleWebUI(w http.ResponseWriter, r *http.Request) {
 	http.NotFound(w, r)
 }
 
+// capLabel states a cap for a JSON surface: the unlimited case in words, so
+// a bare -1 does not read as a broken number (issue #249). /api/health and
+// the concurrency picture on /api/guests share it so the two cannot drift.
+func capLabel(cap int) interface{} {
+	if cap == config.ConcurrencyUnlimited {
+		return "unlimited"
+	}
+	return cap
+}
+
 // handleHealth returns the server health status.
 // HandleHealth returns the server health status.
 func (s *Server) HandleHealth(w http.ResponseWriter, r *http.Request) {
-	currentCap := s.orchestrator.ConcurrencyCap()
-	// State the unlimited case in words: a bare -1 in JSON would read as a
-	// broken number rather than as "no cap" (issue #249).
-	var capLabel interface{} = currentCap
-	if currentCap == config.ConcurrencyUnlimited {
-		capLabel = "unlimited"
-	}
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]interface{}{
 		"status": "healthy",
@@ -1931,8 +1934,16 @@ func (s *Server) HandleHealth(w http.ResponseWriter, r *http.Request) {
 		"tasks":  s.orchestrator.Queue().Count(),
 		// The cap and what is in flight against it, so "nothing is moving"
 		// can be read as night mode rather than guessed at (issue #249).
+		// Health reads only the two numbers it publishes: running the
+		// pending-count scan ConcurrencyCounts adds for /api/guests here
+		// would make every unauthenticated probe walk the whole queue
+		// under the assignment lock to discard the answer. The cap is the
+		// same enforced value ConcurrencyCounts states, so the two
+		// surfaces state one number; the pair is read in two
+		// acquisitions, so only an assignment landing between the
+		// reads can widen the window between them.
 		"in_flight":       s.orchestrator.InFlightCount(),
-		"concurrency_cap": capLabel,
+		"concurrency_cap": capLabel(s.orchestrator.ConcurrencyCap()),
 	})
 }
 
@@ -2330,9 +2341,61 @@ func (s *Server) HandleGuests(w http.ResponseWriter, r *http.Request) {
 			"heartbeat_interval": s.effectiveHeartbeatInterval(),
 			"silence_timeout":    s.cfg.SilenceTimeout,
 			"stats":              s.claimStats(),
+			// The concurrency picture rides along on the poll the dashboard
+			// already makes, so the cap is visible without a second request
+			// (issue #250).
+			"concurrency": s.concurrencyStatus(now),
 		})
 	default:
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+// concurrencyStatus is the concurrency picture for the status surface
+// (issue #250): the cap in force right now, the entry of the schedule that
+// produced it, how much work is in flight against it, how much more the cap
+// is holding back, and the next boundary at which the number changes.
+//
+// The cap and the counts come from the orchestrator, in a single lock
+// acquisition (ConcurrencyCounts) — one response is one instant, and the
+// number an operator sees is the number the next assignment decision obeys.
+// The provenance (`source`) and the schedule picture (`next_change`,
+// `timezone`) come from the config resolver, which reads the schedule
+// directly; immediately after a boundary they can therefore lead the
+// enforced cap by up to one concurrencySyncInterval (15s), the pre-existing
+// sync lag, until syncConcurrencyCap pushes the resolver's answer into the
+// orchestrator. /api/health reads the same enforced cap, so the two surfaces
+// state one number.
+//
+// The HTTP API performs no authentication; bind to loopback or terminate
+// behind an authenticating proxy (see the README server configuration
+// section). Everything in this response — queue depth, throttle schedule,
+// timezone — must be written for an untrusted reader.
+func (s *Server) concurrencyStatus(now time.Time) map[string]interface{} {
+	s.mu.RLock()
+	status := s.cfg.ConcurrencyStatus(now)
+	s.mu.RUnlock()
+
+	var next interface{}
+	if status.HasNextChange() {
+		next = map[string]interface{}{
+			"at":       status.NextAt(),
+			"cap":      status.NextCap,
+			"timezone": status.Timezone,
+		}
+	}
+
+	capNow, inFlight, waitingOnCap := s.orchestrator.ConcurrencyCounts()
+
+	return map[string]interface{}{
+		"cap":    capLabel(capNow),
+		"source": status.Source,
+		// "in_flight" is the ASSIGNED or RUNNING count the cap is measured
+		// against; "waiting_on_cap" is the pending queue there is no room
+		// for under the cap.
+		"in_flight":      inFlight,
+		"waiting_on_cap": waitingOnCap,
+		"next_change":    next,
 	}
 }
 

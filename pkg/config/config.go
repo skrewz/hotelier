@@ -303,27 +303,111 @@ func parseScheduleAt(at string) (int, error) {
 // zone) resolves to the static cap rather than to a guess. ValidateConcurrency
 // rejects such a config at load and reload time, so reaching those branches
 // means the config was built in code without ever being validated.
+//
+// ConcurrencyStatus is this same resolution with the provenance and the next
+// boundary attached, for callers that have to say more than the number.
+// This function resolves that whole status and keeps only the cap: the
+// next-change walk inside it is work this caller discards. That is
+// invisible at the call sites this has (the sync tick, startup, reload),
+// but a caller that only ever needs the number on a hot path would pay
+// for the walk here rather than resolve the cap alone.
 func (c ServerConfig) EffectiveConcurrency(now time.Time) int {
-	if len(c.ConcurrencySchedule) == 0 {
-		return c.staticConcurrency()
+	return c.ConcurrencyStatus(now).Cap
+}
+
+// ConcurrencyStatus is the concurrency picture at the instant it was
+// resolved (issue #250): the cap in force, which part of the configuration
+// produced it, and the next boundary at which the number changes. It is what
+// the status surface reports, so an operator can read "the cap is 2 because of
+// the 07:00 entry and it rises to 4 at 23:00" off the running server instead
+// of off the config file.
+//
+// Cap follows the same three-way vocabulary as EffectiveConcurrency, which
+// this resolves through — the two can never state different caps.
+type ConcurrencyStatus struct {
+	// Cap is the cap in force: ConcurrencyUnlimited, 0 for a full pause,
+	// or a number of tasks.
+	Cap int
+	// Source says where Cap came from: `concurrency_schedule at "07:00"`
+	// naming the entry in force, or "max_concurrent_tasks" when no schedule
+	// applies — including when a schedule exists but the resolver cannot
+	// trust it, which is a configuration error ValidateConcurrency reports.
+	Source string
+	// Timezone is the zone the boundaries are quoted in, empty when Cap
+	// came from the static cap and no wall clock is involved.
+	Timezone string
+	// NextChangeAt is the instant the cap next changes; zero when it will
+	// not change, which is the answer for a static cap and for a schedule
+	// whose entries all carry the same cap. A boundary that repeats the
+	// current cap is not a change.
+	NextChangeAt time.Time
+	// NextCap is the cap in force from NextChangeAt.
+	NextCap int
+}
+
+// HasNextChange reports whether the cap is scheduled to change.
+func (s ConcurrencyStatus) HasNextChange() bool { return !s.NextChangeAt.IsZero() }
+
+// NextAt is the wall-clock "HH:MM" of NextChangeAt in Timezone — the
+// rendering of a fact the status already carries, derived so no edit can
+// make the string and the instant disagree. Empty when there is no change
+// to report.
+func (s ConcurrencyStatus) NextAt() string {
+	if s.NextChangeAt.IsZero() {
+		return ""
+	}
+	loc, err := loadLocation(s.Timezone)
+	if err != nil {
+		return ""
+	}
+	return s.NextChangeAt.In(loc).Format("15:04")
+}
+
+// ConcurrencyStatus resolves the cap in force at now together with the entry
+// it came from and the next change. See EffectiveConcurrency for what the
+// cap values mean.
+func (c ServerConfig) ConcurrencyStatus(now time.Time) ConcurrencyStatus {
+	entries, loc, chosen, ok := c.resolveSchedule(now)
+	if !ok {
+		return ConcurrencyStatus{Cap: c.staticConcurrency(), Source: "max_concurrent_tasks"}
 	}
 
-	type entry struct {
-		minutes int
-		value   int
+	status := ConcurrencyStatus{
+		Cap:      entries[chosen].value,
+		Source:   fmt.Sprintf("concurrency_schedule at %q", entries[chosen].at),
+		Timezone: loc.String(),
 	}
-	entries := make([]entry, 0, len(c.ConcurrencySchedule))
+	status.NextChangeAt, status.NextCap = nextScheduleChange(entries, loc, now, status.Cap)
+	return status
+}
+
+// scheduleEntry is one boundary of the schedule after parsing, sorting and
+// de-duplication.
+type scheduleEntry struct {
+	at      string
+	minutes int
+	value   int
+}
+
+// resolveSchedule reads the schedule at now and reports the entries sorted by
+// minute, the zone they are interpreted in, and the index of the entry in
+// force. ok is false when the schedule cannot be trusted (no entries, an
+// unparsable "at", an unloadable zone) and the caller must fall back to the
+// static cap rather than to a guess.
+func (c ServerConfig) resolveSchedule(now time.Time) ([]scheduleEntry, *time.Location, int, bool) {
+	if len(c.ConcurrencySchedule) == 0 {
+		return nil, nil, 0, false
+	}
+
+	entries := make([]scheduleEntry, 0, len(c.ConcurrencySchedule))
 	for _, e := range c.ConcurrencySchedule {
 		m, err := parseScheduleAt(e.At)
 		if err != nil {
 			// Dropping the entry would silently hand its window to a
 			// neighbouring cap, so fall back to the static cap instead.
-			return c.staticConcurrency()
+			return nil, nil, 0, false
 		}
-		entries = append(entries, entry{minutes: m, value: e.Concurrency})
-	}
-	if len(entries) == 0 {
-		return c.staticConcurrency()
+		entries = append(entries, scheduleEntry{at: e.At, minutes: m, value: e.Concurrency})
 	}
 	sort.SliceStable(entries, func(i, j int) bool { return entries[i].minutes < entries[j].minutes })
 
@@ -333,7 +417,7 @@ func (c ServerConfig) EffectiveConcurrency(now time.Time) int {
 	// a config built in code can still carry one (server.New only logs such a
 	// failure), so collapse the duplicates here: the first entry listed for a
 	// minute wins.
-	deduped := make([]entry, 0, len(entries))
+	deduped := make([]scheduleEntry, 0, len(entries))
 	for i, e := range entries {
 		if i > 0 && entries[i-1].minutes == e.minutes {
 			continue
@@ -346,20 +430,60 @@ func (c ServerConfig) EffectiveConcurrency(now time.Time) int {
 	if err != nil {
 		// Evaluating the schedule in UTC would shift every boundary by the
 		// zone's offset; the static cap is the honest answer.
-		return c.staticConcurrency()
+		return nil, nil, 0, false
 	}
 	local := now.In(loc)
-	cur := local.Hour()*60 + local.Minute()
+	chosen := chosenEntry(entries, local.Hour()*60+local.Minute())
+	return entries, loc, chosen, true
+}
 
-	// Default: the last entry of the day holds through midnight to the
-	// first entry. Walk forward to the last boundary at or before now.
-	chosen := entries[len(entries)-1]
-	for _, e := range entries {
-		if e.minutes <= cur {
-			chosen = e
+// chosenEntry is the entry in force at a wall clock: the last entry at or
+// before that minute, wrapping around to the last entry of the day before
+// the first one. resolveSchedule and nextScheduleChange share the rule, so
+// the cap the status surface quotes and the cap enforcement obeys at an
+// instant cannot drift apart.
+func chosenEntry(entries []scheduleEntry, wallMinutes int) int {
+	chosen := len(entries) - 1
+	for i, e := range entries {
+		if e.minutes <= wallMinutes {
+			chosen = i
 		}
 	}
-	return chosen.value
+	return chosen
+}
+
+// nextScheduleChange finds the next instant after now at which the cap
+// differs from the cap in force. The schedule repeats daily and a cap that
+// differs from the current one recurs within one repetition, so a horizon
+// of two days of instants always contains any real change (a fall-back day
+// is 25 hours long, which the extra day covers).
+//
+// The horizon is walked on the instant axis, minute by minute, with the
+// wall-clock rule of chosenEntry applied at each step — the returned
+// instant is by construction the instant EffectiveConcurrency flips. Wall
+// clocks cannot be walked instead: on a fall-back day the shifted hour
+// occurs twice, and time.Date resolves its ambiguous minute to the later
+// occurrence, so the first pass would never become a candidate; and every
+// entry inside a spring-forward gap normalises onto the same instant,
+// leaving the quoted cap to an unstable sort rather than to the rule
+// enforcement obeys. Walking instants visits the repeated hour twice and
+// the gap once, and quotes at each step the cap resolveSchedule gives
+// there — an entry in a gap is thus placed at the transition, which is
+// where the wall-clock comparison flips.
+func nextScheduleChange(entries []scheduleEntry, loc *time.Location, now time.Time, cap int) (time.Time, int) {
+	end := now.Add(48 * time.Hour)
+	for t := now.Truncate(time.Minute).Add(time.Minute); t.Before(end); t = t.Add(time.Minute) {
+		if c := capAt(entries, t.In(loc)); c != cap {
+			return t, c
+		}
+	}
+	return time.Time{}, cap
+}
+
+// capAt is the cap chosenEntry names at a wall clock, for callers holding
+// the instant rather than the minute.
+func capAt(entries []scheduleEntry, local time.Time) int {
+	return entries[chosenEntry(entries, local.Hour()*60+local.Minute())].value
 }
 
 // staticConcurrency states the static cap in the resolver's vocabulary:

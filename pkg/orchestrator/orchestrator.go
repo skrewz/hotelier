@@ -794,6 +794,58 @@ func (o *Orchestrator) capErrorInternal(taskID string) error {
 		taskID, o.inFlightCountInternal(), o.concurrencyCap)
 }
 
+// pendingHeldByCapCountInternal reports how many PENDING tasks there is no
+// room for under the cap at this instant (issue #250): the pending queue
+// beyond the room the cap leaves. It is the number that tells "the queue is
+// held behind the cap" apart from "the queue is empty", and the third
+// return of ConcurrencyCounts is its only entry point — reading it outside
+// the cap and the in-flight count would state a fact measured against a
+// cap the same response might not name.
+//
+// The count is arithmetic on the cap and the live in-flight and pending
+// counts, not a per-task verdict on why each task waits. Deriving it from
+// the holds the last assignment pass recorded would report nothing about a
+// queue that filled its slot after the pass — and a queue that also waits on
+// guests with matching tags still counts while it exceeds the room. What
+// holds a given task is that task's own held_reason; this number says only
+// that the queue is longer than the cap's room.
+//
+// In flight can exceed the cap right after a boundary drops below the running
+// count; the room is then clamped to zero and the answer is the whole queue,
+// never more than the queue holds. The caller must hold o.mu.
+func (o *Orchestrator) pendingHeldByCapCountInternal() int {
+	// An unlimited cap holds nothing back, whatever the queue looks like.
+	if o.concurrencyCap < 0 {
+		return 0
+	}
+
+	pending := o.queue.CountByStatus(queue.TaskStatusPending)
+	room := o.concurrencyCap - o.inFlightCountInternal()
+	if room < 0 {
+		// More in flight than the cap now allows: nothing else can start.
+		room = 0
+	}
+	if room >= pending {
+		return 0
+	}
+	return pending - room
+}
+
+// ConcurrencyCounts returns the cap in force, the in-flight count and the
+// pending queue held back by the cap in a single acquisition of the
+// orchestrator lock, so a status read states three numbers that were true
+// at the same instant (issue #250). Reading the three through separate
+// accessors would let an assignment or completion landing between the calls
+// put a triple in the response that never existed at any one instant. The
+// cap follows ConcurrencyCap: negative means no cap, and an unlimited cap
+// holds nothing back.
+func (o *Orchestrator) ConcurrencyCounts() (int, int, int) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+
+	return o.concurrencyCap, o.inFlightCountInternal(), o.pendingHeldByCapCountInternal()
+}
+
 // --- Read-Only Delegation ---
 
 // GetPendingTasks returns all pending tasks.

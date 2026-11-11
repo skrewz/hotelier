@@ -1,4 +1,6 @@
 # Hotelier Check-In Host Configuration
+# The HTTP API is unauthenticated and there is no TLS: bind to loopback or
+# keep this port behind an authenticating proxy (see the README).
 host: "0.0.0.0"
 port: 8080
 read_timeout: 30

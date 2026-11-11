@@ -354,3 +354,107 @@ func TestSetConcurrencyCap_DefaultsToUnlimited(t *testing.T) {
 		t.Fatalf("a fresh orchestrator must be uncapped: %v", err)
 	}
 }
+
+// waitingOnCap reads the pending-queue-behind-the-cap count the way the
+// status surface does: the third return of ConcurrencyCounts, so the count
+// is always measured against the cap in the same response.
+func waitingOnCap(o *Orchestrator) int {
+	_, _, waiting := o.ConcurrencyCounts()
+	return waiting
+}
+
+// TestConcurrencyCounts_WaitingOnCap pins the distinction issue #250 exists to make:
+// work the cap cannot start must be countable separately from work the pool
+// could take. The count follows the cap and the queue, not the holds the last
+// assignment pass happened to record.
+func TestConcurrencyCounts_WaitingOnCap(t *testing.T) {
+	// The cap has room for everything the queue holds, so nothing in it is
+	// waiting on the cap.
+	roomy, _ := newCappedOrchestrator(t, 3)
+	for _, id := range []string{"a1", "a2"} {
+		addPending(t, roomy, id)
+	}
+	if got := waitingOnCap(roomy); got != 0 {
+		t.Errorf("expected 0 with room in the cap, got %d", got)
+	}
+
+	// A cap of 1 with nothing in flight still lets one task start, so two of
+	// the three are waiting on the cap rather than on guest matching.
+	full, _ := newCappedOrchestrator(t, 1)
+	_ = full.RegisterGuest("g1", "G1", nil)
+	for _, id := range []string{"b1", "b2", "b3"} {
+		addPending(t, full, id)
+	}
+	if got := waitingOnCap(full); got != 2 {
+		t.Errorf("expected 2 waiting on the cap with the slot free, got %d", got)
+	}
+
+	// The slot fills: now none of the queue can start, whatever the pool does.
+	if err := full.AssignTask("b1", "g1"); err != nil {
+		t.Fatalf("AssignTask b1: %v", err)
+	}
+	if got := waitingOnCap(full); got != 2 {
+		t.Errorf("expected 2 waiting on a full cap, got %d", got)
+	}
+
+	// An overnight cap of 0 holds the whole remaining queue: b1 is in
+	// flight, b2 and b3 are pending, so the answer is 2 — the queue,
+	// not the queue plus the in-flight overflow.
+	full.SetConcurrencyCap(0)
+	if got := waitingOnCap(full); got != 2 {
+		t.Errorf("expected the whole 2-task queue held by a cap of 0, got %d", got)
+	}
+
+	// An unlimited cap holds nothing, however long the queue is.
+	full.SetConcurrencyCap(config.ConcurrencyUnlimited)
+	if got := waitingOnCap(full); got != 0 {
+		t.Errorf("expected an unlimited cap to hold nothing back, got %d", got)
+	}
+}
+
+// TestConcurrencyCounts_WaitingOnCap_BoundaryDropsBelowInFlight is the case night
+// mode exists to surface: the cap drops at a schedule boundary while tasks
+// are running. The count must be the whole remaining queue — never the queue
+// plus the in-flight overflow.
+func TestConcurrencyCounts_WaitingOnCap_BoundaryDropsBelowInFlight(t *testing.T) {
+	orch, _ := newCappedOrchestrator(t, 4)
+	for _, id := range []string{"d1", "d2", "d3", "d4", "d5", "d6"} {
+		addPending(t, orch, id)
+	}
+	for i, id := range []string{"d1", "d2", "d3", "d4"} {
+		guest := fmt.Sprintf("g%d", i+1)
+		if err := orch.RegisterGuest(guest, guest, nil); err != nil {
+			t.Fatalf("RegisterGuest %s: %v", guest, err)
+		}
+		if err := orch.AssignTask(id, guest); err != nil {
+			t.Fatalf("AssignTask %s: %v", id, err)
+		}
+	}
+
+	// The boundary arrives: cap 4 with 4 in flight becomes cap 2.
+	orch.SetConcurrencyCap(2)
+	if got := waitingOnCap(orch); got != 2 {
+		t.Errorf("expected the whole 2-task queue when in flight exceeds the cap, got %d", got)
+	}
+}
+
+// TestConcurrencyCounts_WaitingOnCap_TagBlockedQueueIsTheQueueBeyondRoom pins the
+// documented reading of waiting_on_cap: it is the pending queue beyond the
+// cap's room, not a verdict on which obstacle holds each task. A queue no
+// registered guest can take still counts while it exceeds the room — the cap
+// leaves no room for those tasks either — and each task's held_reason is
+// what names what holds it.
+func TestConcurrencyCounts_WaitingOnCap_TagBlockedQueueIsTheQueueBeyondRoom(t *testing.T) {
+	orch, _ := newCappedOrchestrator(t, 2)
+	if err := orch.RegisterGuest("g1", "G1", []string{"fast"}); err != nil {
+		t.Fatalf("RegisterGuest: %v", err)
+	}
+	for _, id := range []string{"t1", "t2", "t3"} {
+		if err := orch.AddTask(&queue.Task{ID: id, Prompt: id, Tags: []string{"gpu"}}); err != nil {
+			t.Fatalf("AddTask %s: %v", id, err)
+		}
+	}
+	if got := waitingOnCap(orch); got != 1 {
+		t.Errorf("expected the 1 task beyond the cap's room, tags notwithstanding, got %d", got)
+	}
+}
