@@ -2518,7 +2518,7 @@ func (s *Server) operatorAllowed(r *http.Request) bool {
 	if isLoopbackPeer(r) && hostNamesLoopback(r) {
 		return true
 	}
-	s.log.Printf("concurrency cap request from %s refused: no operator identity", r.RemoteAddr)
+	s.log.Printf("concurrency cap request refused: peer %s, Host %s", r.RemoteAddr, r.Host)
 	return false
 }
 
@@ -2579,7 +2579,7 @@ func (s *Server) HandleConcurrency(w http.ResponseWriter, r *http.Request) {
 	// Identity before anything else (issue #264 review): reaching this
 	// route is not itself a credential.
 	if !s.operatorAllowed(r) {
-		http.Error(w, "operator identity required: this route is served over loopback only", http.StatusForbidden)
+		http.Error(w, "operator identity required: a loopback peer addressing this server by a loopback address", http.StatusForbidden)
 		return
 	}
 
