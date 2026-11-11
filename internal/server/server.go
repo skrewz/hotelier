@@ -608,10 +608,10 @@ func (s *Server) effectiveCapLocked(cfg config.ServerConfig, now time.Time) int 
 }
 
 // overrideRulesLocked reports whether a live cap override (issue #264)
-// still rules at now. It is the single owner of that verdict: the cap
-// value (effectiveCapLocked) and its provenance (concurrencyStatus) both
-// consult it, so the two can never disagree about whether the override
-// still rules.
+// still rules at now. It is the single owner of that verdict; the one
+// place provenance is decided (concurrencyStatus) needs no time test
+// because an override is installed exactly while its number is the one
+// enforced — the sync tick that hands the cap back clears the field.
 func (s *Server) overrideRulesLocked(now time.Time) bool {
 	if s.capOverride == nil {
 		return false
@@ -2456,16 +2456,11 @@ func (s *Server) HandleGuests(w http.ResponseWriter, r *http.Request) {
 func (s *Server) concurrencyStatus(now time.Time) map[string]interface{} {
 	s.mu.RLock()
 	status := s.cfg.ConcurrencyStatus(now)
-	// While a runtime override rules, the number comes from the operator,
-	// not the config, and the status says so (issue #264). The label
-	// follows the enforced number rather than the wall clock: the cap
-	// itself comes from the orchestrator below, which still holds the
-	// override until the next sync tick, so between a boundary and that
-	// tick the source stays "manual override" alongside the override's
-	// number instead of attributing it to the schedule. Value and
-	// provenance therefore agree at every instant.
-	if s.overrideRulesLocked(now) ||
-		(s.capOverride != nil && *s.capOverride == s.orchestrator.ConcurrencyCap()) {
+	// While an override is installed, the number comes from the operator,
+	// not the config, and the status says so (issue #264). The sync tick
+	// clears the override when the schedule takes over, so the label and
+	// the enforced number agree at every instant.
+	if s.capOverride != nil {
 		status.Source = config.CapSourceOverride
 	}
 	s.mu.RUnlock()

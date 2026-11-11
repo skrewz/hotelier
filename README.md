@@ -120,9 +120,9 @@ at once, the way a reload does, and is never persisted to disk. It rules
 until the next boundary of the concurrency schedule, when the scheduled
 shrink or expansion takes over again; with no schedule it rules until the
 next config reload — which clears it and returns authority to the file — or
-a restart. While it rules — and until the schedule has actually taken over,
-which is the next sync tick after the boundary — the status surface names
-the source as `manual override`.
+a restart. While an override is installed the status surface names the source
+as `manual override`; the sync tick that lets the schedule take over clears
+the label with it.
 
 A queue the cap is holding back looks different from a pool with no matching
 guest, in the four places an operator reads:
