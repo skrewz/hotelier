@@ -51,14 +51,6 @@ type ServerConfig struct {
 	TaskSilenceTimeout int `yaml:"task_silence_timeout"`
 	// MaxGuests is the maximum number of guests allowed (0 = unlimited).
 	MaxGuests int `yaml:"max_guests"`
-	// OperatorToken, when set, is the shared secret a non-loopback peer
-	// must present in the X-Operator-Token header to use the state-
-	// changing concurrency route (POST /api/concurrency). Loopback peers
-	// — the operator's own machine or a local authenticating proxy — are
-	// admitted without it; with no token configured a non-loopback peer is
-	// refused outright, so the route fails closed. It enforces nothing on
-	// the other routes; see the README server configuration section.
-	OperatorToken string `yaml:"operator_token"`
 	// MaxConcurrentTasks is the static cap on how many tasks the server is
 	// willing to run at any moment (0 = unlimited). Used when
 	// ConcurrencySchedule is empty; the schedule takes precedence otherwise

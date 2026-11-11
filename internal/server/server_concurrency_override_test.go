@@ -20,6 +20,7 @@ func postConcurrency(t *testing.T, srv *Server, body string) *httptest.ResponseR
 	req := httptest.NewRequest(http.MethodPost, "/api/concurrency", bytes.NewReader([]byte(body)))
 	req.Header.Set("Content-Type", "application/json")
 	req.RemoteAddr = "127.0.0.1:1234" // the operator by the posture this route enforces
+	req.Host = "127.0.0.1:8080"       // addressing the server by a loopback name, as an operator's request does
 	w := httptest.NewRecorder()
 	srv.HandleConcurrency(w, req)
 	return w
@@ -299,6 +300,7 @@ func TestConcurrencyOverride_RejectsCrossSiteSimplePOSTs(t *testing.T) {
 	for _, ct := range []string{"", "text/plain", "application/x-www-form-urlencoded", "application/xml"} {
 		req := httptest.NewRequest(http.MethodPost, "/api/concurrency", strings.NewReader(`{"cap": 0}`))
 		req.RemoteAddr = "127.0.0.1:1234" // identity settled; only the Content-Type is in question
+		req.Host = "127.0.0.1:8080"
 		if ct != "" {
 			req.Header.Set("Content-Type", ct)
 		}
@@ -317,6 +319,7 @@ func TestConcurrencyOverride_RejectsCrossSiteSimplePOSTs(t *testing.T) {
 	req := httptest.NewRequest(http.MethodPost, "/api/concurrency", strings.NewReader(`{"cap": 1}`))
 	req.Header.Set("Content-Type", "application/json; charset=utf-8")
 	req.RemoteAddr = "127.0.0.1:1234"
+	req.Host = "localhost:8080"
 	w := httptest.NewRecorder()
 	srv.HandleConcurrency(w, req)
 	if w.Code != http.StatusOK {
@@ -325,52 +328,42 @@ func TestConcurrencyOverride_RejectsCrossSiteSimplePOSTs(t *testing.T) {
 }
 
 // TestConcurrencyOverride_RequiresOperatorIdentity: reaching the route is
-// not a credential (review 1635). A non-loopback peer with no identity
-// cannot pause the fleet or lift its cap; a wrong token is no better than
-// none. With server.operator_token set, the shared token identifies a
-// remote peer, and a loopback peer is the operator by the documented
-// posture.
+// not a credential (reviews 1635 and 1671). A non-loopback peer cannot
+// pause the fleet or lift its cap, and a loopback peer only speaks for
+// the operator while it addresses the server by a loopback name: the
+// DNS-rebinding attempt — a browser posting from 127.0.0.1 with a foreign
+// domain in Host — is refused with the cap exactly where it stood.
 func TestConcurrencyOverride_RequiresOperatorIdentity(t *testing.T) {
-	postFrom := func(t *testing.T, srv *Server, remote, token string) *httptest.ResponseRecorder {
+	postFrom := func(t *testing.T, srv *Server, remote, host string) *httptest.ResponseRecorder {
 		t.Helper()
 		req := httptest.NewRequest(http.MethodPost, "/api/concurrency", strings.NewReader(`{"cap": 1}`))
 		req.Header.Set("Content-Type", "application/json")
 		req.RemoteAddr = remote
-		if token != "" {
-			req.Header.Set("X-Operator-Token", token)
-		}
+		req.Host = host
 		w := httptest.NewRecorder()
 		srv.HandleConcurrency(w, req)
 		return w
 	}
 
-	noToken := capTestServer(t, config.ServerConfig{Host: "127.0.0.1", Port: 0, MaxConcurrentTasks: 3})
-	if w := postFrom(t, noToken, "203.0.113.9:5555", ""); w.Code != http.StatusForbidden {
+	srv := capTestServer(t, config.ServerConfig{Host: "127.0.0.1", Port: 0, MaxConcurrentTasks: 3})
+	if w := postFrom(t, srv, "203.0.113.9:5555", "127.0.0.1:8080"); w.Code != http.StatusForbidden {
 		t.Fatalf("expected an anonymous remote POST to be refused with 403, got %d: %s", w.Code, w.Body.String())
 	}
-	if got := noToken.orchestrator.ConcurrencyCap(); got != 3 {
+	if got := srv.orchestrator.ConcurrencyCap(); got != 3 {
 		t.Fatalf("expected a refused request to leave the cap at 3, got %d", got)
 	}
-	if w := postFrom(t, noToken, "[::1]:4321", ""); w.Code != http.StatusOK {
-		t.Fatalf("expected a loopback POST to be admitted, got %d: %s", w.Code, w.Body.String())
+	if w := postFrom(t, srv, "127.0.0.1:4321", "attacker.example:8080"); w.Code != http.StatusForbidden {
+		t.Fatalf("expected a DNS-rebinding POST (loopback peer, foreign Host) to be refused with 403, got %d: %s", w.Code, w.Body.String())
 	}
-	if got := noToken.orchestrator.ConcurrencyCap(); got != 1 {
-		t.Fatalf("expected the loopback POST to set the cap to 1, got %d", got)
+	if got := srv.orchestrator.ConcurrencyCap(); got != 3 {
+		t.Fatalf("expected the rebinding attempt to leave the cap at 3, got %d", got)
 	}
-
-	tokened := capTestServer(t, config.ServerConfig{Host: "127.0.0.1", Port: 0, MaxConcurrentTasks: 3, OperatorToken: "s3cret-operator-token"})
-	for _, tok := range []string{"", "wrong-token"} {
-		if w := postFrom(t, tokened, "203.0.113.9:5555", tok); w.Code != http.StatusForbidden {
-			t.Fatalf("token %q: expected 403 from a remote peer, got %d", tok, w.Code)
+	for _, host := range []string{"127.0.0.1:8080", "localhost:8080", "[::1]:8080"} {
+		if w := postFrom(t, srv, "127.0.0.1:4321", host); w.Code != http.StatusOK {
+			t.Fatalf("Host %q: expected a loopback POST to be admitted, got %d: %s", host, w.Code, w.Body.String())
 		}
 	}
-	if got := tokened.orchestrator.ConcurrencyCap(); got != 3 {
-		t.Fatalf("expected refused tokens to leave the cap at 3, got %d", got)
-	}
-	if w := postFrom(t, tokened, "203.0.113.9:5555", "s3cret-operator-token"); w.Code != http.StatusOK {
-		t.Fatalf("expected the shared token to admit a remote peer, got %d: %s", w.Code, w.Body.String())
-	}
-	if got := tokened.orchestrator.ConcurrencyCap(); got != 1 {
+	if got := srv.orchestrator.ConcurrencyCap(); got != 1 {
 		t.Fatalf("expected the admitted request to set the cap to 1, got %d", got)
 	}
 }

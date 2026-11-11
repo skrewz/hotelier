@@ -2,7 +2,6 @@ package server
 
 import (
 	"context"
-	"crypto/subtle"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -2516,23 +2515,42 @@ func isLoopbackPeer(r *http.Request) bool {
 // route (issue #264 review): whoever moves the fleet-wide cap must be the
 // operator, not merely someone who can open a socket. A loopback peer is
 // the operator by the posture this repository documents (bind to loopback
-// or terminate authentication at a local proxy); anything else must
-// present the shared server.operator_token. With no token configured a
-// non-loopback peer is refused outright — the route fails closed instead
-// of trusting a network posture nothing enforces. The check lives inside
-// the handler, not in a wrapper on one mount of it, so every mount of
-// this route enforces it; extending the same treatment to the other
-// state-changing routes is a follow-up issue.
+// or terminate authentication at a local proxy); anything else is refused
+// outright — the route fails closed instead of trusting a network posture
+// nothing enforces. A loopback peer must also carry a loopback name in
+// Host (hostNamesLoopback), which is what stops a DNS-rebound page from
+// borrowing the operator's own browser. A shared-secret mechanism for
+// genuinely remote operators is a cross-route design decision and lives
+// with the rest of the posture question in the follow-up issue, not here
+// with one route's share of it.
 func (s *Server) operatorAllowed(r *http.Request) bool {
-	if isLoopbackPeer(r) {
-		return true
-	}
-	if s.cfg.OperatorToken != "" &&
-		subtle.ConstantTimeCompare([]byte(r.Header.Get("X-Operator-Token")), []byte(s.cfg.OperatorToken)) == 1 {
+	if isLoopbackPeer(r) && hostNamesLoopback(r) {
 		return true
 	}
 	s.log.Printf("concurrency cap request from %s refused: no operator identity", r.RemoteAddr)
 	return false
+}
+
+// hostNamesLoopback reports whether the Host header of r names the
+// loopback address — localhost, or an address in 127.0.0.0/8 or ::1,
+// with or without a port. It is the DNS-rebinding guard (issue #264
+// review): a page on a rebound domain reaches the server from a loopback
+// peer address, but it carries its own domain in Host, and under the
+// documented posture no operator's request ever does. Browsers fetch
+// from the dashboard itself with the name in the address bar (localhost
+// or 127.x.x.x), and a local proxy forwards the upstream name by
+// default; anything else is not this server speaking.
+func hostNamesLoopback(r *http.Request) bool {
+	host := r.Host
+	if h, _, err := net.SplitHostPort(host); err == nil {
+		host = h
+	}
+	host = strings.TrimSuffix(strings.Trim(host, "[]"), ".")
+	if strings.EqualFold(host, "localhost") {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
 }
 
 // HandleConcurrency handles the /api/concurrency endpoint (issue #264):
@@ -2551,9 +2569,9 @@ func (s *Server) operatorAllowed(r *http.Request) bool {
 // The request must say `Content-Type: application/json` (anything else is
 // 415, a CSRF guard: this endpoint must never answer a cross-origin
 // simple POST), and a body beyond a kilobyte is refused. The handler
-// enforces operator identity first (operatorAllowed): a peer that is
-// neither loopback nor holding the configured server.operator_token gets
-// 403 before the cap moves.
+// enforces operator identity first (operatorAllowed): a peer that is not
+// loopback, or a loopback peer whose Host names some foreign domain (a
+// DNS-rebinding attempt), gets 403 before the cap moves.
 //
 // Every other surface here keeps the repository's standing posture — the
 // HTTP API performs no authentication; bind to loopback or terminate
@@ -2568,7 +2586,7 @@ func (s *Server) HandleConcurrency(w http.ResponseWriter, r *http.Request) {
 	// Identity before anything else (issue #264 review): reaching this
 	// route is not itself a credential.
 	if !s.operatorAllowed(r) {
-		http.Error(w, "operator identity required: connect over loopback or present X-Operator-Token", http.StatusForbidden)
+		http.Error(w, "operator identity required: this route is served over loopback only", http.StatusForbidden)
 		return
 	}
 
