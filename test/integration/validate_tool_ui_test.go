@@ -1026,36 +1026,37 @@ const { chromium } = require('playwright');
 
   // The cap field is editable (issue #264): typing a number and clicking
   // Set must move the enforced number — proven against /api/health, the
-  // surface that states the cap the next assignment decision obeys. Then
-  // back to "unlimited", which is what this server's config resolves to
-  // and what the rest of this test expects.
-  const capEdit = await page.evaluate(async () => {
-    const input = document.getElementById('concurrency-cap-input');
-    const settle = () => new Promise(r => setTimeout(r, 400));
-    input.value = '1';
-    document.querySelector('.concurrency-edit button').click();
-    await settle();
-    const health1 = await (await fetch('/api/health')).json();
-    const label1 = document.getElementById('concurrency-label').textContent;
-    input.value = '-1';
-    document.querySelector('.concurrency-edit button').click();
-    await settle();
-    const healthNeg = await (await fetch('/api/health')).json();
-    input.value = 'unlimited';
-    document.querySelector('.concurrency-edit button').click();
-    await settle();
-    const healthU = await (await fetch('/api/health')).json();
-    return {
-      cap1: health1.concurrency_cap, label1: label1,
-      capNeg: healthNeg.concurrency_cap,
-      capUnlimited: healthU.concurrency_cap, shown: input.value,
-    };
-  });
-  if (capEdit.cap1 !== 1) fail('setting the cap field to 1 should put 1 on /api/health, got ' + JSON.stringify(capEdit.cap1));
-  if (!capEdit.label1.includes('Concurrency')) fail('the label should still describe the concurrency picture after an update, got: ' + capEdit.label1);
-  if (capEdit.capNeg !== 'unlimited') fail('a negative cap lifts the cap server-side; the field posts it verbatim, got ' + JSON.stringify(capEdit.capNeg));
-  if (capEdit.capUnlimited !== 'unlimited') fail('setting the cap field to "unlimited" should lift the cap on /api/health, got ' + JSON.stringify(capEdit.capUnlimited));
-  if (capEdit.shown !== 'unlimited') fail('the field should show the cap the server now states, got: ' + capEdit.shown);
+  // surface that states the cap the next assignment decision obeys. The
+  // press is the interaction a human performs — focus the field, type
+  // with real keystrokes, click the button with the mouse — because a
+  // real click moves focus before it lands, and a DOM-level .click() on
+  // an unfocused field would stay green even when that sequence posts
+  // the stale cap (issue #264 review). Then back to "unlimited", which
+  // is what this server's config resolves to and what the rest of this
+  // test expects.
+  const capInput = page.locator('#concurrency-cap-input');
+  const capSet = page.locator('.concurrency-edit button');
+  const typeAndSet = async (text) => {
+    await capInput.click();
+    await page.keyboard.press('Control+a');
+    await page.keyboard.press('Delete');
+    await page.keyboard.type(text);
+    await capSet.click();
+    await page.waitForTimeout(400);
+  };
+  const healthCap = async () => await page.evaluate(async () => (await (await fetch('/api/health')).json()).concurrency_cap);
+  await typeAndSet('1');
+  const cap1 = await page.evaluate(async () => ({
+    health: (await (await fetch('/api/health')).json()).concurrency_cap,
+    label: document.getElementById('concurrency-label').textContent,
+  }));
+  if (cap1.health !== 1) fail('typing 1 and clicking Set should put 1 on /api/health, got ' + JSON.stringify(cap1.health));
+  if (!cap1.label.includes('Concurrency')) fail('the label should still describe the concurrency picture after an update, got: ' + cap1.label);
+  await typeAndSet('-1');
+  if (await healthCap() !== 'unlimited') fail('a typed -1 lifts the cap server-side; the field posts it verbatim');
+  await typeAndSet('unlimited');
+  if (await healthCap() !== 'unlimited') fail('typing "unlimited" and clicking Set should lift the cap on /api/health');
+  if (await capInput.inputValue() !== 'unlimited') fail('the field should show the cap the server now states, got: ' + await capInput.inputValue());
   console.log('PASS: the cap field updates the live concurrency cap end to end');
 
   // The mid-typing guard (issue #264): the polled refresh must not
@@ -1063,7 +1064,6 @@ const { chromium } = require('playwright');
   // as a user would, force the refresh that the header polls run, and
   // assert the field still holds what was typed. Without the guard in
   // renderConcurrency this fails.
-  const capInput = page.locator('#concurrency-cap-input');
   await capInput.click();
   await page.keyboard.press('Control+a');
   await page.keyboard.press('Delete');
