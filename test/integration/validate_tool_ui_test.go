@@ -1036,11 +1036,19 @@ const { chromium } = require('playwright');
   // test expects.
   const capInput = page.locator('#concurrency-cap-input');
   const capSet = page.locator('.concurrency-edit button');
-  const typeAndSet = async (text) => {
+  // typeCapField is the one real typing interaction — focus the field,
+  // select all, delete, type — that every block below shares; typeAndSet
+  // is that plus the Set click (issue #264 review: an interaction
+  // hand-copied per block is how a shape nobody can perform creeps back
+  // into the assertions).
+  const typeCapField = async (text) => {
     await capInput.click();
     await page.keyboard.press('Control+a');
     await page.keyboard.press('Delete');
     await page.keyboard.type(text);
+  };
+  const typeAndSet = async (text) => {
+    await typeCapField(text);
     await capSet.click();
     await page.waitForTimeout(400);
   };
@@ -1064,10 +1072,7 @@ const { chromium } = require('playwright');
   // as a user would, force the refresh that the header polls run, and
   // assert the field still holds what was typed. Without the guard in
   // renderConcurrency this fails.
-  await capInput.click();
-  await page.keyboard.press('Control+a');
-  await page.keyboard.press('Delete');
-  await page.keyboard.type('5');
+  await typeCapField('5');
   const midTyping = await page.evaluate(async () => {
     await refresh();
     const el = document.getElementById('concurrency-cap-input');
@@ -1116,10 +1121,7 @@ const { chromium } = require('playwright');
   // Without the blur restore this field would still read 9 while
   // /api/health says unlimited; without the Enter binding, Enter does
   // nothing.
-  await capInput.click();
-  await page.keyboard.press('Control+a');
-  await page.keyboard.press('Delete');
-  await page.keyboard.type('9');
+  await typeCapField('9');
   const capBlur = await page.evaluate(async () => {
     document.getElementById('concurrency-cap-input').blur();
     const health = (await (await fetch('/api/health')).json()).concurrency_cap;
@@ -1130,10 +1132,7 @@ const { chromium } = require('playwright');
 
   // Enter in the field applies the value: the same contract the Set
   // button has, proven against /api/health, then restored the same way.
-  await capInput.click();
-  await page.keyboard.press('Control+a');
-  await page.keyboard.press('Delete');
-  await page.keyboard.type('3');
+  await typeCapField('3');
   await page.keyboard.press('Enter');
   const capEnter = await page.evaluate(async () => {
     await new Promise(r => setTimeout(r, 400));
@@ -1144,9 +1143,7 @@ const { chromium } = require('playwright');
   });
   if (capEnter.health !== 3) fail('Enter in the cap field should apply the value, /api/health states ' + JSON.stringify(capEnter.health));
   if (capEnter.shown !== '3') fail('the field should show the applied cap even while focused, got ' + capEnter.shown);
-  await page.keyboard.press('Control+a');
-  await page.keyboard.press('Delete');
-  await page.keyboard.type('unlimited');
+  await typeCapField('unlimited');
   await page.keyboard.press('Enter');
   const capRestored = await page.evaluate(async () => {
     await new Promise(r => setTimeout(r, 400));
