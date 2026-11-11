@@ -467,6 +467,7 @@
                     <input type="text" id="concurrency-cap-input" class="concurrency-input"
                            aria-label="Live concurrency cap: a whole number, or unlimited"
                            title="Live concurrency cap — a number (0 pauses new work), or 'unlimited'. The next scheduled change still applies."
+                           onfocus="capSubmitPending = false"
                            onfocusout="if (!event.relatedTarget || !event.relatedTarget.closest('.concurrency-edit')) restoreConcurrencyField()"
                            onkeydown="if (event.key === 'Enter') updateConcurrencyCap();">
                     <button class="btn btn-sm" onmousedown="capSubmitPending = true" onclick="updateConcurrencyCap()">Set</button>
@@ -802,7 +803,12 @@
         // focus to the body when a button is clicked rather than moving
         // it into the button (https://bugs.webkit.org/show_bug.cgi?id=229895),
         // so focusout can arrive with a null relatedTarget even though
-        // the operator is aiming at Set (issue #264 review).
+        // the operator is aiming at Set (issue #264 review). A press that
+        // never lands as a click — a drag-off, a right-click — would
+        // otherwise leave the mark armed and the restore disabled on every
+        // later blur, so focusing the field clears it: the gesture that
+        // produces a typed value always starts by focusing the field, so
+        // the mark is fresh for every typed-then-blurred value.
         let capSubmitPending = false;
 
         // renderConcurrency draws the concurrency picture (issue #250) into
@@ -842,7 +848,8 @@
         // holds the submit (capSubmitPending, armed at its mousedown):
         // a click on Set must post what was typed, whatever the engine
         // reports about where focus went. Enter in the field applies
-        // the value instead, so typing has a defined outcome either way.
+        // the value instead, so typing has a defined outcome either way,
+        // and the mark itself is cleared by the field's next focus.
         function restoreConcurrencyField() {
             if (capSubmitPending) return;
             const input = document.getElementById('concurrency-cap-input');

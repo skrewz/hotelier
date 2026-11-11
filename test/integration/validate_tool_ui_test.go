@@ -1179,6 +1179,30 @@ const { chromium } = require('playwright');
   if (capRebound.shown !== '7') fail('the field should show the applied cap after a WebKit-shaped Set click, got ' + capRebound.shown);
   console.log('PASS: the Set button submits on mousedown intent, not on focus-event geography');
 
+  // An abandoned Set press (issue #264 review): a mousedown that never
+  // becomes a click — the operator presses the button, drags off and
+  // releases — must not leave the submit mark armed, because an armed
+  // mark switches the blur restore off on every later blur and the
+  // field would then show a typed-but-never-applied cap again. The
+  // field's own focus event clears the mark, and the gesture that
+  // produces a typed value always starts by focusing the field — so
+  // blur, refocus, blur after the abandoned press must put the
+  // enforced number back. This fails against a mark only a successful
+  // Set can clear.
+  await typeCapField('8');
+  await capSet.dispatchEvent('mousedown');
+  const capAbandoned = await page.evaluate(async () => {
+    const el = document.getElementById('concurrency-cap-input');
+    el.blur();
+    el.focus();
+    el.blur();
+    const health = (await (await fetch('/api/health')).json()).concurrency_cap;
+    return { shown: el.value, health: health };
+  });
+  if (capAbandoned.shown !== String(capAbandoned.health)) fail('an abandoned Set press (mousedown without click) must not leave the blur restore disabled, field: ' + capAbandoned.shown + ', health: ' + JSON.stringify(capAbandoned.health));
+  console.log('PASS: an abandoned Set press leaves the blur restore working for the next blur');
+  await typeAndSet('unlimited');
+
   // Restore the live picture before any later screenshots (blur first:
   // a focused field is deliberately not refreshed by the poll).
   await page.evaluate(() => document.activeElement.blur());
