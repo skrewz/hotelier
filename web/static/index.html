@@ -469,7 +469,7 @@
                            title="Live concurrency cap — a number (0 pauses new work), or 'unlimited'. The next scheduled change still applies."
                            onfocusout="if (!event.relatedTarget || !event.relatedTarget.closest('.concurrency-edit')) restoreConcurrencyField()"
                            onkeydown="if (event.key === 'Enter') updateConcurrencyCap();">
-                    <button class="btn btn-sm" onclick="updateConcurrencyCap()">Set</button>
+                    <button class="btn btn-sm" onmousedown="capSubmitPending = true" onclick="updateConcurrencyCap()">Set</button>
                 </div>
                 <div class="stat-label" id="concurrency-label">Concurrency</div>
             </div>
@@ -795,6 +795,16 @@
         // loses focus (see restoreConcurrencyField, issue #264).
         let lastConcurrency = null;
 
+        // capSubmitPending marks the Set button's mousedown as intent to
+        // submit, so restoreConcurrencyField stands down between that
+        // mousedown and the POST the click issues. The restore cannot
+        // read that intent off the focus event alone: some engines drop
+        // focus to the body when a button is clicked rather than moving
+        // it into the button (https://bugs.webkit.org/show_bug.cgi?id=229895),
+        // so focusout can arrive with a null relatedTarget even though
+        // the operator is aiming at Set (issue #264 review).
+        let capSubmitPending = false;
+
         // renderConcurrency draws the concurrency picture (issue #250) into
         // the editable cap field and the label below it (issue #264): the
         // field carries the cap in force — the number an operator can
@@ -828,13 +838,13 @@
         // without this a typed-but-never-applied value could stay on
         // screen indefinitely after the operator clicked away — the one
         // way the header could show a cap that is not in force (issue
-        // #264 review). The restore is keyed to focus leaving the widget,
-        // not to any blur: the Set button lives inside the widget, and a
-        // click moves focus to the button before its handler reads the
-        // field — restoring on that step would post the stale cap back.
-        // Enter in the field applies the value instead, so typing has a
-        // defined outcome either way.
+        // #264 review). The restore stands down while the Set button
+        // holds the submit (capSubmitPending, armed at its mousedown):
+        // a click on Set must post what was typed, whatever the engine
+        // reports about where focus went. Enter in the field applies
+        // the value instead, so typing has a defined outcome either way.
         function restoreConcurrencyField() {
+            if (capSubmitPending) return;
             const input = document.getElementById('concurrency-cap-input');
             const c = lastConcurrency;
             input.value = (!c || c.cap === undefined || c.cap === null) ? '' : c.cap;
@@ -856,6 +866,9 @@
         async function updateConcurrencyCap() {
             const input = document.getElementById('concurrency-cap-input');
             const cap = input.value.trim();
+            // The typed value is captured, so the button's mousedown
+            // intent has served its purpose whatever the POST answers.
+            capSubmitPending = false;
             try {
                 const res = await fetch('/api/concurrency', {
                     method: 'POST',

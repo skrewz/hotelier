@@ -1153,6 +1153,32 @@ const { chromium } = require('playwright');
   await page.evaluate(() => document.activeElement.blur());
   console.log('PASS: Enter applies the cap field end to end');
 
+  // The WebKit focus shape (issue #264 review): clicking the Set button
+  // can drop focus to the body instead of moving it into the button
+  // (https://bugs.webkit.org/show_bug.cgi?id=229895), so focusout
+  // arrives with relatedTarget === null and a restore keyed on that
+  // alone fires before the click posts what was typed. Chromium never
+  // produces this order, so pin the shape by dispatching the events in
+  // the order WebKit does: mousedown on the button, focusout with a
+  // null relatedTarget on the field, then the click. The button's
+  // mousedown must mark the submit as intended so the restore stands
+  // down. This fails against markup that reads intent off the focus
+  // event alone.
+  await typeCapField('7');
+  await capSet.dispatchEvent('mousedown');
+  await capInput.dispatchEvent('focusout', { relatedTarget: null });
+  await capSet.dispatchEvent('click');
+  const capRebound = await page.evaluate(async () => {
+    await new Promise(r => setTimeout(r, 400));
+    return {
+      health: (await (await fetch('/api/health')).json()).concurrency_cap,
+      shown: document.getElementById('concurrency-cap-input').value,
+    };
+  });
+  if (capRebound.health !== 7) fail('a WebKit-shaped Set click (focusout with a null relatedTarget) must still post the typed cap; /api/health states ' + JSON.stringify(capRebound.health));
+  if (capRebound.shown !== '7') fail('the field should show the applied cap after a WebKit-shaped Set click, got ' + capRebound.shown);
+  console.log('PASS: the Set button submits on mousedown intent, not on focus-event geography');
+
   // Restore the live picture before any later screenshots (blur first:
   // a focused field is deliberately not refreshed by the poll).
   await page.evaluate(() => document.activeElement.blur());
