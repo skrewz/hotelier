@@ -879,7 +879,9 @@ func (s *Server) Orchestrator() *orchestrator.Orchestrator {
 // without a restart, and it honours a live runtime override set through
 // /api/concurrency (issue #264). Enforcement of the cap is a separate
 // concern; this is the single source of truth for "what is the cap right
-// now".
+// now". Resolving may retire an override that has expired at its schedule
+// boundary, so this takes the write lock, can log, and must never be
+// called while the caller holds s.mu (the RWMutex is not reentrant).
 func (s *Server) EffectiveConcurrency(now time.Time) int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
