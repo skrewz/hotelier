@@ -110,6 +110,16 @@ normally; nothing is cancelled or paused. When it rises — on a reload, or at a
 schedule boundary, which the server notices within seconds with no new task and
 no guest poll — the queue drains to the new cap on its own.
 
+**Changing the cap live.** The dashboard's concurrency field, or
+`POST /api/concurrency` with a body of `{"cap": 3}` — `{"cap": "unlimited"}`
+to lift the cap, `0` to pause new assignments — sets the live cap directly
+(issue #264). It takes effect at once, the way a reload does, and is never
+persisted to disk. It rules until the next boundary of the concurrency
+schedule, when the scheduled shrink or expansion takes over again; with no
+schedule it rules until the next config reload — which clears it and returns
+authority to the file — or a restart. While it rules, the status surface
+names the source as `manual override`.
+
 A queue the cap is holding back looks different from a pool with no matching
 guest, in the four places an operator reads:
 
@@ -121,8 +131,10 @@ guest, in the four places an operator reads:
   flight, and clears as soon as the task is assigned
 - `/api/health`: `in_flight` and `concurrency_cap` (the latter `"unlimited"`
   when no cap is in force) say the same thing at a glance
-- the dashboard: a concurrency stat in the header, `2/4 · next 23:00 → 4`, so
-  night mode reads as night mode rather than as an idle system
+- the dashboard: a concurrency stat in the header — an editable cap field with
+  a Set button, labelled `N in flight · next 23:00 → 4` — so night mode reads
+  as night mode rather than as an idle system, and the cap in force can be
+  changed where it is read (issue #264)
 
 The same picture is served on the endpoint the dashboard polls, as
 `concurrency` on `/api/guests`:
@@ -285,6 +297,7 @@ curl -X POST http://localhost:8080/api/tasks \
 | `POST` | `/api/tasks/filter` | Set or clear the task preference filter; body `{"filter": "<text>"}`, empty string clears, values past 256 bytes rejected with `400` |
 | `GET` | `/api/guests` | List connected guests (UID, host, state, tags), the claim counters and the live concurrency picture |
 | `GET` | `/api/guests/:id` | Get guest details |
+| `POST` | `/api/concurrency` | Set the live concurrency cap; body `{"cap": N}` (whole number, `0` pauses new work) or `{"cap": "unlimited"}`; honoured until the next schedule boundary; returns the concurrency picture |
 | `GET` | `/api/health` | Health check |
 | `GET` | `/metrics` | Prometheus scrape endpoint: live server state as gauges, plus task-transition counters and histograms |
 | `WS` | `/ws` | WebSocket (JSON-RPC) |

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"math"
 	"net/http"
 	"net/url"
 	"os"
@@ -350,6 +351,16 @@ type Server struct {
 	// growing set.
 	cancelIntentMu     sync.Mutex
 	cancelIntentByTask map[string]string
+	// capOverride, when non-nil, replaces the configured or scheduled
+	// concurrency cap with a value set at runtime through /api/concurrency
+	// (issue #264). It is deliberately in-memory only — nothing persists
+	// it — and expires at capOverrideExpires, the next scheduled boundary
+	// after it was set, so the next shrink or expansion on the schedule is
+	// still respected. With no schedule there is no boundary to expire
+	// against and the override rules until the next config reload,
+	// which clears it. Guarded by s.mu.
+	capOverride        *int
+	capOverrideExpires time.Time
 	webDir             string
 	templateDir        string
 }
@@ -496,6 +507,13 @@ func (s *Server) reload(cfg config.ServerConfig) bool {
 	if !reflect.DeepEqual(cfg.ConcurrencySchedule, old.ConcurrencySchedule) || cfg.ScheduleTimezone != old.ScheduleTimezone {
 		s.log.Printf("concurrency_schedule updated: %d entries (timezone %q)", len(cfg.ConcurrencySchedule), cfg.ScheduleTimezone)
 	}
+	// A config reload is an operator editing the file; the file regains
+	// authority, so a live cap override (issue #264) does not survive it.
+	if s.capOverride != nil {
+		s.log.Printf("config reload cleared the live concurrency cap override")
+		s.capOverride = nil
+		s.capOverrideExpires = time.Time{}
+	}
 	drain := s.pushConcurrencyCapLocked(cfg, time.Now())
 
 	// Recreate persona store if personas changed (deep comparison catches
@@ -561,10 +579,30 @@ const concurrencySyncInterval = 15 * time.Second
 // unlimited outranking any number — which means work the schedule was holding
 // back may now start.
 func (s *Server) pushConcurrencyCapLocked(cfg config.ServerConfig, now time.Time) bool {
-	effective := cfg.EffectiveConcurrency(now)
+	effective := s.effectiveCapLocked(cfg, now)
 	rose := capIsGreater(effective, s.orchestrator.ConcurrencyCap())
 	s.orchestrator.SetConcurrencyCap(effective)
 	return rose
+}
+
+// effectiveCapLocked resolves the cap in force at now, honouring a live
+// runtime override of the kind /api/concurrency sets (issue #264). An
+// override expires at the next scheduled boundary that existed when it was
+// set — the schedule's next shrink or expansion is still respected — and
+// with no schedule it holds until a reload clears it. Expiry is evaluated
+// here, under the same lock that pushes the resolved cap, so the sync tick,
+// a reload and a status read can never disagree about whether the override
+// still rules.
+func (s *Server) effectiveCapLocked(cfg config.ServerConfig, now time.Time) int {
+	if s.capOverride != nil {
+		if s.capOverrideExpires.IsZero() || now.Before(s.capOverrideExpires) {
+			return *s.capOverride
+		}
+		s.log.Printf("concurrency cap override expired: the scheduled cap takes over again")
+		s.capOverride = nil
+		s.capOverrideExpires = time.Time{}
+	}
+	return cfg.EffectiveConcurrency(now)
 }
 
 // syncConcurrencyCap re-resolves the cap against the schedule at now and
@@ -572,9 +610,33 @@ func (s *Server) pushConcurrencyCapLocked(cfg config.ServerConfig, now time.Time
 // caller can drain the queue (issue #249). Crossing a 07:00 boundary is not an
 // event the server receives from anyone; this is how the schedule is noticed.
 func (s *Server) syncConcurrencyCap(now time.Time) bool {
-	s.mu.RLock()
-	rose := s.pushConcurrencyCapLocked(s.cfg, now)
-	s.mu.RUnlock()
+	// A write lock: resolving the cap may expire and clear a live override
+	// (issue #264), which a read lock must not do.
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.pushConcurrencyCapLocked(s.cfg, now)
+}
+
+// setConcurrencyCapOverride installs newCap as the live concurrency cap
+// until the next scheduled boundary after now (issue #264). Like a reload
+// that raises the cap, it reports whether the cap rose, so the caller can
+// drain the queue the old cap was holding back.
+func (s *Server) setConcurrencyCapOverride(newCap int, now time.Time) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	s.capOverride = &newCap
+	until := "until the next config reload"
+	if status := s.cfg.ConcurrencyStatus(now); status.HasNextChange() {
+		s.capOverrideExpires = status.NextChangeAt
+		until = fmt.Sprintf("until the next scheduled change at %s %s", status.NextAt(), status.Timezone)
+	} else {
+		s.capOverrideExpires = time.Time{}
+	}
+
+	rose := capIsGreater(newCap, s.orchestrator.ConcurrencyCap())
+	s.orchestrator.SetConcurrencyCap(newCap)
+	s.log.Printf("concurrency cap set to %v by the API, %s", capLabel(newCap), until)
 	return rose
 }
 
@@ -752,6 +814,7 @@ func (s *Server) Start() error {
 	mux.HandleFunc("/api/tasks/", s.HandleTaskDetail)
 	mux.HandleFunc("/api/guests", s.HandleGuests)
 	mux.HandleFunc("/api/guests/", s.HandleGuestDetail)
+	mux.HandleFunc("/api/concurrency", s.HandleConcurrency)
 	mux.HandleFunc("/api/health", s.HandleHealth)
 	mux.HandleFunc("/api/logs", s.HandleLogs)
 	mux.HandleFunc("/api/logs/", s.HandleLogEntry)
@@ -795,12 +858,14 @@ func (s *Server) Orchestrator() *orchestrator.Orchestrator {
 // EffectiveConcurrency returns the task-concurrency cap in force at now,
 // resolved from the currently loaded configuration (issue #248). It reads
 // the config live, so a Reload carrying new concurrency keys takes effect
-// without a restart. Enforcement of the cap is a separate concern; this is
-// the single source of truth for "what is the cap right now".
+// without a restart, and it honours a live runtime override set through
+// /api/concurrency (issue #264). Enforcement of the cap is a separate
+// concern; this is the single source of truth for "what is the cap right
+// now".
 func (s *Server) EffectiveConcurrency(now time.Time) int {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	return s.cfg.EffectiveConcurrency(now)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.effectiveCapLocked(s.cfg, now)
 }
 
 // Registry returns the guest registry (for testing, migration compat).
@@ -2377,6 +2442,13 @@ func (s *Server) HandleGuests(w http.ResponseWriter, r *http.Request) {
 func (s *Server) concurrencyStatus(now time.Time) map[string]interface{} {
 	s.mu.RLock()
 	status := s.cfg.ConcurrencyStatus(now)
+	// While a runtime override rules, the number comes from the operator,
+	// not the config, and the status says so (issue #264). The cap itself
+	// comes from the orchestrator below, which already holds the override,
+	// so value and provenance agree.
+	if s.capOverride != nil && (s.capOverrideExpires.IsZero() || now.Before(s.capOverrideExpires)) {
+		status.Source = "manual override"
+	}
 	s.mu.RUnlock()
 
 	var next interface{}
@@ -2400,6 +2472,86 @@ func (s *Server) concurrencyStatus(now time.Time) map[string]interface{} {
 		"waiting_on_cap": waitingOnCap,
 		"next_change":    next,
 	}
+}
+
+// HandleConcurrency handles the /api/concurrency endpoint (issue #264):
+// POST sets the live concurrency cap at runtime, with no persistence to
+// disk. The value takes effect immediately — the same contract a reload
+// has — and rules until the next boundary of the concurrency schedule,
+// when the scheduled shrink or expansion takes over again; with no
+// schedule it rules until the next config reload or restart. The response
+// is the same concurrency picture the dashboard polls on /api/guests, so
+// the caller sees the cap, its source and what it holds back after the
+// change.
+//
+// The body is `{"cap": N}`: N >= 0 is the cap (0 pauses new assignments,
+// the vocabulary a schedule entry uses for the overnight pause), and the
+// string "unlimited" — like any negative number — lifts the cap entirely.
+//
+// As on every surface here, the HTTP API performs no authentication; bind
+// to loopback or terminate behind an authenticating proxy.
+func (s *Server) HandleConcurrency(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	var body struct {
+		Cap *json.RawMessage `json:"cap"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		http.Error(w, "invalid JSON body", http.StatusBadRequest)
+		return
+	}
+	if body.Cap == nil {
+		http.Error(w, `body must carry "cap": a whole number (0 pauses new work) or "unlimited"`, http.StatusBadRequest)
+		return
+	}
+	newCap, err := parseCapValue(*body.Cap)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	now := time.Now()
+	rose := s.setConcurrencyCapOverride(newCap, now)
+	if rose {
+		// A raised cap is itself the event the held queue was waiting on;
+		// drain it outside the lock, as reload and the sync tick do
+		// (issue #249).
+		s.tryAssignPendingTasks()
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(s.concurrencyStatus(now))
+}
+
+// parseCapValue reads the "cap" member of a /api/concurrency body. The JSON
+// number vocabulary is the one the cap has everywhere: a whole number >= 0
+// is that cap (0 pauses), any negative number is the unlimited sentinel,
+// and the string "unlimited" says the same thing in the words the status
+// surface uses. Anything else — a fraction, a different string, null, a
+// number too large to be a queue depth — is refused, so a typo cannot
+// silently pause or un-cap the fleet.
+func parseCapValue(raw json.RawMessage) (int, error) {
+	var n float64
+	if err := json.Unmarshal(raw, &n); err == nil {
+		if n != math.Trunc(n) {
+			return 0, errors.New("cap must be a whole number")
+		}
+		if n < 0 {
+			return config.ConcurrencyUnlimited, nil
+		}
+		if n > math.MaxInt32 {
+			return 0, errors.New("cap is implausibly large")
+		}
+		return int(n), nil
+	}
+	var s string
+	if err := json.Unmarshal(raw, &s); err == nil && strings.EqualFold(strings.TrimSpace(s), "unlimited") {
+		return config.ConcurrencyUnlimited, nil
+	}
+	return 0, errors.New(`cap must be a whole number >= 0 or "unlimited"`)
 }
 
 // guestWithAge flattens a registry entry for /api/guests and adds the

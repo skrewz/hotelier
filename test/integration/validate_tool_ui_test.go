@@ -467,6 +467,7 @@ func TestValidateToolUI(t *testing.T) {
 	mux.HandleFunc("/api/tasks/", srv.HandleTaskDetail)
 	mux.HandleFunc("/api/guests", srv.HandleGuests)
 	mux.HandleFunc("/api/guests/", srv.HandleGuestDetail)
+	mux.HandleFunc("/api/concurrency", srv.HandleConcurrency)
 	mux.HandleFunc("/api/health", srv.HandleHealth)
 	mux.HandleFunc("/api/logs", srv.HandleLogs)
 	mux.HandleFunc("/api/logs/", srv.HandleLogEntry)
@@ -989,10 +990,10 @@ const { chromium } = require('playwright');
   // have moved off its placeholder by now (the same style of assertion as
   // the header stats above).
   const concurrencyLive = await page.evaluate(() => ({
-    value: document.getElementById('concurrency-count').textContent,
+    value: document.getElementById('concurrency-cap-input').value,
     label: document.getElementById('concurrency-label').textContent,
   }));
-  if (concurrencyLive.value === '—') fail('Concurrency stat should be populated from the /api/guests poll');
+  if (concurrencyLive.value === '') fail('Concurrency cap field should be populated from the /api/guests poll');
   if (!concurrencyLive.label.startsWith('Concurrency')) fail('Concurrency label should start with "Concurrency", got: ' + concurrencyLive.label);
   console.log('PASS: concurrency stat reads', concurrencyLive.value, '\u00b7', concurrencyLive.label);
 
@@ -1002,7 +1003,7 @@ const { chromium } = require('playwright');
   // assertions can fail if the line the operator reads stops composing.
   const concurrencyFixtures = await page.evaluate(() => {
     const read = () => ({
-      value: document.getElementById('concurrency-count').textContent,
+      value: document.getElementById('concurrency-cap-input').value,
       label: document.getElementById('concurrency-label').textContent,
     });
     const out = [];
@@ -1015,13 +1016,41 @@ const { chromium } = require('playwright');
     return out;
   });
   const expectStat = (fixture, value, label, what) => {
-    if (fixture.value !== value) fail(what + ': expected value "' + value + '", got "' + fixture.value + '"');
+    if (fixture.value !== value) fail(what + ': expected cap field "' + value + '", got "' + fixture.value + '"');
     if (fixture.label !== label) fail(what + ': expected label "' + label + '", got "' + fixture.label + '"');
   };
-  expectStat(concurrencyFixtures[0], '1/2', 'Concurrency \u00b7 next 23:00 \u2192 4 \u00b7 3 waiting on cap', 'scheduled fixture');
-  expectStat(concurrencyFixtures[1], '0/unlimited', 'Concurrency', 'unlimited fixture');
-  expectStat(concurrencyFixtures[2], '\u2014', 'Concurrency', 'absent-payload fixture');
+  expectStat(concurrencyFixtures[0], '2', 'Concurrency \u00b7 1 in flight \u00b7 next 23:00 \u2192 4 \u00b7 3 waiting on cap', 'scheduled fixture');
+  expectStat(concurrencyFixtures[1], 'unlimited', 'Concurrency \u00b7 0 in flight', 'unlimited fixture');
+  expectStat(concurrencyFixtures[2], '', 'Concurrency', 'absent-payload fixture');
   console.log('PASS: renderConcurrency pins all three branches');
+
+  // The cap field is editable (issue #264): typing a number and clicking
+  // Set must move the enforced number — proven against /api/health, the
+  // surface that states the cap the next assignment decision obeys. Then
+  // back to "unlimited", which is what this server's config resolves to
+  // and what the rest of this test expects.
+  const capEdit = await page.evaluate(async () => {
+    const input = document.getElementById('concurrency-cap-input');
+    const settle = () => new Promise(r => setTimeout(r, 400));
+    input.value = '1';
+    document.querySelector('.concurrency-edit button').click();
+    await settle();
+    const health1 = await (await fetch('/api/health')).json();
+    const label1 = document.getElementById('concurrency-label').textContent;
+    input.value = 'unlimited';
+    document.querySelector('.concurrency-edit button').click();
+    await settle();
+    const healthU = await (await fetch('/api/health')).json();
+    return {
+      cap1: health1.concurrency_cap, label1: label1,
+      capUnlimited: healthU.concurrency_cap, shown: input.value,
+    };
+  });
+  if (capEdit.cap1 !== 1) fail('setting the cap field to 1 should put 1 on /api/health, got ' + JSON.stringify(capEdit.cap1));
+  if (!capEdit.label1.includes('Concurrency')) fail('the label should still describe the concurrency picture after an update, got: ' + capEdit.label1);
+  if (capEdit.capUnlimited !== 'unlimited') fail('setting the cap field to "unlimited" should lift the cap on /api/health, got ' + JSON.stringify(capEdit.capUnlimited));
+  if (capEdit.shown !== 'unlimited') fail('the field should show the cap the server now states, got: ' + capEdit.shown);
+  console.log('PASS: the cap field updates the live concurrency cap end to end');
 
   // Restore the live picture before any later screenshots.
   await page.evaluate(async () => { await refresh(); });
