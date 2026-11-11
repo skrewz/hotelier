@@ -2566,6 +2566,8 @@ func hostNamesLoopback(r *http.Request) bool {
 // The body is `{"cap": N}`: N >= 0 is the cap (0 pauses new assignments,
 // the vocabulary a schedule entry uses for the overnight pause), and the
 // string "unlimited" — like any negative number — lifts the cap entirely.
+// A string that spells a number says the same as the number, which is how
+// the dashboard posts the field.
 // The request must say `Content-Type: application/json` (anything else is
 // 415, a CSRF guard: this endpoint must never answer a cross-origin
 // simple POST), and a body beyond a kilobyte is refused. The handler
@@ -2637,32 +2639,48 @@ func (s *Server) HandleConcurrency(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(s.concurrencyStatus(now))
 }
 
-// parseCapValue reads the "cap" member of a /api/concurrency body. The JSON
-// number vocabulary is the one the cap has everywhere: a whole number >= 0
-// is that cap (0 pauses), any negative number is the unlimited sentinel,
-// and the string "unlimited" says the same thing in the words the status
-// surface uses. Anything else — a fraction, a different string, null, a
-// number too large to be a queue depth — is refused, so a typo cannot
-// silently pause or un-cap the fleet.
+// parseCapValue reads the "cap" member of a /api/concurrency body. The
+// vocabulary of the cap is the one the cap has everywhere: a whole number
+// >= 0 is that cap (0 pauses), any negative number is the unlimited
+// sentinel, and the string "unlimited" says the same thing in the words
+// the status surface uses. A string that spells a number — the shape the
+// dashboard posts, so the field never needs its own copy of this grammar
+// — reads as the number it spells. Anything else — a fraction, a
+// different string, null, a number too large to be a queue depth — is
+// refused, so a typo cannot silently pause or un-cap the fleet.
 func parseCapValue(raw json.RawMessage) (int, error) {
 	var n float64
 	if err := json.Unmarshal(raw, &n); err == nil {
-		if n != math.Trunc(n) {
-			return 0, errors.New("cap must be a whole number")
-		}
-		if n < 0 {
-			return config.ConcurrencyUnlimited, nil
-		}
-		if n > math.MaxInt32 {
-			return 0, errors.New("cap is implausibly large")
-		}
-		return int(n), nil
+		return capFromNumber(n)
 	}
 	var s string
-	if err := json.Unmarshal(raw, &s); err == nil && strings.EqualFold(strings.TrimSpace(s), "unlimited") {
-		return config.ConcurrencyUnlimited, nil
+	if err := json.Unmarshal(raw, &s); err == nil {
+		s = strings.TrimSpace(s)
+		if strings.EqualFold(s, "unlimited") {
+			return config.ConcurrencyUnlimited, nil
+		}
+		if f, err := strconv.ParseFloat(s, 64); err == nil && !strings.ContainsAny(s, "nNiIxX") {
+			return capFromNumber(f)
+		}
 	}
 	return 0, errors.New(`cap must be a whole number >= 0 or "unlimited"`)
+}
+
+// capFromNumber maps a parsed value onto a cap: fractions and the
+// infinities a lenient string parse can produce are not caps, any
+// negative number is the unlimited sentinel, and anything beyond a
+// plausible queue depth is refused.
+func capFromNumber(n float64) (int, error) {
+	if math.IsNaN(n) || math.IsInf(n, 0) || n != math.Trunc(n) {
+		return 0, errors.New("cap must be a whole number")
+	}
+	if n < 0 {
+		return config.ConcurrencyUnlimited, nil
+	}
+	if n > math.MaxInt32 {
+		return 0, errors.New("cap is implausibly large")
+	}
+	return int(n), nil
 }
 
 // guestWithAge flattens a registry entry for /api/guests and adds the

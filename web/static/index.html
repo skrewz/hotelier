@@ -849,19 +849,13 @@
         // parseCapValue in internal/server/server.go owns the grammar of
         // the value — a whole number >= 0 (0 pauses new work), any
         // negative number or the word "unlimited" lifts the cap — and
-        // the field posts whatever was typed straight to it. No client-
-        // side copy of the grammar: a second owner would only disagree
-        // (a typed -1 used to alert here while the same value posted to
-        // the same server lifted the cap), and a refusal surfaces in the
-        // alert with the server's own words.
+        // the field posts the trimmed text as a JSON string for it to
+        // read: a numeric string says the same as the number it spells,
+        // so nothing here decides what counts as a cap. A refusal
+        // surfaces in the alert with the server's own words.
         async function updateConcurrencyCap() {
             const input = document.getElementById('concurrency-cap-input');
-            const raw = input.value.trim();
-            // Post a JSON number when the text is one (plain decimal or
-            // exponent — the number grammar parseCapValue reads), the
-            // bare word otherwise; anything else the server refuses with
-            // a 400 and the cap stands still.
-            const cap = /^-?\d+(\.\d+)?([eE][-+]?\d+)?$/.test(raw) ? Number(raw) : raw;
+            const cap = input.value.trim();
             try {
                 const res = await fetch('/api/concurrency', {
                     method: 'POST',

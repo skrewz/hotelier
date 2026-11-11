@@ -140,6 +140,9 @@ func TestConcurrencyOverride_RejectsBadBodies(t *testing.T) {
 		`{"cap": null}`,
 		`{"cap": 1.5}`,
 		`{"cap": "banana"}`,
+		`{"cap": ""}`,
+		`{"cap": "NaN"}`,
+		`{"cap": "inf"}`,
 		`{"cap": -3.5}`,
 		`{"cap": 1e300}`,
 		`not json`,
@@ -151,6 +154,28 @@ func TestConcurrencyOverride_RejectsBadBodies(t *testing.T) {
 	}
 	if got := srv.orchestrator.ConcurrencyCap(); got != 3 {
 		t.Fatalf("expected a refused body to leave the cap at 3, got %d", got)
+	}
+}
+
+// TestConcurrencyOverride_NumericStringsSayWhatTheySpell: the dashboard
+// posts the typed text as a JSON string so the server owns the whole
+// grammar (issue #264 review); a string is read by the same rules as the
+// number or word it spells, and nothing else passes.
+func TestConcurrencyOverride_NumericStringsSayWhatTheySpell(t *testing.T) {
+	for body, want := range map[string]int{
+		`{"cap": "7"}`:         7,
+		`{"cap": "0"}`:         0,
+		`{"cap": "-1"}`:        config.ConcurrencyUnlimited,
+		`{"cap": "unlimited"}`: config.ConcurrencyUnlimited,
+	} {
+		srv := capTestServer(t, config.ServerConfig{Host: "127.0.0.1", Port: 0, MaxConcurrentTasks: 3})
+		w := postConcurrency(t, srv, body)
+		if w.Code != http.StatusOK {
+			t.Fatalf("body %q: expected 200, got %d: %s", body, w.Code, w.Body.String())
+		}
+		if got := srv.orchestrator.ConcurrencyCap(); got != want {
+			t.Fatalf("body %q: expected cap %d, got %d", body, want, got)
+		}
 	}
 }
 
