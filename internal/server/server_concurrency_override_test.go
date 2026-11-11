@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -252,10 +253,91 @@ func TestConcurrencyOverride_WithoutAScheduleLivesUntilReload(t *testing.T) {
 	}
 }
 
-// TestConcurrencyOverride_EffectiveConcurrencyAgrees: /api/health's number,
-// the status surface and EffectiveConcurrency must state the override, not
-// the config value it overrides — the surfaces were one number before this
-// feature; they must stay one number with it.
+// TestConcurrencyOverride_ExpiryLabelsTheEnforcedCap: between a boundary
+// and the next sync tick the orchestrator still enforces the override's
+// number while the wall clock says it expired. The source must follow the
+// enforced number — "manual override" until the schedule takes over in
+// fact — so value and provenance agree at the one moment an operator is
+// most likely to be reading them.
+func TestConcurrencyOverride_ExpiryLabelsTheEnforcedCap(t *testing.T) {
+	srv := dayNightServer(t) // cap 4 until 07:00, cap 2 from 07:00, UTC
+
+	dayStart := time.Date(2026, 6, 15, 6, 0, 0, 0, time.UTC)
+	srv.syncConcurrencyCap(dayStart)
+	srv.setConcurrencyCapOverride(6, dayStart)
+
+	// Past the 07:00 boundary but before any tick has resolved it: the
+	// orchestrator still states 6, so the source must still say so too.
+	justAfter := time.Date(2026, 6, 15, 7, 0, 30, 0, time.UTC)
+	status := srv.concurrencyStatus(justAfter)
+	if status["cap"] != 6 {
+		t.Fatalf("expected the still-enforced override 6 before the tick, got %v", status["cap"])
+	}
+	if status["source"] != "manual override" {
+		t.Errorf("expected the source to follow the enforced cap until the tick hands over, got %v", status["source"])
+	}
+
+	// Once the tick has run, both the cap and its provenance are the
+	// schedule's again.
+	srv.syncConcurrencyCap(justAfter)
+	status = srv.concurrencyStatus(justAfter)
+	if status["cap"] != 2 {
+		t.Fatalf("expected the scheduled cap 2 after the tick, got %v", status["cap"])
+	}
+	if status["source"] != `concurrency_schedule at "07:00"` {
+		t.Errorf("expected the source back on the schedule after the tick, got %v", status["source"])
+	}
+}
+
+// TestConcurrencyOverride_RejectsCrossSiteSimplePOSTs: the state-changing
+// endpoint must not answer the cross-origin simple POSTs a browser sends
+// without a CORS preflight, so anything that is not an explicit JSON
+// request body is refused and leaves the cap in force untouched.
+func TestConcurrencyOverride_RejectsCrossSiteSimplePOSTs(t *testing.T) {
+	srv := capTestServer(t, config.ServerConfig{Host: "127.0.0.1", Port: 0, MaxConcurrentTasks: 3})
+	for _, ct := range []string{"", "text/plain", "application/x-www-form-urlencoded", "application/xml"} {
+		req := httptest.NewRequest(http.MethodPost, "/api/concurrency", strings.NewReader(`{"cap": 0}`))
+		if ct != "" {
+			req.Header.Set("Content-Type", ct)
+		}
+		w := httptest.NewRecorder()
+		srv.HandleConcurrency(w, req)
+		if w.Code != http.StatusUnsupportedMediaType {
+			t.Errorf("Content-Type %q: expected 415, got %d", ct, w.Code)
+		}
+	}
+	if got := srv.orchestrator.ConcurrencyCap(); got != 3 {
+		t.Fatalf("expected a refused request to leave the cap at 3, got %d", got)
+	}
+
+	// A parameterised but genuine JSON type still works (charset and the
+	// like must not lock out a correct client).
+	req := httptest.NewRequest(http.MethodPost, "/api/concurrency", strings.NewReader(`{"cap": 1}`))
+	req.Header.Set("Content-Type", "application/json; charset=utf-8")
+	w := httptest.NewRecorder()
+	srv.HandleConcurrency(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200 for application/json with a parameter, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+// TestConcurrencyOverride_RejectsOversizedBody: the endpoint accepts a few
+// dozen bytes; an unbounded body must be refused without buffering, and
+// the cap in force must not move.
+func TestConcurrencyOverride_RejectsOversizedBody(t *testing.T) {
+	srv := capTestServer(t, config.ServerConfig{Host: "127.0.0.1", Port: 0, MaxConcurrentTasks: 3})
+	w := postConcurrency(t, srv, `{"cap": `+strings.Repeat("9", 4096)+`}`)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected an oversized body to be refused with 400, got %d", w.Code)
+	}
+	if got := srv.orchestrator.ConcurrencyCap(); got != 3 {
+		t.Fatalf("expected a refused body to leave the cap at 3, got %d", got)
+	}
+}
+
+// TestConcurrencyOverride_EffectiveConcurrencyAgrees: the health surface,
+// the status surface and EffectiveConcurrency must state the same cap:
+// the override, not the config value it overrides.
 func TestConcurrencyOverride_EffectiveConcurrencyAgrees(t *testing.T) {
 	srv := New(config.ServerConfig{Host: "127.0.0.1", Port: 0, MaxConcurrentTasks: 3})
 	now := time.Now()

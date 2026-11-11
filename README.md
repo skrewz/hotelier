@@ -111,14 +111,18 @@ schedule boundary, which the server notices within seconds with no new task and
 no guest poll — the queue drains to the new cap on its own.
 
 **Changing the cap live.** The dashboard's concurrency field, or
-`POST /api/concurrency` with a body of `{"cap": 3}` — `{"cap": "unlimited"}`
+`POST /api/concurrency` with a JSON body of `{"cap": 3}` — `{"cap": "unlimited"}`
 to lift the cap, `0` to pause new assignments — sets the live cap directly
-(issue #264). It takes effect at once, the way a reload does, and is never
-persisted to disk. It rules until the next boundary of the concurrency
-schedule, when the scheduled shrink or expansion takes over again; with no
-schedule it rules until the next config reload — which clears it and returns
-authority to the file — or a restart. While it rules, the status surface
-names the source as `manual override`.
+(issue #264). Requests must say `Content-Type: application/json` (anything
+else is `415`, a CSRF guard: the endpoint never answers a cross-origin
+simple POST), and bodies are capped at a kilobyte. The change takes effect
+at once, the way a reload does, and is never persisted to disk. It rules
+until the next boundary of the concurrency schedule, when the scheduled
+shrink or expansion takes over again; with no schedule it rules until the
+next config reload — which clears it and returns authority to the file — or
+a restart. While it rules — and until the schedule has actually taken over,
+which is the next sync tick after the boundary — the status surface names
+the source as `manual override`.
 
 A queue the cap is holding back looks different from a pool with no matching
 guest, in the four places an operator reads:
@@ -297,7 +301,7 @@ curl -X POST http://localhost:8080/api/tasks \
 | `POST` | `/api/tasks/filter` | Set or clear the task preference filter; body `{"filter": "<text>"}`, empty string clears, values past 256 bytes rejected with `400` |
 | `GET` | `/api/guests` | List connected guests (UID, host, state, tags), the claim counters and the live concurrency picture |
 | `GET` | `/api/guests/:id` | Get guest details |
-| `POST` | `/api/concurrency` | Set the live concurrency cap; body `{"cap": N}` (whole number, `0` pauses new work) or `{"cap": "unlimited"}`; honoured until the next schedule boundary; returns the concurrency picture |
+| `POST` | `/api/concurrency` | Set the live concurrency cap; JSON body `{"cap": N}` (whole number, `0` pauses new work) or `{"cap": "unlimited"}`; requires `Content-Type: application/json`; honoured until the next schedule boundary; returns the concurrency picture |
 | `GET` | `/api/health` | Health check |
 | `GET` | `/metrics` | Prometheus scrape endpoint: live server state as gauges, plus task-transition counters and histograms |
 | `WS` | `/ws` | WebSocket (JSON-RPC) |

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log"
 	"math"
+	"mime"
 	"net/http"
 	"net/url"
 	"os"
@@ -589,20 +590,33 @@ func (s *Server) pushConcurrencyCapLocked(cfg config.ServerConfig, now time.Time
 // runtime override of the kind /api/concurrency sets (issue #264). An
 // override expires at the next scheduled boundary that existed when it was
 // set — the schedule's next shrink or expansion is still respected — and
-// with no schedule it holds until a reload clears it. Expiry is evaluated
-// here, under the same lock that pushes the resolved cap, so the sync tick,
-// a reload and a status read can never disagree about whether the override
-// still rules.
+// with no schedule it holds until a reload clears it. Expiry is decided by
+// overrideRulesLocked, the single owner of that verdict, so the value and
+// its provenance can never split on whether the override still rules.
 func (s *Server) effectiveCapLocked(cfg config.ServerConfig, now time.Time) int {
+	scheduled := cfg.EffectiveConcurrency(now)
 	if s.capOverride != nil {
-		if s.capOverrideExpires.IsZero() || now.Before(s.capOverrideExpires) {
+		if s.overrideRulesLocked(now) {
 			return *s.capOverride
 		}
-		s.log.Printf("concurrency cap override expired: the scheduled cap takes over again")
+		s.log.Printf("concurrency cap override %v expired at %s: scheduled cap %v takes over",
+			capLabel(*s.capOverride), s.capOverrideExpires.Format(time.RFC3339), capLabel(scheduled))
 		s.capOverride = nil
 		s.capOverrideExpires = time.Time{}
 	}
-	return cfg.EffectiveConcurrency(now)
+	return scheduled
+}
+
+// overrideRulesLocked reports whether a live cap override (issue #264)
+// still rules at now. It is the single owner of that verdict: the cap
+// value (effectiveCapLocked) and its provenance (concurrencyStatus) both
+// consult it, so the two can never disagree about whether the override
+// still rules.
+func (s *Server) overrideRulesLocked(now time.Time) bool {
+	if s.capOverride == nil {
+		return false
+	}
+	return s.capOverrideExpires.IsZero() || now.Before(s.capOverrideExpires)
 }
 
 // syncConcurrencyCap re-resolves the cap against the schedule at now and
@@ -2443,11 +2457,16 @@ func (s *Server) concurrencyStatus(now time.Time) map[string]interface{} {
 	s.mu.RLock()
 	status := s.cfg.ConcurrencyStatus(now)
 	// While a runtime override rules, the number comes from the operator,
-	// not the config, and the status says so (issue #264). The cap itself
-	// comes from the orchestrator below, which already holds the override,
-	// so value and provenance agree.
-	if s.capOverride != nil && (s.capOverrideExpires.IsZero() || now.Before(s.capOverrideExpires)) {
-		status.Source = "manual override"
+	// not the config, and the status says so (issue #264). The label
+	// follows the enforced number rather than the wall clock: the cap
+	// itself comes from the orchestrator below, which still holds the
+	// override until the next sync tick, so between a boundary and that
+	// tick the source stays "manual override" alongside the override's
+	// number instead of attributing it to the schedule. Value and
+	// provenance therefore agree at every instant.
+	if s.overrideRulesLocked(now) ||
+		(s.capOverride != nil && *s.capOverride == s.orchestrator.ConcurrencyCap()) {
+		status.Source = config.CapSourceOverride
 	}
 	s.mu.RUnlock()
 
@@ -2474,6 +2493,11 @@ func (s *Server) concurrencyStatus(now time.Time) map[string]interface{} {
 	}
 }
 
+// concurrencyBodyLimit bounds the /api/concurrency request body: the whole
+// vocabulary of the endpoint fits in a few dozen bytes, so anything longer
+// is an attack or a mistake, not a cap.
+const concurrencyBodyLimit = 1024
+
 // HandleConcurrency handles the /api/concurrency endpoint (issue #264):
 // POST sets the live concurrency cap at runtime, with no persistence to
 // disk. The value takes effect immediately — the same contract a reload
@@ -2487,6 +2511,9 @@ func (s *Server) concurrencyStatus(now time.Time) map[string]interface{} {
 // The body is `{"cap": N}`: N >= 0 is the cap (0 pauses new assignments,
 // the vocabulary a schedule entry uses for the overnight pause), and the
 // string "unlimited" — like any negative number — lifts the cap entirely.
+// The request must say `Content-Type: application/json` (anything else is
+// 415, a CSRF guard: this endpoint must never answer a cross-origin
+// simple POST), and a body beyond a kilobyte is refused.
 //
 // As on every surface here, the HTTP API performs no authentication; bind
 // to loopback or terminate behind an authenticating proxy.
@@ -2495,6 +2522,23 @@ func (s *Server) HandleConcurrency(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
+
+	// CSRF defence (issue #264 review): this endpoint changes state, so
+	// it refuses the cross-origin "simple" POSTs a browser can send
+	// without a CORS preflight. The dashboard already posts
+	// Content-Type: application/json; anything that cannot say JSON —
+	// text/plain, a form encoding — is not a dashboard, and fail-closing
+	// here stops a malicious web page from reaching a loopback-bound
+	// server through the operator's own browser.
+	if media, _, err := mime.ParseMediaType(r.Header.Get("Content-Type")); err != nil || media != "application/json" {
+		http.Error(w, "Content-Type must be application/json", http.StatusUnsupportedMediaType)
+		return
+	}
+
+	// The whole body is a few dozen bytes; bound the read so the
+	// magnitude bound in parseCapValue cannot be preceded by buffering
+	// an arbitrarily large number literal into memory.
+	r.Body = http.MaxBytesReader(w, r.Body, concurrencyBodyLimit)
 
 	var body struct {
 		Cap *json.RawMessage `json:"cap"`
