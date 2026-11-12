@@ -847,9 +847,8 @@
         // #264 review). The restore stands down while the Set button
         // holds the submit (capSubmitPending, armed at its mousedown):
         // a click on Set must post what was typed, whatever the engine
-        // reports about where focus went. Enter in the field applies
-        // the value instead, so typing has a defined outcome either way,
-        // and the mark itself is cleared by the field's next focus.
+        // reports about where focus went. Enter in the field applies the
+        // value instead, so typing has a defined outcome either way.
         function restoreConcurrencyField() {
             if (capSubmitPending) return;
             const input = document.getElementById('concurrency-cap-input');
