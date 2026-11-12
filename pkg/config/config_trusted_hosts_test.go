@@ -6,8 +6,8 @@ import (
 )
 
 // TestNormaliseHostName pins what "one name" means for both halves of the
-// trusted_hosts comparison (issue #286): port stripped, a paired pair of IPv6
-// brackets stripped, one trailing dot stripped, case folded. Unbalanced
+// trusted_hosts comparison (issue #286): port stripped, a balanced pair of
+// IPv6 brackets stripped, one trailing dot stripped, case folded. Unbalanced
 // brackets are left alone, because a Host value carrying them is not a name
 // any client speaks and the normaliser must not invent one for it.
 func TestNormaliseHostName(t *testing.T) {
