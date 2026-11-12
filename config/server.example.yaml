@@ -16,9 +16,15 @@ port: 8080
 # The loopback-peer half of the guard is unchanged; matching is on the
 # normalised name (port, brackets and trailing dot stripped, case
 # folded), and an entry that is not an exact host name or IP address (a
-# wildcard, a URL, a stray space) is refused at load, since one that can
-# match nothing would only fail closed in silence. The default is empty:
-# loopback-only verdicts, exactly as before (fail closed).
+# wildcard, a URL, a stray space) is a configuration error: the server
+# refuses to start—every guest, not just this route—rather than
+# silently ignoring the key, since one that could match nothing would
+# fail closed in silence. Fix such an entry and restart.
+# Write down only names whose DNS you control: the guard admits any
+# exact entry on the list, so a listed name nobody owns is a
+# DNS-rebinding target the loopback-only rule could never offer.
+# The default is empty: loopback-only verdicts, exactly as before (fail
+# closed).
 #trusted_hosts:
 #  - "hotelier.example.com"
 read_timeout: 30

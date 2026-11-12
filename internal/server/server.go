@@ -2562,8 +2562,11 @@ func isLoopbackPeer(r *http.Request) bool {
 // trusted_hosts names (issue #286), which is how a deployment behind a
 // local proxy that forwards the public Host stays reachable. The name
 // half is what stops a DNS-rebound page from borrowing the operator's own
-// browser: Host says which server the client meant, not who asked, so the
-// peer half stays and a list entry only ever adds an admissible name.
+// browser, provided every configured entry is a name whose DNS the operator
+// controls: a listed name nobody owns is a rebinding target the loopback-only
+// list could never offer. Host says which server the client meant, not who
+// asked, so the peer half stays and a list entry only ever adds an
+// admissible name.
 // There are no wildcards: rebinding presents whatever name the attacker's
 // own zone serves, and config.ValidateTrustedHosts refuses an entry that
 // could match nothing rather than letting it fail closed in silence. What
