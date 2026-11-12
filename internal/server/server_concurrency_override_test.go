@@ -316,8 +316,7 @@ func TestConcurrencyOverride_ExpiryLabelsTheEnforcedCap(t *testing.T) {
 
 	// Resolving the cap retires an override whose boundary has arrived, so
 	// the path that resolves must also enforce what it resolved: a read on
-	// the exported surface — the one a future status page or collector
-	// would call — must not retire the override while leaving the
+	// the exported surface must not retire the override while leaving the
 	// orchestrator on the retired number under a schedule label (issue #264
 	// review).
 	if got := srv.EffectiveConcurrency(justAfter); got != 2 {
@@ -336,6 +335,38 @@ func TestConcurrencyOverride_ExpiryLabelsTheEnforcedCap(t *testing.T) {
 	}
 	if status["source"] != `concurrency_schedule at "07:00"` {
 		t.Errorf("expected the source back on the schedule after the tick, got %v", status["source"])
+	}
+}
+
+// TestConcurrencyOverride_ABoundaryReadDrainsTheQueue: a cap read that takes
+// the schedule's expansion over an expired override raises the enforced cap,
+// and a rise is inseparable from the drain it earns — the contract Reload,
+// refreshConcurrency and HandleConcurrency each keep (issue #249). A read that
+// installed the higher number and dropped the verdict would leave the next
+// sync tick comparing that number against an orchestrator already holding it,
+// reporting no rise, and so never draining at all (issue #264 review).
+func TestConcurrencyOverride_ABoundaryReadDrainsTheQueue(t *testing.T) {
+	srv := capTestServer(t, dayNightConfig()) // cap 2 by day, cap 4 from 23:00
+
+	night := time.Date(2026, 6, 15, 22, 0, 0, 0, time.UTC)
+	srv.syncConcurrencyCap(night)
+	srv.setConcurrencyCapOverride(1, "test", night) // expires at the 23:00 entry
+
+	submitTask(t, srv, "t1")
+	submitTask(t, srv, "t2")
+	time.Sleep(100 * time.Millisecond)
+	if got := taskStatus(t, srv, "t2"); got != queue.TaskStatusPending {
+		t.Fatalf("expected t2 held PENDING by the override cap 1, got %s", got)
+	}
+
+	// Past the boundary: the read resolves to the scheduled 4, enforces it,
+	// and the work the override held back starts without waiting for a tick.
+	later := time.Date(2026, 6, 15, 23, 30, 0, 0, time.UTC)
+	if got := srv.EffectiveConcurrency(later); got != 4 {
+		t.Fatalf("expected the read to resolve to the scheduled 4, got %d", got)
+	}
+	if got := taskStatus(t, srv, "t2"); got != queue.TaskStatusAssigned {
+		t.Fatalf("expected the rise the read noticed to drain t2, got %s", got)
 	}
 }
 

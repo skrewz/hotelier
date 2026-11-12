@@ -878,21 +878,30 @@ func (s *Server) Orchestrator() *orchestrator.Orchestrator {
 // It is the single source of truth for "what is the cap right now" and it
 // leaves that statement true: it takes the write lock, because resolving may
 // retire an override whose schedule boundary has arrived, and it hands the
-// resolved number to the orchestrator on the way out. Retirement and
-// enforcement therefore cannot be separated by a read — the number it returns
-// is the number in force the instant it returns, so no caller can wire this
-// surface into a status page or collector and have the label outrun the cap
-// (issue #264 review). It does not run an assignment pass: a caller that found
-// the cap rise here and wants the held queue drained immediately must call
-// tryAssignPendingTasks itself, the way refreshConcurrency does; otherwise the
-// next sync tick drains it.
+// resolved number to the orchestrator on the way out — retirement and
+// enforcement cannot be separated by a read, so the number it returns is the
+// number in force the instant it returns (issue #264 review).
 //
-// Because it can log and write, it must never be called while the caller holds
-// s.mu (the RWMutex is not reentrant).
+// A rise is no more separable from the drain it earns here than it is at the
+// other sites that move the cap: Reload, refreshConcurrency and
+// HandleConcurrency each take the verdict and drain outside the lock, and a
+// site that installed a risen cap and dropped the verdict would leave the
+// next sync tick comparing that number against an orchestrator already
+// holding it, reporting no rise, and draining nothing.
+//
+// Because it can log, write and assign, it must never be called while the
+// caller holds s.mu (the RWMutex is not reentrant).
 func (s *Server) EffectiveConcurrency(now time.Time) int {
 	s.mu.Lock()
-	defer s.mu.Unlock()
-	effective, _ := s.pushConcurrencyCapLocked(s.cfg, now)
+	effective, rose := s.pushConcurrencyCapLocked(s.cfg, now)
+	s.mu.Unlock()
+	if rose {
+		// A raised cap is itself the event the held queue was waiting on,
+		// so drain it here rather than waiting for a guest to poll. Outside
+		// the lock: the assignment pass talks to guests and must not hold
+		// the config open (issue #249).
+		s.tryAssignPendingTasks()
+	}
 	return effective
 }
 
