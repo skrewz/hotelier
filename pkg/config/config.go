@@ -3,6 +3,7 @@ package config
 import (
 	"crypto/tls"
 	"fmt"
+	"net"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -249,6 +250,9 @@ func LoadServerConfig(path string) (ServerConfig, error) {
 	if err := cfg.ValidateConcurrency(); err != nil {
 		return cfg, err
 	}
+	if err := cfg.ValidateTrustedHosts(); err != nil {
+		return cfg, err
+	}
 	return cfg, nil
 }
 
@@ -284,6 +288,73 @@ func (c ServerConfig) ValidateConcurrency() error {
 		if e.Concurrency < 0 {
 			return fmt.Errorf("concurrency_schedule entry at %q: concurrency must not be negative (got %d)", e.At, e.Concurrency)
 		}
+	}
+	return nil
+}
+
+// NormaliseHostName reduces a Host header value, or a configured
+// trusted_hosts entry, to the one comparable name both halves of the guard
+// match on (issue #286): port stripped, a balanced pair of IPv6 brackets
+// stripped, one trailing dot (the absolute-form root label) stripped, case
+// folded. It lives here beside the validator below so the guard in
+// internal/server and the config side cannot disagree about what a name is,
+// and it is idempotent: running it over an already-normalised name changes
+// nothing.
+//
+// Brackets are stripped only when balanced. net.SplitHostPort already yields
+// "::1" for the bracketed-with-port form ("[::1]:8080"), so an unbalanced pair
+// is a malformed Host value rather than a name, and inventing a name for it
+// would admit shapes the address parser itself refuses.
+func NormaliseHostName(host string) string {
+	if h, _, err := net.SplitHostPort(host); err == nil {
+		host = h
+	}
+	if len(host) >= 2 && strings.HasPrefix(host, "[") && strings.HasSuffix(host, "]") {
+		host = host[1 : len(host)-1]
+	}
+	host = strings.TrimSuffix(host, ".")
+	return strings.ToLower(host)
+}
+
+// trustedHostNameRe matches a normalised name a client could actually present
+// in a Host header: dot-separated labels of letters, digits, hyphens and
+// underscores, each starting and ending with a letter, digit or underscore.
+// (Underscores are not legal in a registered domain but are common in local
+// DNS, and such a name can still be sent.) Anything else—"*.example.com",
+// "https://hotelier.example.com", a stray space—names nothing a client speaks,
+// so it can only be a typo.
+var trustedHostNameRe = regexp.MustCompile(`^[a-z0-9_]([a-z0-9_-]*[a-z0-9_])?(\.[a-z0-9_]([a-z0-9_-]*[a-z0-9_])?)*$`)
+
+// ValidateTrustedHosts checks the trusted_hosts list (issue #286): an entry
+// whose normalised form is neither an IP literal nor a name a client could
+// present is a configuration error, never silently ignored. An entry that can
+// match nothing keeps POST /api/concurrency answering 403 for the life of the
+// process—the very failure this field exists to fix, but now looking like a
+// broken guard rather than a typo, with no effective list to compare the
+// refused Host against.
+//
+// Wildcard *policy* is issue #285's to decide; this covers only the case where
+// an entry cannot match anything, which needs no policy.
+//
+// LoadServerConfig calls it, and so does every path that installs a config
+// into a running server (Server.New / Server.Reload), the way
+// ValidateConcurrency does.
+func (c ServerConfig) ValidateTrustedHosts() error {
+	for _, entry := range c.TrustedHosts {
+		if strings.Contains(entry, "/") {
+			return fmt.Errorf("trusted_hosts entry %q is not a host name: a scheme or a path does not belong in it, so it would match no Host header (write the host name alone)", entry)
+		}
+		name := NormaliseHostName(entry)
+		if name == "" {
+			return fmt.Errorf("trusted_hosts entry %q is empty: it would admit no Host at all", entry)
+		}
+		if net.ParseIP(name) != nil || trustedHostNameRe.MatchString(name) {
+			continue
+		}
+		if strings.Contains(name, "*") {
+			return fmt.Errorf("trusted_hosts entry %q is a wildcard: entries are exact names, and a wildcard would admit whatever name a rebound zone serves", entry)
+		}
+		return fmt.Errorf("trusted_hosts entry %q (normalised to %q) is neither an exact host name nor an IP address, so no Host header could ever match it", entry, name)
 	}
 	return nil
 }

@@ -474,7 +474,7 @@ func TestConcurrencyOverride_RequiresOperatorIdentity(t *testing.T) {
 
 	// A name that was not configured is still refused from a loopback
 	// peer—and so is the empty Host, whatever the blank entry says.
-	for _, host := range []string{"attacker.example:8080", "hotelier.example.com.evil.example", ""} {
+	for _, host := range []string{"attacker.example:8080", "hotelier.example.com.evil.example", "hotelier.example.com]", "[hotelier.example.com", ""} {
 		if w := postFrom(t, trusted, "127.0.0.1:4321", host); w.Code != http.StatusForbidden {
 			t.Fatalf("Host %q: expected an unconfigured Host from a loopback peer to be refused with 403, got %d: %s", host, w.Code, w.Body.String())
 		}
@@ -487,7 +487,7 @@ func TestConcurrencyOverride_RequiresOperatorIdentity(t *testing.T) {
 	// verdict is on the normalised name: case, port and trailing dot
 	// spell one name. The list only adds, so loopback names still pass
 	// with the list non-empty.
-	for _, host := range []string{"hotelier.example.com:7352", "Hotelier.Example.Com", "hotelier.example.com.", "localhost:8080"} {
+	for _, host := range []string{"hotelier.example.com:7352", "Hotelier.Example.Com", "hotelier.example.com.", "[hotelier.example.com]", "localhost:8080"} {
 		if w := postFrom(t, trusted, "127.0.0.1:4321", host); w.Code != http.StatusOK {
 			t.Fatalf("Host %q: expected a loopback POST with a trusted or loopback name to be admitted, got %d: %s", host, w.Code, w.Body.String())
 		}

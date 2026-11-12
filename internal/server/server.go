@@ -491,6 +491,15 @@ func (s *Server) reload(cfg config.ServerConfig) bool {
 		cfg.ConcurrencySchedule = old.ConcurrencySchedule
 		cfg.ScheduleTimezone = old.ScheduleTimezone
 	}
+	// A trusted_hosts entry no Host header can ever carry is a configuration
+	// error as well, and it matters more here than for most keys: the guard it
+	// feeds refuses with "not the operator", so a dead entry and a broken guard
+	// produce the same evidence. Keep the previous list, the way the concurrency
+	// keys are kept above.
+	if err := cfg.ValidateTrustedHosts(); err != nil {
+		s.log.Printf("invalid trusted_hosts configuration after reload: %v (keeping previous trusted_hosts)", err)
+		cfg.TrustedHosts = old.TrustedHosts
+	}
 	s.cfg = cfg
 
 	// Update max guests if changed
@@ -508,6 +517,12 @@ func (s *Server) reload(cfg config.ServerConfig) bool {
 	}
 	if !reflect.DeepEqual(cfg.ConcurrencySchedule, old.ConcurrencySchedule) || cfg.ScheduleTimezone != old.ScheduleTimezone {
 		s.log.Printf("concurrency_schedule updated: %d entries (timezone %q)", len(cfg.ConcurrencySchedule), cfg.ScheduleTimezone)
+	}
+	// Say the same for trusted_hosts (issue #286): editing the list under a
+	// running server otherwise lands silently, and this is the one key whose
+	// failure looks like a broken guard rather than a bad reload.
+	if !reflect.DeepEqual(cfg.TrustedHosts, old.TrustedHosts) {
+		s.log.Printf("trusted_hosts updated: %d names %v", len(cfg.TrustedHosts), cfg.TrustedHosts)
 	}
 	// A config reload is an operator editing the file; the file regains
 	// authority, so a live cap override (issue #264) does not survive it.
@@ -728,6 +743,13 @@ func New(cfg config.ServerConfig) *Server {
 			fallback = "0 (unlimited)"
 		}
 		logger.Printf("invalid concurrency configuration: %v (a schedule the resolver cannot read falls back to max_concurrent_tasks=%s)", err, fallback)
+	}
+
+	// Same for trusted_hosts at startup: the file path refuses such a config
+	// in LoadServerConfig, but a config built in code would otherwise install
+	// an entry that matches nothing, and the only symptom is a 403 (issue #286).
+	if err := cfg.ValidateTrustedHosts(); err != nil {
+		logger.Printf("invalid trusted_hosts configuration: %v (an entry no Host header can carry admits nothing)", err)
 	}
 
 	// Validate persona configuration at startup
@@ -2549,7 +2571,7 @@ func isLoopbackPeer(r *http.Request) bool {
 // it.
 func (s *Server) operatorAllowed(r *http.Request) bool {
 	if isLoopbackPeer(r) {
-		name := normaliseHostName(r.Host)
+		name := config.NormaliseHostName(r.Host)
 		if hostIsLoopbackName(name) || s.hostIsTrusted(name) {
 			return true
 		}
@@ -2558,26 +2580,18 @@ func (s *Server) operatorAllowed(r *http.Request) bool {
 	return false
 }
 
-// normaliseHostName reduces a Host value, or a configured trusted_hosts
-// entry, to the comparable name both verdicts match on: port stripped,
-// IPv6 brackets stripped, a single trailing dot (the absolute-form root
-// label) stripped, case folded. One normaliser is shared so the request
-// side and the config side can never disagree about what a name is.
-func normaliseHostName(host string) string {
-	if h, _, err := net.SplitHostPort(host); err == nil {
-		host = h
-	}
-	host = strings.TrimSuffix(strings.Trim(host, "[]"), ".")
-	return strings.ToLower(host)
-}
-
-// hostIsLoopbackName reports whether a normalised host name names the
-// loopback address — localhost, or an address in 127.0.0.0/8 or ::1. It
-// is the DNS-rebinding guard (issue #264 review): a page on a rebound
-// domain reaches the server from a loopback peer address, but it carries
-// its own domain in Host, and an admitted request addresses this server
-// by the name its own address bar or proxy shows.
+// hostIsLoopbackName reports whether a host name names the loopback
+// address — localhost, or an address in 127.0.0.0/8 or ::1. It normalises
+// its argument first (config.NormaliseHostName is idempotent, so a caller
+// that already normalised loses nothing), because issue #285 is announced
+// as the next consumer of this mechanism and a caller that handed it a raw
+// Host value must not compile into a silent 403 for Host: Localhost. It is
+// the DNS-rebinding guard (issue #264 review): a page on a rebound domain
+// reaches the server from a loopback peer address, but it carries its own
+// domain in Host, and an admitted request addresses this server by the name
+// its own address bar or proxy shows.
 func hostIsLoopbackName(name string) bool {
+	name = config.NormaliseHostName(name)
 	if name == "localhost" {
 		return true
 	}
@@ -2586,15 +2600,17 @@ func hostIsLoopbackName(name string) bool {
 }
 
 // hostIsTrusted reports whether a normalised host name is one of the
-// configured trusted_hosts entries (issue #286), each read through the
-// same normaliser as the request side. An empty name names nothing and
-// never matches, so a blank entry cannot admit a Host-less request.
+// configured trusted_hosts entries (issue #286), each read through the same
+// normaliser as the request side so the two cannot disagree about what a
+// name is. An empty name names nothing and never matches, so a blank entry
+// cannot admit a Host-less request—an entry like that is refused at load by
+// config.ValidateTrustedHosts, and stays inert here.
 func (s *Server) hostIsTrusted(name string) bool {
 	if name == "" {
 		return false
 	}
 	for _, h := range s.cfg.TrustedHosts {
-		if normaliseHostName(h) == name {
+		if config.NormaliseHostName(h) == name {
 			return true
 		}
 	}
