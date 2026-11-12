@@ -2565,10 +2565,17 @@ func isLoopbackPeer(r *http.Request) bool {
 // browser: Host says which server the client meant, not who asked, so the
 // peer half stays and a list entry only ever adds an admissible name.
 // There are no wildcards: rebinding presents whatever name the attacker's
-// own zone serves. A shared-secret mechanism for genuinely remote
-// operators is a cross-route design decision and lives with the rest of
-// the posture question in issue #285, not here with one route's share of
-// it.
+// own zone serves, and config.ValidateTrustedHosts refuses an entry that
+// could match nothing rather than letting it fail closed in silence. What
+// setting the list costs is worth naming here: the verdict stops being
+// "this came from this machine" and becomes "this came through my proxy",
+// so while any name is configured the proxy itself must deny this route to
+// everyone but the operator—guest machines included—until #285 enforces
+// operator identity at the service; the README and server.example.yaml say
+// that to the operator. A shared-secret mechanism for genuinely remote
+// operators is part of the same cross-route decision and lives with the
+// rest of the posture question in issue #285, not here with one route's
+// share of it.
 func (s *Server) operatorAllowed(r *http.Request) bool {
 	if isLoopbackPeer(r) {
 		name := config.NormaliseHostName(r.Host)
