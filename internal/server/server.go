@@ -2671,9 +2671,17 @@ func parseCapValue(raw json.RawMessage) (int, error) {
 		if strings.EqualFold(s, "unlimited") {
 			return config.ConcurrencyUnlimited, nil
 		}
-		var f float64
-		if err := json.Unmarshal([]byte(s), &f); err == nil {
-			return capFromNumber(f)
+		// Decode into `any` rather than straight into a float64: encoding/json
+		// reads the four-letter literal `null` as a successful decode into a
+		// non-pointer number and leaves the target untouched, which here is
+		// the cap 0 — a fleet-wide pause the doc below says is refused.
+		// Through an `any` a null is a nil, the assertion fails, and the
+		// refusal stands, so both doors keep answering one value one way.
+		var v any
+		if err := json.Unmarshal([]byte(s), &v); err == nil {
+			if f, ok := v.(float64); ok {
+				return capFromNumber(f)
+			}
 		}
 	}
 	return 0, errors.New(`cap must be a whole number >= 0 or "unlimited"`)

@@ -138,6 +138,7 @@ func TestConcurrencyOverride_RejectsBadBodies(t *testing.T) {
 		``,
 		`{}`,
 		`{"cap": null}`,
+		`{"cap": "null"}`,
 		`{"cap": 1.5}`,
 		`{"cap": "banana"}`,
 		`{"cap": ""}`,
