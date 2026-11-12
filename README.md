@@ -69,7 +69,7 @@ max_concurrent_tasks: 0
 
 | Field | Description | Default |
 |-------|-------------|--------|
-| `max_concurrent_tasks` | Cap on how many tasks the host is willing to run at any moment (`0` = unlimited). Used when no `concurrency_schedule` is set; the schedule takes precedence otherwise. | `0` |
+| `max_concurrent_tasks` | Cap on how many tasks the host is willing to run at any moment (`0` = unlimited). Used when no `concurrency_schedule` is set; the schedule takes precedence otherwise, and either is outranked while a live override is set — see **Changing the cap live** below. | `0` |
 | `concurrency_schedule` | Daily schedule of concurrency caps. Each entry (`{ at: "HH:MM", concurrency: N }`) takes effect at that wall-clock time and holds until the next entry; the last entry of the day holds through midnight to the first. In an entry `0` is a real cap and pauses all new work — the opposite of `max_concurrent_tasks: 0`, which means unlimited. The resolver keeps the two apart: it reports "no cap" as `config.ConcurrencyUnlimited` (`-1`), which no configuration can carry, so a returned `0` always means "start nothing". | — |
 | `schedule_timezone` | IANA zone name the schedule's `at` times are interpreted in, so boundaries follow the wall clock across DST. The server binary embeds the tz database (`time/tzdata`), so a zone name resolves even in the scratch container image, which ships no `/usr/share/zoneinfo`. | `"UTC"` |
 | `log_retention_days` | How many days of task logs the prune sweep keeps. Date directories older than today minus this many days are removed at startup and on the cleanup tick; the current day and any in-window day are left completely alone, and `queue_dir` is never touched. Following the `max_guests` convention, `0` disables pruning. | `14` |
@@ -110,6 +110,35 @@ normally; nothing is cancelled or paused. When it rises — on a reload, or at a
 schedule boundary, which the server notices within seconds with no new task and
 no guest poll — the queue drains to the new cap on its own.
 
+**Changing the cap live.** The dashboard's concurrency field, or
+`POST /api/concurrency` with a JSON body of `{"cap": 3}` — `{"cap": "unlimited"}`
+to lift the cap, `0` to pause new assignments — sets the live cap directly
+(issue #264). Any negative number says the same thing as `"unlimited"`:
+it maps to the same `config.ConcurrencyUnlimited` sentinel the resolver
+reports, and the server's parser is the one owner of that grammar — a
+string is read by the same JSON number grammar as the number itself, so a
+value cannot be accepted through one door and refused through the other:
+`"1e3"` says 1000, while `"5_0"`, `"+7"` and `"5."` are not JSON numbers
+and are refused quoted or unquoted. The dashboard can post the typed text
+verbatim (as a JSON string) and show the server's refusal when a value does
+not parse. Requests must say `Content-Type: application/json` (anything
+else is `415`, a CSRF guard: the endpoint never answers a cross-origin
+simple POST), and bodies are capped at a kilobyte. The route also refuses
+callers who are not the operator (`403`): only loopback peers addressing
+the server by a loopback name are admitted — this machine itself, or a
+local authenticating proxy forwarding to it — so the route fails closed
+against strangers, and a DNS-rebound web page cannot borrow the
+operator's own browser to move the cap. A shared-secret mechanism for
+operators who are genuinely remote is a cross-route decision and lives with
+the rest of that posture question in issue #285 rather than here. The change
+takes effect at once, the way a reload does, and is never persisted to disk.
+It rules until the next boundary of the concurrency schedule, when the
+scheduled shrink or expansion takes over again; with no schedule it rules
+until the next config reload — which clears it and returns authority to the
+file — or a restart. While an override is installed the status surface names
+the source as `manual override`; the sync tick that lets the schedule take
+over clears the label with it.
+
 A queue the cap is holding back looks different from a pool with no matching
 guest, in the four places an operator reads:
 
@@ -121,8 +150,10 @@ guest, in the four places an operator reads:
   flight, and clears as soon as the task is assigned
 - `/api/health`: `in_flight` and `concurrency_cap` (the latter `"unlimited"`
   when no cap is in force) say the same thing at a glance
-- the dashboard: a concurrency stat in the header, `2/4 · next 23:00 → 4`, so
-  night mode reads as night mode rather than as an idle system
+- the dashboard: a concurrency stat in the header — an editable cap field with
+  a Set button, labelled `N in flight · next 23:00 → 4` — so night mode reads
+  as night mode rather than as an idle system, and the cap in force can be
+  changed where it is read (issue #264)
 
 The same picture is served on the endpoint the dashboard polls, as
 `concurrency` on `/api/guests`:
@@ -285,6 +316,7 @@ curl -X POST http://localhost:8080/api/tasks \
 | `POST` | `/api/tasks/filter` | Set or clear the task preference filter; body `{"filter": "<text>"}`, empty string clears, values past 256 bytes rejected with `400` |
 | `GET` | `/api/guests` | List connected guests (UID, host, state, tags), the claim counters and the live concurrency picture |
 | `GET` | `/api/guests/:id` | Get guest details |
+| `POST` | `/api/concurrency` | Set the live concurrency cap; JSON body `{"cap": N}` (whole number, `0` pauses new work; any negative number or `"unlimited"` lifts the cap; a string says the same as the number or word it spells); requires `Content-Type: application/json` and operator identity (a loopback peer addressing a loopback name); honoured until the next schedule boundary; returns the concurrency picture |
 | `GET` | `/api/health` | Health check |
 | `GET` | `/metrics` | Prometheus scrape endpoint: live server state as gauges, plus task-transition counters and histograms |
 | `WS` | `/ws` | WebSocket (JSON-RPC) |

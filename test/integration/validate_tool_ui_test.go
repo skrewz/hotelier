@@ -467,6 +467,7 @@ func TestValidateToolUI(t *testing.T) {
 	mux.HandleFunc("/api/tasks/", srv.HandleTaskDetail)
 	mux.HandleFunc("/api/guests", srv.HandleGuests)
 	mux.HandleFunc("/api/guests/", srv.HandleGuestDetail)
+	mux.HandleFunc("/api/concurrency", srv.HandleConcurrency)
 	mux.HandleFunc("/api/health", srv.HandleHealth)
 	mux.HandleFunc("/api/logs", srv.HandleLogs)
 	mux.HandleFunc("/api/logs/", srv.HandleLogEntry)
@@ -989,10 +990,10 @@ const { chromium } = require('playwright');
   // have moved off its placeholder by now (the same style of assertion as
   // the header stats above).
   const concurrencyLive = await page.evaluate(() => ({
-    value: document.getElementById('concurrency-count').textContent,
+    value: document.getElementById('concurrency-cap-input').value,
     label: document.getElementById('concurrency-label').textContent,
   }));
-  if (concurrencyLive.value === '—') fail('Concurrency stat should be populated from the /api/guests poll');
+  if (concurrencyLive.value === '') fail('Concurrency cap field should be populated from the /api/guests poll');
   if (!concurrencyLive.label.startsWith('Concurrency')) fail('Concurrency label should start with "Concurrency", got: ' + concurrencyLive.label);
   console.log('PASS: concurrency stat reads', concurrencyLive.value, '\u00b7', concurrencyLive.label);
 
@@ -1002,7 +1003,7 @@ const { chromium } = require('playwright');
   // assertions can fail if the line the operator reads stops composing.
   const concurrencyFixtures = await page.evaluate(() => {
     const read = () => ({
-      value: document.getElementById('concurrency-count').textContent,
+      value: document.getElementById('concurrency-cap-input').value,
       label: document.getElementById('concurrency-label').textContent,
     });
     const out = [];
@@ -1015,15 +1016,196 @@ const { chromium } = require('playwright');
     return out;
   });
   const expectStat = (fixture, value, label, what) => {
-    if (fixture.value !== value) fail(what + ': expected value "' + value + '", got "' + fixture.value + '"');
+    if (fixture.value !== value) fail(what + ': expected cap field "' + value + '", got "' + fixture.value + '"');
     if (fixture.label !== label) fail(what + ': expected label "' + label + '", got "' + fixture.label + '"');
   };
-  expectStat(concurrencyFixtures[0], '1/2', 'Concurrency \u00b7 next 23:00 \u2192 4 \u00b7 3 waiting on cap', 'scheduled fixture');
-  expectStat(concurrencyFixtures[1], '0/unlimited', 'Concurrency', 'unlimited fixture');
-  expectStat(concurrencyFixtures[2], '\u2014', 'Concurrency', 'absent-payload fixture');
+  expectStat(concurrencyFixtures[0], '2', 'Concurrency \u00b7 1 in flight \u00b7 next 23:00 \u2192 4 \u00b7 3 waiting on cap', 'scheduled fixture');
+  expectStat(concurrencyFixtures[1], 'unlimited', 'Concurrency \u00b7 0 in flight', 'unlimited fixture');
+  expectStat(concurrencyFixtures[2], '', 'Concurrency', 'absent-payload fixture');
   console.log('PASS: renderConcurrency pins all three branches');
 
-  // Restore the live picture before any later screenshots.
+  // The cap field is editable (issue #264): typing a number and clicking
+  // Set must move the enforced number — proven against /api/health, the
+  // surface that states the cap the next assignment decision obeys. The
+  // press is the interaction a human performs — focus the field, type
+  // with real keystrokes, click the button with the mouse — because a
+  // real click moves focus before it lands, and a DOM-level .click() on
+  // an unfocused field would stay green even when that sequence posts
+  // the stale cap (issue #264 review). Then back to "unlimited", which
+  // is what this server's config resolves to and what the rest of this
+  // test expects.
+  const capInput = page.locator('#concurrency-cap-input');
+  const capSet = page.locator('.concurrency-edit button');
+  // typeCapField is the one real typing interaction — focus the field,
+  // select all, delete, type — that every block below shares; typeAndSet
+  // is that plus the Set click (issue #264 review: an interaction
+  // hand-copied per block is how a shape nobody can perform creeps back
+  // into the assertions).
+  const typeCapField = async (text) => {
+    await capInput.click();
+    await page.keyboard.press('Control+a');
+    await page.keyboard.press('Delete');
+    await page.keyboard.type(text);
+  };
+  const typeAndSet = async (text) => {
+    await typeCapField(text);
+    await capSet.click();
+    await page.waitForTimeout(400);
+  };
+  const healthCap = async () => await page.evaluate(async () => (await (await fetch('/api/health')).json()).concurrency_cap);
+  await typeAndSet('1');
+  const cap1 = await page.evaluate(async () => ({
+    health: (await (await fetch('/api/health')).json()).concurrency_cap,
+    label: document.getElementById('concurrency-label').textContent,
+  }));
+  if (cap1.health !== 1) fail('typing 1 and clicking Set should put 1 on /api/health, got ' + JSON.stringify(cap1.health));
+  if (!cap1.label.includes('Concurrency')) fail('the label should still describe the concurrency picture after an update, got: ' + cap1.label);
+  await typeAndSet('-1');
+  if (await healthCap() !== 'unlimited') fail('a typed -1 lifts the cap server-side; the field posts it verbatim');
+  await typeAndSet('unlimited');
+  if (await healthCap() !== 'unlimited') fail('typing "unlimited" and clicking Set should lift the cap on /api/health');
+  if (await capInput.inputValue() !== 'unlimited') fail('the field should show the cap the server now states, got: ' + await capInput.inputValue());
+  console.log('PASS: the cap field updates the live concurrency cap end to end');
+
+  // The mid-typing guard (issue #264): the polled refresh must not
+  // clobber a value the operator is typing. Type into the focused field
+  // as a user would, force the refresh that the header polls run, and
+  // assert the field still holds what was typed. Without the guard in
+  // renderConcurrency this fails.
+  await typeCapField('5');
+  const midTyping = await page.evaluate(async () => {
+    await refresh();
+    const el = document.getElementById('concurrency-cap-input');
+    return {
+      value: el.value,
+      focused: document.activeElement === el,
+    };
+  });
+  if (!midTyping.focused) fail('the cap field should still be focused after typing into it');
+  if (midTyping.value !== '5') fail('a polled refresh must not clobber a cap being typed, field now reads: ' + midTyping.value);
+  console.log('PASS: the polled refresh leaves a mid-typing cap field alone');
+
+  // Refusals come from the server, which owns the cap grammar: invalid
+  // text — and a blank field — alerts with the server's 400 and posts no
+  // change. /api/health is the arbiter: the enforced cap must not move.
+  // The dialog listener captures the alert instead of letting it block
+  // the script.
+  const capAlerts = [];
+  const capDialogHandler = dialog => { capAlerts.push(dialog.message()); dialog.dismiss(); };
+  page.on('dialog', capDialogHandler);
+  const invalidCaps = await page.evaluate(async () => {
+    const el = document.getElementById('concurrency-cap-input');
+    const settle = () => new Promise(r => setTimeout(r, 400));
+    const health = async () => (await (await fetch('/api/health')).json()).concurrency_cap;
+    const before = await health();
+    el.value = 'banana';
+    document.querySelector('.concurrency-edit button').click();
+    await settle();
+    const afterBanana = await health();
+    el.value = '';
+    document.querySelector('.concurrency-edit button').click();
+    await settle();
+    const afterBlank = await health();
+    return { before: before, afterBanana: afterBanana, afterBlank: afterBlank };
+  });
+  page.off('dialog', capDialogHandler);
+  if (invalidCaps.afterBanana !== invalidCaps.before) fail('"banana" must alert and leave the cap untouched, health moved ' + invalidCaps.before + ' to ' + invalidCaps.afterBanana);
+  if (invalidCaps.afterBlank !== invalidCaps.before) fail('a blank field must alert and leave the cap untouched, health moved ' + invalidCaps.before + ' to ' + invalidCaps.afterBlank);
+  if (capAlerts.length !== 2) fail('each invalid cap value should alert once, saw ' + capAlerts.length + ' dialogs: ' + JSON.stringify(capAlerts));
+  if (!capAlerts[0].includes('oncurrency cap')) fail('the alert should name the concurrency cap, got: ' + capAlerts[0]);
+  console.log('PASS: invalid cap values alert and leave the live cap untouched');
+
+  // The field must not keep displaying a value that was never applied:
+  // the poll leaves a mid-typing field alone, but leaving focus restores
+  // the enforced cap, and Enter applies the value (issue #264 review).
+  // Without the blur restore this field would still read 9 while
+  // /api/health says unlimited; without the Enter binding, Enter does
+  // nothing.
+  await typeCapField('9');
+  const capBlur = await page.evaluate(async () => {
+    document.getElementById('concurrency-cap-input').blur();
+    const health = (await (await fetch('/api/health')).json()).concurrency_cap;
+    return { shown: document.getElementById('concurrency-cap-input').value, health: health };
+  });
+  if (capBlur.shown !== String(capBlur.health)) fail('a blurred cap field must show the enforced cap again, field: ' + capBlur.shown + ', health: ' + JSON.stringify(capBlur.health));
+  console.log('PASS: a blurred cap field shows the enforced cap again');
+
+  // Enter in the field applies the value: the same contract the Set
+  // button has, proven against /api/health, then restored the same way.
+  await typeCapField('3');
+  await page.keyboard.press('Enter');
+  const capEnter = await page.evaluate(async () => {
+    await new Promise(r => setTimeout(r, 400));
+    return {
+      health: (await (await fetch('/api/health')).json()).concurrency_cap,
+      shown: document.getElementById('concurrency-cap-input').value,
+    };
+  });
+  if (capEnter.health !== 3) fail('Enter in the cap field should apply the value, /api/health states ' + JSON.stringify(capEnter.health));
+  if (capEnter.shown !== '3') fail('the field should show the applied cap even while focused, got ' + capEnter.shown);
+  await typeCapField('unlimited');
+  await page.keyboard.press('Enter');
+  const capRestored = await page.evaluate(async () => {
+    await new Promise(r => setTimeout(r, 400));
+    return (await (await fetch('/api/health')).json()).concurrency_cap;
+  });
+  if (capRestored !== 'unlimited') fail('Enter should restore the unlimited cap, got ' + JSON.stringify(capRestored));
+  await page.evaluate(() => document.activeElement.blur());
+  console.log('PASS: Enter applies the cap field end to end');
+
+  // The WebKit focus shape (issue #264 review): clicking the Set button
+  // can drop focus to the body instead of moving it into the button
+  // (https://bugs.webkit.org/show_bug.cgi?id=229895), so focusout
+  // arrives with relatedTarget === null and a restore keyed on that
+  // alone fires before the click posts what was typed. Chromium never
+  // produces this order, so pin the shape by dispatching the events in
+  // the order WebKit does: mousedown on the button, focusout with a
+  // null relatedTarget on the field, then the click. The button's
+  // mousedown must mark the submit as intended so the restore stands
+  // down. This fails against markup that reads intent off the focus
+  // event alone.
+  await typeCapField('7');
+  await capSet.dispatchEvent('mousedown');
+  await capInput.dispatchEvent('focusout', { relatedTarget: null });
+  await capSet.dispatchEvent('click');
+  const capRebound = await page.evaluate(async () => {
+    await new Promise(r => setTimeout(r, 400));
+    return {
+      health: (await (await fetch('/api/health')).json()).concurrency_cap,
+      shown: document.getElementById('concurrency-cap-input').value,
+    };
+  });
+  if (capRebound.health !== 7) fail('a WebKit-shaped Set click (focusout with a null relatedTarget) must still post the typed cap; /api/health states ' + JSON.stringify(capRebound.health));
+  if (capRebound.shown !== '7') fail('the field should show the applied cap after a WebKit-shaped Set click, got ' + capRebound.shown);
+  console.log('PASS: the Set button submits on mousedown intent, not on focus-event geography');
+
+  // An abandoned Set press (issue #264 review): a mousedown that never
+  // becomes a click — the operator presses the button, drags off and
+  // releases — must not leave the submit mark armed, because an armed
+  // mark switches the blur restore off on every later blur and the
+  // field would then show a typed-but-never-applied cap again. The
+  // field's own focus event clears the mark, and the gesture that
+  // produces a typed value always starts by focusing the field — so
+  // blur, refocus, blur after the abandoned press must put the
+  // enforced number back. This fails against a mark only a successful
+  // Set can clear.
+  await typeCapField('8');
+  await capSet.dispatchEvent('mousedown');
+  const capAbandoned = await page.evaluate(async () => {
+    const el = document.getElementById('concurrency-cap-input');
+    el.blur();
+    el.focus();
+    el.blur();
+    const health = (await (await fetch('/api/health')).json()).concurrency_cap;
+    return { shown: el.value, health: health };
+  });
+  if (capAbandoned.shown !== String(capAbandoned.health)) fail('an abandoned Set press (mousedown without click) must not leave the blur restore disabled, field: ' + capAbandoned.shown + ', health: ' + JSON.stringify(capAbandoned.health));
+  console.log('PASS: an abandoned Set press leaves the blur restore working for the next blur');
+  await typeAndSet('unlimited');
+
+  // Restore the live picture before any later screenshots (blur first:
+  // a focused field is deliberately not refreshed by the poll).
+  await page.evaluate(() => document.activeElement.blur());
   await page.evaluate(async () => { await refresh(); });
 
   // Verify the tab set is Tasks + Logs + Search and nothing else (the task

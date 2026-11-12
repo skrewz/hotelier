@@ -100,6 +100,15 @@ type ServerConfig struct {
 // test would turn a configured overnight pause into no pause at all.
 const ConcurrencyUnlimited = -1
 
+// CapSourceOverride is the source the concurrency status surface states
+// while an operator's runtime cap override (issue #264, set through
+// /api/concurrency) rules. The decision lives in the server — the
+// resolver never produces this value, the server overwrites Source with
+// it — but the label lives beside the source strings ConcurrencyStatus
+// itself produces, so the vocabulary that tells an operator where their
+// cap came from has one address.
+const CapSourceOverride = "manual override"
+
 // ConcurrencyScheduleEntry is one boundary of the daily concurrency
 // schedule (issue #248).
 type ConcurrencyScheduleEntry struct {
@@ -332,6 +341,8 @@ type ConcurrencyStatus struct {
 	// naming the entry in force, or "max_concurrent_tasks" when no schedule
 	// applies — including when a schedule exists but the resolver cannot
 	// trust it, which is a configuration error ValidateConcurrency reports.
+	// A runtime override is not the resolver's concern: the server
+	// overwrites this with CapSourceOverride after resolving (issue #264).
 	Source string
 	// Timezone is the zone the boundaries are quoted in, empty when Cap
 	// came from the static cap and no wall clock is involved.

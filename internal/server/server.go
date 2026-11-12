@@ -6,6 +6,9 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"math"
+	"mime"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -350,6 +353,16 @@ type Server struct {
 	// growing set.
 	cancelIntentMu     sync.Mutex
 	cancelIntentByTask map[string]string
+	// capOverride, when non-nil, replaces the configured or scheduled
+	// concurrency cap with a value set at runtime through /api/concurrency
+	// (issue #264). It is deliberately in-memory only — nothing persists
+	// it — and expires at capOverrideExpires, the next scheduled boundary
+	// after it was set, so the next shrink or expansion on the schedule is
+	// still respected. With no schedule there is no boundary to expire
+	// against and the override rules until the next config reload,
+	// which clears it. Guarded by s.mu.
+	capOverride        *int
+	capOverrideExpires time.Time
 	webDir             string
 	templateDir        string
 }
@@ -496,7 +509,14 @@ func (s *Server) reload(cfg config.ServerConfig) bool {
 	if !reflect.DeepEqual(cfg.ConcurrencySchedule, old.ConcurrencySchedule) || cfg.ScheduleTimezone != old.ScheduleTimezone {
 		s.log.Printf("concurrency_schedule updated: %d entries (timezone %q)", len(cfg.ConcurrencySchedule), cfg.ScheduleTimezone)
 	}
-	drain := s.pushConcurrencyCapLocked(cfg, time.Now())
+	// A config reload is an operator editing the file; the file regains
+	// authority, so a live cap override (issue #264) does not survive it.
+	if s.capOverride != nil {
+		s.log.Printf("config reload cleared the live concurrency cap override")
+		s.capOverride = nil
+		s.capOverrideExpires = time.Time{}
+	}
+	_, drain := s.pushConcurrencyCapLocked(cfg, time.Now())
 
 	// Recreate persona store if personas changed (deep comparison catches
 	// edits to existing personas, not just additions/removals).
@@ -557,24 +577,80 @@ func (s *Server) reload(cfg config.ServerConfig) bool {
 const concurrencySyncInterval = 15 * time.Second
 
 // pushConcurrencyCapLocked resolves the cap for cfg at now and hands it to the
-// orchestrator. The caller must hold s.mu. It reports whether the cap rose —
-// unlimited outranking any number — which means work the schedule was holding
-// back may now start.
-func (s *Server) pushConcurrencyCapLocked(cfg config.ServerConfig, now time.Time) bool {
-	effective := cfg.EffectiveConcurrency(now)
+// orchestrator, returning the number it enforced. The caller must hold s.mu. It
+// also reports whether the cap rose — unlimited outranking any number — which
+// means work the schedule was holding back may now start.
+//
+// Retirement and enforcement move together here on purpose: resolving an
+// override that has expired at its boundary is a write, so it belongs on the
+// path that also pushes the resolved value. A caller that resolved without
+// pushing would leave the orchestrator enforcing a retired override while every
+// status surface attributed it to the schedule (issue #264 review).
+func (s *Server) pushConcurrencyCapLocked(cfg config.ServerConfig, now time.Time) (int, bool) {
+	effective := s.effectiveCapLocked(cfg, now)
 	rose := capIsGreater(effective, s.orchestrator.ConcurrencyCap())
 	s.orchestrator.SetConcurrencyCap(effective)
-	return rose
+	return effective, rose
+}
+
+// effectiveCapLocked resolves the cap in force at now, honouring a live
+// runtime override of the kind /api/concurrency sets (issue #264). An
+// override rules while it is installed and its expiry has not arrived —
+// no expiry instant means no schedule was configured, and the override
+// holds until a reload clears it — so the schedule's next shrink or
+// expansion is still respected. The caller must hold s.mu.
+func (s *Server) effectiveCapLocked(cfg config.ServerConfig, now time.Time) int {
+	scheduled := cfg.EffectiveConcurrency(now)
+	if s.capOverride != nil {
+		if s.capOverrideExpires.IsZero() || now.Before(s.capOverrideExpires) {
+			return *s.capOverride
+		}
+		s.log.Printf("concurrency cap override %v expired at %s: scheduled cap %v takes over",
+			capLabel(*s.capOverride), s.capOverrideExpires.Format(time.RFC3339), capLabel(scheduled))
+		s.capOverride = nil
+		s.capOverrideExpires = time.Time{}
+	}
+	return scheduled
 }
 
 // syncConcurrencyCap re-resolves the cap against the schedule at now and
 // pushes it into the orchestrator. It reports whether the cap rose, so the
 // caller can drain the queue (issue #249). Crossing a 07:00 boundary is not an
 // event the server receives from anyone; this is how the schedule is noticed.
+// It takes the write lock, can log, and must never be called while the caller
+// holds s.mu (the RWMutex is not reentrant) — the same rule EffectiveConcurrency
+// states.
 func (s *Server) syncConcurrencyCap(now time.Time) bool {
-	s.mu.RLock()
-	rose := s.pushConcurrencyCapLocked(s.cfg, now)
-	s.mu.RUnlock()
+	// A write lock: resolving the cap may expire and clear a live override
+	// (issue #264), which a read lock must not do.
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	_, rose := s.pushConcurrencyCapLocked(s.cfg, now)
+	return rose
+}
+
+// setConcurrencyCapOverride installs newCap as the live concurrency cap
+// until the next scheduled boundary after now (issue #264). Like a reload
+// that raises the cap, it reports whether the cap rose, so the caller can
+// drain the queue the old cap was holding back. remote names the peer the
+// request came from, recorded on the log line so a cap change is
+// attributable after the fact.
+func (s *Server) setConcurrencyCapOverride(newCap int, remote string, now time.Time) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	s.capOverride = &newCap
+	until := "until the next config reload"
+	if status := s.cfg.ConcurrencyStatus(now); status.HasNextChange() {
+		s.capOverrideExpires = status.NextChangeAt
+		until = fmt.Sprintf("until the next scheduled change at %s %s", status.NextAt(), status.Timezone)
+	} else {
+		s.capOverrideExpires = time.Time{}
+	}
+
+	rose := capIsGreater(newCap, s.orchestrator.ConcurrencyCap())
+	s.orchestrator.SetConcurrencyCap(newCap)
+	s.log.Printf("concurrency cap set to %v by the API from %s, %s", capLabel(newCap), remote, until)
 	return rose
 }
 
@@ -752,6 +828,7 @@ func (s *Server) Start() error {
 	mux.HandleFunc("/api/tasks/", s.HandleTaskDetail)
 	mux.HandleFunc("/api/guests", s.HandleGuests)
 	mux.HandleFunc("/api/guests/", s.HandleGuestDetail)
+	mux.HandleFunc("/api/concurrency", s.HandleConcurrency)
 	mux.HandleFunc("/api/health", s.HandleHealth)
 	mux.HandleFunc("/api/logs", s.HandleLogs)
 	mux.HandleFunc("/api/logs/", s.HandleLogEntry)
@@ -795,12 +872,37 @@ func (s *Server) Orchestrator() *orchestrator.Orchestrator {
 // EffectiveConcurrency returns the task-concurrency cap in force at now,
 // resolved from the currently loaded configuration (issue #248). It reads
 // the config live, so a Reload carrying new concurrency keys takes effect
-// without a restart. Enforcement of the cap is a separate concern; this is
-// the single source of truth for "what is the cap right now".
+// without a restart, and it honours a live runtime override set through
+// /api/concurrency (issue #264).
+//
+// It is the single source of truth for "what is the cap right now" and it
+// leaves that statement true: it takes the write lock, because resolving may
+// retire an override whose schedule boundary has arrived, and it hands the
+// resolved number to the orchestrator on the way out — retirement and
+// enforcement cannot be separated by a read, so the number it returns is the
+// number in force the instant it returns (issue #264 review).
+//
+// A rise is no more separable from the drain it earns here than it is at the
+// other sites that move the cap: Reload, refreshConcurrency and
+// HandleConcurrency each take the verdict and drain outside the lock, and a
+// site that installed a risen cap and dropped the verdict would leave the
+// next sync tick comparing that number against an orchestrator already
+// holding it, reporting no rise, and draining nothing.
+//
+// Because it can log, write and assign, it must never be called while the
+// caller holds s.mu (the RWMutex is not reentrant).
 func (s *Server) EffectiveConcurrency(now time.Time) int {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	return s.cfg.EffectiveConcurrency(now)
+	s.mu.Lock()
+	effective, rose := s.pushConcurrencyCapLocked(s.cfg, now)
+	s.mu.Unlock()
+	if rose {
+		// A raised cap is itself the event the held queue was waiting on,
+		// so drain it here rather than waiting for a guest to poll. Outside
+		// the lock: the assignment pass talks to guests and must not hold
+		// the config open (issue #249).
+		s.tryAssignPendingTasks()
+	}
+	return effective
 }
 
 // Registry returns the guest registry (for testing, migration compat).
@@ -2377,6 +2479,13 @@ func (s *Server) HandleGuests(w http.ResponseWriter, r *http.Request) {
 func (s *Server) concurrencyStatus(now time.Time) map[string]interface{} {
 	s.mu.RLock()
 	status := s.cfg.ConcurrencyStatus(now)
+	// While an override is installed, the number comes from the operator,
+	// not the config, and the status says so (issue #264). The sync tick
+	// clears the override when the schedule takes over, so the label and
+	// the enforced number agree at every instant.
+	if s.capOverride != nil {
+		status.Source = config.CapSourceOverride
+	}
 	s.mu.RUnlock()
 
 	var next interface{}
@@ -2400,6 +2509,208 @@ func (s *Server) concurrencyStatus(now time.Time) map[string]interface{} {
 		"waiting_on_cap": waitingOnCap,
 		"next_change":    next,
 	}
+}
+
+// concurrencyBodyLimit bounds the /api/concurrency request body: the whole
+// vocabulary of the endpoint fits in a few dozen bytes, so anything longer
+// is an attack or a mistake, not a cap.
+const concurrencyBodyLimit = 1024
+
+// isLoopbackPeer reports whether the peer address of r names a loopback
+// address — the operator's own machine, or an authenticating proxy
+// running beside the server. A peer address the transport does not carry
+// (an empty or unparsable RemoteAddr) is not loopback: it fails closed.
+func isLoopbackPeer(r *http.Request) bool {
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		return false
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
+}
+
+// operatorAllowed is the identity check on the state-changing concurrency
+// route (issue #264 review): whoever moves the fleet-wide cap must be the
+// operator, not merely someone who can open a socket. A loopback peer is
+// the operator by the posture this repository documents (bind to loopback
+// or terminate authentication at a local proxy); anything else is refused
+// outright — the route fails closed instead of trusting a network posture
+// nothing enforces. A loopback peer must also carry a loopback name in
+// Host (hostNamesLoopback), which is what stops a DNS-rebound page from
+// borrowing the operator's own browser. A shared-secret mechanism for
+// genuinely remote operators is a cross-route design decision and lives
+// with the rest of the posture question in issue #285, not here with
+// one route's share of it.
+func (s *Server) operatorAllowed(r *http.Request) bool {
+	if isLoopbackPeer(r) && hostNamesLoopback(r) {
+		return true
+	}
+	s.log.Printf("concurrency cap request refused: peer %s, Host %s", r.RemoteAddr, r.Host)
+	return false
+}
+
+// hostNamesLoopback reports whether the Host header of r names the
+// loopback address — localhost, or an address in 127.0.0.0/8 or ::1,
+// with or without a port. It is the DNS-rebinding guard (issue #264
+// review): a page on a rebound domain reaches the server from a loopback
+// peer address, but it carries its own domain in Host, and under the
+// documented posture no operator's request ever does. Browsers fetch
+// from the dashboard itself with the name in the address bar (localhost
+// or 127.x.x.x), and a local proxy forwards the upstream name by
+// default; anything else is not this server speaking.
+func hostNamesLoopback(r *http.Request) bool {
+	host := r.Host
+	if h, _, err := net.SplitHostPort(host); err == nil {
+		host = h
+	}
+	host = strings.TrimSuffix(strings.Trim(host, "[]"), ".")
+	if strings.EqualFold(host, "localhost") {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
+}
+
+// HandleConcurrency handles the /api/concurrency endpoint (issue #264):
+// POST sets the live concurrency cap at runtime, with no persistence to
+// disk. The value takes effect immediately — the same contract a reload
+// has — and rules until the next boundary of the concurrency schedule,
+// when the scheduled shrink or expansion takes over again; with no
+// schedule it rules until the next config reload or restart. The response
+// is the same concurrency picture the dashboard polls on /api/guests, so
+// the caller sees the cap, its source and what it holds back after the
+// change.
+//
+// The body is `{"cap": N}`: N >= 0 is the cap (0 pauses new assignments,
+// the vocabulary a schedule entry uses for the overnight pause), and the
+// string "unlimited" — like any negative number — lifts the cap entirely.
+// A string that spells a number says the same as the number, which is how
+// the dashboard posts the field.
+// The request must say `Content-Type: application/json` (anything else is
+// 415, a CSRF guard: this endpoint must never answer a cross-origin
+// simple POST), and a body beyond a kilobyte is refused. The handler
+// enforces operator identity first (operatorAllowed): a peer that is not
+// loopback, or a loopback peer whose Host names some foreign domain (a
+// DNS-rebinding attempt), gets 403 before the cap moves.
+//
+// Every other surface here keeps the repository's standing posture — the
+// HTTP API performs no authentication; bind to loopback or terminate
+// behind an authenticating proxy — and extending this check to the whole
+// API is tracked in issue #285.
+func (s *Server) HandleConcurrency(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	// Identity before anything else (issue #264 review): reaching this
+	// route is not itself a credential.
+	if !s.operatorAllowed(r) {
+		http.Error(w, "operator identity required: a loopback peer addressing this server by a loopback address", http.StatusForbidden)
+		return
+	}
+
+	// CSRF defence (issue #264 review): this endpoint changes state, so
+	// it refuses the cross-origin "simple" POSTs a browser can send
+	// without a CORS preflight. The dashboard already posts
+	// Content-Type: application/json; anything that cannot say JSON —
+	// text/plain, a form encoding — is not a dashboard, and fail-closing
+	// here stops a malicious web page from reaching a loopback-bound
+	// server through the operator's own browser.
+	if media, _, err := mime.ParseMediaType(r.Header.Get("Content-Type")); err != nil || media != "application/json" {
+		http.Error(w, "Content-Type must be application/json", http.StatusUnsupportedMediaType)
+		return
+	}
+
+	// The whole body is a few dozen bytes; bound the read so the
+	// magnitude bound in parseCapValue cannot be preceded by buffering
+	// an arbitrarily large number literal into memory.
+	r.Body = http.MaxBytesReader(w, r.Body, concurrencyBodyLimit)
+
+	var body struct {
+		Cap *json.RawMessage `json:"cap"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		http.Error(w, "invalid JSON body", http.StatusBadRequest)
+		return
+	}
+	if body.Cap == nil {
+		http.Error(w, `body must carry "cap": a whole number (0 pauses new work) or "unlimited"`, http.StatusBadRequest)
+		return
+	}
+	newCap, err := parseCapValue(*body.Cap)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	now := time.Now()
+	rose := s.setConcurrencyCapOverride(newCap, r.RemoteAddr, now)
+	if rose {
+		// A raised cap is itself the event the held queue was waiting on;
+		// drain it outside the lock, as reload and the sync tick do
+		// (issue #249).
+		s.tryAssignPendingTasks()
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(s.concurrencyStatus(now))
+}
+
+// parseCapValue reads the "cap" member of a /api/concurrency body. The
+// vocabulary of the cap is the one the cap has everywhere: a whole number
+// >= 0 is that cap (0 pauses), any negative number is the unlimited
+// sentinel, and the string "unlimited" says the same thing in the words
+// the status surface uses. A string that spells a number — the shape the
+// dashboard posts, so the field never needs its own copy of this grammar
+// — is read by the JSON number grammar, the same one the number branch
+// above applies, so a value cannot be refused through one door and
+// applied through the other: "5_0", "+7" and "5." are not numbers and are
+// refused whether or not they are quoted. Anything else — a fraction, a
+// different string, null, a number too large to be a queue depth — is
+// refused, so a typo cannot silently pause or un-cap the fleet.
+func parseCapValue(raw json.RawMessage) (int, error) {
+	var n float64
+	if err := json.Unmarshal(raw, &n); err == nil {
+		return capFromNumber(n)
+	}
+	var s string
+	if err := json.Unmarshal(raw, &s); err == nil {
+		s = strings.TrimSpace(s)
+		if strings.EqualFold(s, "unlimited") {
+			return config.ConcurrencyUnlimited, nil
+		}
+		// Decode into `any` rather than straight into a float64: encoding/json
+		// reads the four-letter literal `null` as a successful decode into a
+		// non-pointer number and leaves the target untouched, which here is
+		// the cap 0 — a fleet-wide pause the function doc above says is
+		// refused.
+		// Through an `any` a null is a nil, the assertion fails, and the
+		// refusal stands, so both doors keep answering one value one way.
+		var v any
+		if err := json.Unmarshal([]byte(s), &v); err == nil {
+			if f, ok := v.(float64); ok {
+				return capFromNumber(f)
+			}
+		}
+	}
+	return 0, errors.New(`cap must be a whole number >= 0 or "unlimited"`)
+}
+
+// capFromNumber maps a parsed value onto a cap: fractions and the
+// infinities are not caps, any negative number is the unlimited sentinel,
+// and anything beyond a plausible queue depth is refused.
+func capFromNumber(n float64) (int, error) {
+	if math.IsNaN(n) || math.IsInf(n, 0) || n != math.Trunc(n) {
+		return 0, errors.New("cap must be a whole number")
+	}
+	if n < 0 {
+		return config.ConcurrencyUnlimited, nil
+	}
+	if n > math.MaxInt32 {
+		return 0, errors.New("cap is implausibly large")
+	}
+	return int(n), nil
 }
 
 // guestWithAge flattens a registry entry for /api/guests and adds the

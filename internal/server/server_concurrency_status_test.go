@@ -11,11 +11,10 @@ import (
 	"hotelier/pkg/queue"
 )
 
-// dayNightServer returns a server whose schedule runs cap 2 by day and cap 4
-// by night in UTC — the night-mode shape issue #250 has to make visible.
-func dayNightServer(t *testing.T) *Server {
-	t.Helper()
-	return New(config.ServerConfig{
+// dayNightConfig is a schedule that runs cap 2 by day and cap 4 by night in
+// UTC — the night-mode shape issue #250 has to make visible.
+func dayNightConfig() config.ServerConfig {
+	return config.ServerConfig{
 		Host:               "127.0.0.1",
 		Port:               0,
 		MaxConcurrentTasks: 9,
@@ -24,7 +23,12 @@ func dayNightServer(t *testing.T) *Server {
 			{At: "07:00", Concurrency: 2},
 			{At: "23:00", Concurrency: 4},
 		},
-	})
+	}
+}
+
+func dayNightServer(t *testing.T) *Server {
+	t.Helper()
+	return New(dayNightConfig())
 }
 
 func addTask(t *testing.T, srv *Server, id string) {

@@ -17,6 +17,10 @@
         .stat { text-align: center; }
         .stat-value { font-size: 1.5rem; font-weight: bold; color: #38bdf8; }
         .stat-label { font-size: 0.75rem; color: #94a3b8; text-transform: uppercase; }
+        /* The concurrency cap is editable in place (issue #264): a small
+           number field with an update button. */
+        .concurrency-edit { display: flex; gap: 0.375rem; align-items: center; justify-content: center; font-weight: normal; }
+        .concurrency-input { width: 9ch; padding: 0.125rem 0.25rem; background: #0f172a; border: 1px solid #334155; border-radius: 0.375rem; color: #38bdf8; font-size: 1.1rem; font-weight: bold; text-align: center; font-family: inherit; }
         .container { display: flex; height: calc(100vh - 60px); }
         .sidebar { width: 320px; background: #1e293b; border-right: 1px solid #334155; overflow-y: auto; }
         .main { display: flex; flex-direction: column; flex: 1; overflow: hidden; padding: 1rem; min-height: 0; }
@@ -454,9 +458,20 @@
                 <div class="stat-value" id="running-count">0</div>
                 <div class="stat-label">Running</div>
             </div>
-            <!-- The live concurrency cap and what is held behind it (issue #250). -->
+            <!-- The live concurrency cap and what is held behind it (issue #250),
+                 with the cap settable in place: the field posts a runtime
+                 override that the schedule takes back at the next boundary
+                 (issue #264). -->
             <div class="stat">
-                <div class="stat-value" id="concurrency-count">—</div>
+                <div class="stat-value concurrency-edit">
+                    <input type="text" id="concurrency-cap-input" class="concurrency-input"
+                           aria-label="Live concurrency cap: a whole number, or unlimited"
+                           title="Live concurrency cap — a number (0 pauses new work), or 'unlimited'. The next scheduled change still applies."
+                           onfocus="capSubmitPending = false"
+                           onfocusout="if (!event.relatedTarget || !event.relatedTarget.closest('.concurrency-edit')) restoreConcurrencyField()"
+                           onkeydown="if (event.key === 'Enter') updateConcurrencyCap();">
+                    <button class="btn btn-sm" onmousedown="capSubmitPending = true" onclick="updateConcurrencyCap()">Set</button>
+                </div>
                 <div class="stat-label" id="concurrency-label">Concurrency</div>
             </div>
         </div>
@@ -776,26 +791,110 @@
             renderConcurrency(guests.concurrency);
         }
 
-        // renderConcurrency draws the one-line concurrency picture (issue #250):
-        // "in flight / cap" as the value; the label carries the next
-        // scheduled change and any queue the cap is holding back.
+        // lastConcurrency keeps the newest picture the server stated, so
+        // the cap field can be restored to the enforced number when it
+        // loses focus (see restoreConcurrencyField, issue #264).
+        let lastConcurrency = null;
+
+        // capSubmitPending marks the Set button's mousedown as intent to
+        // submit, so restoreConcurrencyField stands down between that
+        // mousedown and the POST the click issues. The restore cannot
+        // read that intent off the focus event alone: some engines drop
+        // focus to the body when a button is clicked rather than moving
+        // it into the button (https://bugs.webkit.org/show_bug.cgi?id=229895),
+        // so focusout can arrive with a null relatedTarget even though
+        // the operator is aiming at Set (issue #264 review). A press that
+        // never lands as a click — a drag-off, a right-click — would
+        // otherwise leave the mark armed and the restore disabled on every
+        // later blur, so focusing the field clears it: the gesture that
+        // produces a typed value always starts by focusing the field, so
+        // the mark is fresh for every typed-then-blurred value.
+        let capSubmitPending = false;
+
+        // renderConcurrency draws the concurrency picture (issue #250) into
+        // the editable cap field and the label below it (issue #264): the
+        // field carries the cap in force — the number an operator can
+        // change — and the label carries what the cap is doing: in flight,
+        // the next scheduled change, and any queue it is holding back.
         function renderConcurrency(c) {
-            const value = document.getElementById('concurrency-count');
+            lastConcurrency = c;
+            const input = document.getElementById('concurrency-cap-input');
             const label = document.getElementById('concurrency-label');
             if (!c || c.cap === undefined || c.cap === null) {
-                value.textContent = '—';
+                if (document.activeElement !== input) input.value = '';
                 label.textContent = 'Concurrency';
                 return;
             }
-            value.textContent = (c.in_flight || 0) + '/' + c.cap;
-            const bits = ['Concurrency'];
+            // The header polls while the user may be typing a new cap; only
+            // refresh the field when it is not focused.
+            if (document.activeElement !== input) input.value = c.cap;
+            const bits = ['Concurrency', (c.in_flight || 0) + ' in flight'];
             if (c.next_change && c.next_change.at) {
                 bits.push('next ' + c.next_change.at + ' → ' + c.next_change.cap);
             }
             if (c.waiting_on_cap > 0) {
                 bits.push(c.waiting_on_cap + ' waiting on cap');
             }
-            label.textContent = bits.join(' · ');
+            label.textContent = bits.join(' \u00b7 ');
+        }
+
+        // restoreConcurrencyField puts the server's number back into the
+        // cap field when focus leaves the widget. The poll deliberately
+        // leaves a focused field alone while the operator types, so
+        // without this a typed-but-never-applied value could stay on
+        // screen indefinitely after the operator clicked away — the one
+        // way the header could show a cap that is not in force (issue
+        // #264 review). The restore stands down while the Set button
+        // holds the submit (capSubmitPending, armed at its mousedown):
+        // a click on Set must post what was typed, whatever the engine
+        // reports about where focus went. Enter in the field applies the
+        // value instead, so typing has a defined outcome either way.
+        function restoreConcurrencyField() {
+            if (capSubmitPending) return;
+            const input = document.getElementById('concurrency-cap-input');
+            const c = lastConcurrency;
+            input.value = (!c || c.cap === undefined || c.cap === null) ? '' : c.cap;
+        }
+
+        // updateConcurrencyCap posts the cap field to /api/concurrency
+        // (issue #264). The server honours the value until the next
+        // scheduled boundary — the schedule's next shrink or expansion
+        // still takes over on its own — and nothing about it persists to
+        // disk; a config reload or restart returns authority to the file.
+        //
+        // parseCapValue in internal/server/server.go owns the grammar of
+        // the value — a whole number >= 0 (0 pauses new work), any
+        // negative number or the word "unlimited" lifts the cap — and
+        // the field posts the trimmed text as a JSON string for it to
+        // read: a numeric string says the same as the number it spells,
+        // so nothing here decides what counts as a cap. A refusal
+        // surfaces in the alert with the server's own words.
+        async function updateConcurrencyCap() {
+            const input = document.getElementById('concurrency-cap-input');
+            const cap = input.value.trim();
+            // The typed value is captured, so the button's mousedown
+            // intent has served its purpose whatever the POST answers.
+            capSubmitPending = false;
+            try {
+                const res = await fetch('/api/concurrency', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({cap: cap}),
+                });
+                if (!res.ok) {
+                    const errText = await res.text().catch(() => '');
+                    alert('Failed to set concurrency cap (HTTP ' + res.status + '): ' + errText.trim());
+                    return;
+                }
+                const picture = await res.json();
+                renderConcurrency(picture);
+                // The typed value is now the applied value: state it in the
+                // field even when the field still holds focus (Enter), where
+                // the guard above would otherwise skip the refresh.
+                input.value = picture.cap;
+            } catch (e) {
+                alert('Failed to set concurrency cap: ' + e.message);
+            }
         }
 
         // indexGuestHosts records the host each guest reported at registration
