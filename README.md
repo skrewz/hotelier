@@ -72,6 +72,7 @@ max_concurrent_tasks: 0
 | `max_concurrent_tasks` | Cap on how many tasks the host is willing to run at any moment (`0` = unlimited). Used when no `concurrency_schedule` is set; the schedule takes precedence otherwise, and either is outranked while a live override is set — see **Changing the cap live** below. | `0` |
 | `concurrency_schedule` | Daily schedule of concurrency caps. Each entry (`{ at: "HH:MM", concurrency: N }`) takes effect at that wall-clock time and holds until the next entry; the last entry of the day holds through midnight to the first. In an entry `0` is a real cap and pauses all new work — the opposite of `max_concurrent_tasks: 0`, which means unlimited. The resolver keeps the two apart: it reports "no cap" as `config.ConcurrencyUnlimited` (`-1`), which no configuration can carry, so a returned `0` always means "start nothing". | — |
 | `schedule_timezone` | IANA zone name the schedule's `at` times are interpreted in, so boundaries follow the wall clock across DST. The server binary embeds the tz database (`time/tzdata`), so a zone name resolves even in the scratch container image, which ships no `/usr/share/zoneinfo`. | `"UTC"` |
+| `trusted_hosts` | Host names a loopback peer may address this server by in place of a loopback one (issue #286). A local proxy forwards the incoming `Host`, so behind one the public name is what the identity guard on `POST /api/concurrency` sees; this list admits those names so the live cap stays reachable from a proxied dashboard. **Setting it changes that verdict from "this came from this machine" to "this came through my proxy", so the proxy must deny `POST /api/concurrency` to every principal that is not the operator**: until #285 enforces operator identity at the service, a certificate the proxy admits — a guest machine's included — would otherwise gain the fleet-wide pause button. The loopback-peer half of the guard is unchanged, matching is on the normalised name (port, brackets and trailing dot stripped, case folded), and an entry that is not an exact host name or IP address (a wildcard, a URL, a stray space) is a configuration error: the server refuses to start rather than ignoring the key, since one that could match nothing would fail closed in silence—fix the entry and restart. Write down only names **whose DNS you control**: the rule admits any exact entry on the list, so a listed name nobody owns is a DNS-rebinding target, which the loopback-only rule could never offer. The list only adds names, so loopback and SSH-tunnel access are unaffected. | empty (loopback-only) |
 | `log_retention_days` | How many days of task logs the prune sweep keeps. Date directories older than today minus this many days are removed at startup and on the cleanup tick; the current day and any in-window day are left completely alone, and `queue_dir` is never touched. Following the `max_guests` convention, `0` disables pruning. | `14` |
 
 **The HTTP API performs no authentication and there is no TLS.** A server
@@ -124,13 +125,23 @@ verbatim (as a JSON string) and show the server's refusal when a value does
 not parse. Requests must say `Content-Type: application/json` (anything
 else is `415`, a CSRF guard: the endpoint never answers a cross-origin
 simple POST), and bodies are capped at a kilobyte. The route also refuses
-callers who are not the operator (`403`): only loopback peers addressing
-the server by a loopback name are admitted — this machine itself, or a
-local authenticating proxy forwarding to it — so the route fails closed
+callers who are not the operator (`403`): only a loopback peer addressing
+the server by a loopback name—or, when `trusted_hosts` is configured,
+by a configured name—is admitted: this machine itself, a local
+authenticating proxy forwarding to it, or that same proxy forwarding the
+public `Host` it was addressed by (issue #286)—so the route fails closed
 against strangers, and a DNS-rebound web page cannot borrow the
-operator's own browser to move the cap. A shared-secret mechanism for
-operators who are genuinely remote is a cross-route decision and lives with
-the rest of that posture question in issue #285 rather than here. The change
+operator's own browser to move the cap—provided every `trusted_hosts`
+entry is a name whose DNS you control, since an entry nobody owns is a
+rebinding target the loopback-only rule could never offer. Setting
+`trusted_hosts` widens that verdict from *this machine* to *whatever the
+local proxy forwarded*, so while the list is set the proxy itself must
+deny `POST /api/concurrency` to every principal that is not the operator:
+otherwise every certificate the proxy admits, guest machines included,
+gains the fleet-wide pause button. Enforcing operator identity at the
+service rather than at the proxy — and a shared secret for operators who
+are genuinely remote — is a cross-route decision and lives with the rest
+of that posture question in issue #285 rather than here. The change
 takes effect at once, the way a reload does, and is never persisted to disk.
 It rules until the next boundary of the concurrency schedule, when the
 scheduled shrink or expansion takes over again; with no schedule it rules
@@ -316,7 +327,7 @@ curl -X POST http://localhost:8080/api/tasks \
 | `POST` | `/api/tasks/filter` | Set or clear the task preference filter; body `{"filter": "<text>"}`, empty string clears, values past 256 bytes rejected with `400` |
 | `GET` | `/api/guests` | List connected guests (UID, host, state, tags), the claim counters and the live concurrency picture |
 | `GET` | `/api/guests/:id` | Get guest details |
-| `POST` | `/api/concurrency` | Set the live concurrency cap; JSON body `{"cap": N}` (whole number, `0` pauses new work; any negative number or `"unlimited"` lifts the cap; a string says the same as the number or word it spells); requires `Content-Type: application/json` and operator identity (a loopback peer addressing a loopback name); honoured until the next schedule boundary; returns the concurrency picture |
+| `POST` | `/api/concurrency` | Set the live concurrency cap; JSON body `{"cap": N}` (whole number, `0` pauses new work; any negative number or `"unlimited"` lifts the cap; a string says the same as the number or word it spells); requires `Content-Type: application/json` and operator identity (a loopback peer addressing a loopback or configured host name—see `trusted_hosts`); honoured until the next schedule boundary; returns the concurrency picture |
 | `GET` | `/api/health` | Health check |
 | `GET` | `/metrics` | Prometheus scrape endpoint: live server state as gauges, plus task-transition counters and histograms |
 | `WS` | `/ws` | WebSocket (JSON-RPC) |
