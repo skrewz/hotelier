@@ -409,7 +409,8 @@ func TestConcurrencyOverride_RejectsCrossSiteSimplePOSTs(t *testing.T) {
 // TestConcurrencyOverride_RequiresOperatorIdentity: reaching the route is
 // not a credential (reviews 1635 and 1671). A non-loopback peer cannot
 // pause the fleet or lift its cap, and a loopback peer only speaks for
-// the operator while it addresses the server by a loopback name: the
+// the operator while it addresses the server by a loopback name—or, once
+// server.trusted_hosts names one (issue #286), by a configured name: the
 // DNS-rebinding attempt — a browser posting from 127.0.0.1 with a foreign
 // domain in Host — is refused with the cap exactly where it stood.
 func TestConcurrencyOverride_RequiresOperatorIdentity(t *testing.T) {
@@ -443,6 +444,55 @@ func TestConcurrencyOverride_RequiresOperatorIdentity(t *testing.T) {
 		}
 	}
 	if got := srv.orchestrator.ConcurrencyCap(); got != 1 {
+		t.Fatalf("expected the admitted request to set the cap to 1, got %d", got)
+	}
+
+	// With trusted_hosts configured (issue #286) the only change is
+	// which names a loopback peer may address the server by. The entry
+	// is written case-folded, ported and dotted to prove the config
+	// side is read through the same normaliser as the request side, and
+	// carries a blank entry to prove a blank Host matches nothing.
+	trusted := capTestServer(t, config.ServerConfig{
+		Host: "127.0.0.1", Port: 0, MaxConcurrentTasks: 3,
+		TrustedHosts: []string{"Hotelier.Example.Com:8443.", ""},
+	})
+
+	// The peer half of the guard is unchanged: Host says which server
+	// the client meant, not who asked, so a remote peer presenting a
+	// configured name is still a stranger—and the refusal names the
+	// rule that applied.
+	w := postFrom(t, trusted, "203.0.113.9:5555", "hotelier.example.com")
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("expected a remote POST with a trusted Host to be refused with 403, got %d: %s", w.Code, w.Body.String())
+	}
+	if body := w.Body.String(); !strings.Contains(body, "loopback or configured host name") {
+		t.Fatalf("expected the 403 body to name the rule that applied, got %q", body)
+	}
+	if got := trusted.orchestrator.ConcurrencyCap(); got != 3 {
+		t.Fatalf("expected the remote trusted-name attempt to leave the cap at 3, got %d", got)
+	}
+
+	// A name that was not configured is still refused from a loopback
+	// peer—and so is the empty Host, whatever the blank entry says.
+	for _, host := range []string{"attacker.example:8080", "hotelier.example.com.evil.example", ""} {
+		if w := postFrom(t, trusted, "127.0.0.1:4321", host); w.Code != http.StatusForbidden {
+			t.Fatalf("Host %q: expected an unconfigured Host from a loopback peer to be refused with 403, got %d: %s", host, w.Code, w.Body.String())
+		}
+	}
+	if got := trusted.orchestrator.ConcurrencyCap(); got != 3 {
+		t.Fatalf("expected the refused attempts to leave the cap at 3, got %d", got)
+	}
+
+	// A configured name from a loopback peer is admitted, and the
+	// verdict is on the normalised name: case, port and trailing dot
+	// spell one name. The list only adds, so loopback names still pass
+	// with the list non-empty.
+	for _, host := range []string{"hotelier.example.com:7352", "Hotelier.Example.Com", "hotelier.example.com.", "localhost:8080"} {
+		if w := postFrom(t, trusted, "127.0.0.1:4321", host); w.Code != http.StatusOK {
+			t.Fatalf("Host %q: expected a loopback POST with a trusted or loopback name to be admitted, got %d: %s", host, w.Code, w.Body.String())
+		}
+	}
+	if got := trusted.orchestrator.ConcurrencyCap(); got != 1 {
 		t.Fatalf("expected the admitted request to set the cap to 1, got %d", got)
 	}
 }

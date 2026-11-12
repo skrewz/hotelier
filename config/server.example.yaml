@@ -3,6 +3,18 @@
 # keep this port behind an authenticating proxy (see the README).
 host: "0.0.0.0"
 port: 8080
+# Host names a loopback peer may address this server by in place of a
+# loopback one. A local proxy forwards the incoming Host (nginx's
+# proxy_set_header Host $http_host), so behind one the public name is
+# what the identity guard on POST /api/concurrency sees and the live cap
+# is unreachable from the dashboard; this list admits those names. The
+# loopback-peer half of the guard is unchanged—Host says which server
+# the client meant, not who asked—matching is on the normalised name
+# (port, brackets and trailing dot stripped, case folded), and wildcards
+# are unsupported. The default is empty: loopback-only verdicts, exactly
+# as before (fail closed).
+#trusted_hosts:
+#  - "hotelier.example.com"
 read_timeout: 30
 write_timeout: 30
 max_log_size: 1048576

@@ -2535,40 +2535,70 @@ func isLoopbackPeer(r *http.Request) bool {
 // the operator by the posture this repository documents (bind to loopback
 // or terminate authentication at a local proxy); anything else is refused
 // outright — the route fails closed instead of trusting a network posture
-// nothing enforces. A loopback peer must also carry a loopback name in
-// Host (hostNamesLoopback), which is what stops a DNS-rebound page from
-// borrowing the operator's own browser. A shared-secret mechanism for
-// genuinely remote operators is a cross-route design decision and lives
-// with the rest of the posture question in issue #285, not here with
-// one route's share of it.
+// nothing enforces. A loopback peer must also name this server in Host—a
+// loopback address (hostIsLoopbackName), or one of the configured
+// trusted_hosts names (issue #286), which is how a deployment behind a
+// local proxy that forwards the public Host stays reachable. The name
+// half is what stops a DNS-rebound page from borrowing the operator's own
+// browser: Host says which server the client meant, not who asked, so the
+// peer half stays and a list entry only ever adds an admissible name.
+// There are no wildcards: rebinding presents whatever name the attacker's
+// own zone serves. A shared-secret mechanism for genuinely remote
+// operators is a cross-route design decision and lives with the rest of
+// the posture question in issue #285, not here with one route's share of
+// it.
 func (s *Server) operatorAllowed(r *http.Request) bool {
-	if isLoopbackPeer(r) && hostNamesLoopback(r) {
-		return true
+	if isLoopbackPeer(r) {
+		name := normaliseHostName(r.Host)
+		if hostIsLoopbackName(name) || s.hostIsTrusted(name) {
+			return true
+		}
 	}
 	s.log.Printf("concurrency cap request refused: peer %s, Host %s", r.RemoteAddr, r.Host)
 	return false
 }
 
-// hostNamesLoopback reports whether the Host header of r names the
-// loopback address — localhost, or an address in 127.0.0.0/8 or ::1,
-// with or without a port. It is the DNS-rebinding guard (issue #264
-// review): a page on a rebound domain reaches the server from a loopback
-// peer address, but it carries its own domain in Host, and under the
-// documented posture no operator's request ever does. Browsers fetch
-// from the dashboard itself with the name in the address bar (localhost
-// or 127.x.x.x), and a local proxy forwards the upstream name by
-// default; anything else is not this server speaking.
-func hostNamesLoopback(r *http.Request) bool {
-	host := r.Host
+// normaliseHostName reduces a Host value, or a configured trusted_hosts
+// entry, to the comparable name both verdicts match on: port stripped,
+// IPv6 brackets stripped, a single trailing dot (the absolute-form root
+// label) stripped, case folded. One normaliser is shared so the request
+// side and the config side can never disagree about what a name is.
+func normaliseHostName(host string) string {
 	if h, _, err := net.SplitHostPort(host); err == nil {
 		host = h
 	}
 	host = strings.TrimSuffix(strings.Trim(host, "[]"), ".")
-	if strings.EqualFold(host, "localhost") {
+	return strings.ToLower(host)
+}
+
+// hostIsLoopbackName reports whether a normalised host name names the
+// loopback address — localhost, or an address in 127.0.0.0/8 or ::1. It
+// is the DNS-rebinding guard (issue #264 review): a page on a rebound
+// domain reaches the server from a loopback peer address, but it carries
+// its own domain in Host, and an admitted request addresses this server
+// by the name its own address bar or proxy shows.
+func hostIsLoopbackName(name string) bool {
+	if name == "localhost" {
 		return true
 	}
-	ip := net.ParseIP(host)
+	ip := net.ParseIP(name)
 	return ip != nil && ip.IsLoopback()
+}
+
+// hostIsTrusted reports whether a normalised host name is one of the
+// configured trusted_hosts entries (issue #286), each read through the
+// same normaliser as the request side. An empty name names nothing and
+// never matches, so a blank entry cannot admit a Host-less request.
+func (s *Server) hostIsTrusted(name string) bool {
+	if name == "" {
+		return false
+	}
+	for _, h := range s.cfg.TrustedHosts {
+		if normaliseHostName(h) == name {
+			return true
+		}
+	}
+	return false
 }
 
 // HandleConcurrency handles the /api/concurrency endpoint (issue #264):
@@ -2590,8 +2620,9 @@ func hostNamesLoopback(r *http.Request) bool {
 // 415, a CSRF guard: this endpoint must never answer a cross-origin
 // simple POST), and a body beyond a kilobyte is refused. The handler
 // enforces operator identity first (operatorAllowed): a peer that is not
-// loopback, or a loopback peer whose Host names some foreign domain (a
-// DNS-rebinding attempt), gets 403 before the cap moves.
+// loopback, or a loopback peer whose Host names neither a loopback address
+// nor a configured trusted_hosts name (a DNS-rebinding attempt), gets 403
+// before the cap moves.
 //
 // Every other surface here keeps the repository's standing posture — the
 // HTTP API performs no authentication; bind to loopback or terminate
@@ -2606,7 +2637,7 @@ func (s *Server) HandleConcurrency(w http.ResponseWriter, r *http.Request) {
 	// Identity before anything else (issue #264 review): reaching this
 	// route is not itself a credential.
 	if !s.operatorAllowed(r) {
-		http.Error(w, "operator identity required: a loopback peer addressing this server by a loopback address", http.StatusForbidden)
+		http.Error(w, "operator identity required: a loopback peer addressing this server by a loopback or configured host name", http.StatusForbidden)
 		return
 	}
 

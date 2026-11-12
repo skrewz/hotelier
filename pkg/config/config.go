@@ -24,6 +24,22 @@ type ServerConfig struct {
 	Host string `yaml:"host"`
 	// Port is the port to listen on.
 	Port int `yaml:"port"`
+	// TrustedHosts names the host names a loopback peer may address this
+	// server by in place of a loopback one (issue #286). A local proxy
+	// forwards the incoming Host (nginx's proxy_set_header Host
+	// $http_host), so behind one the public name is what the loopback
+	// guard on POST /api/concurrency sees, and the route is unreachable
+	// from the dashboard; this list admits those names. The peer half of
+	// the guard is unchanged: Host says which server the client meant,
+	// not who asked, so without it anything reaching the container's
+	// address directly could present a trusted name. Matching is on the
+	// normalised name (port, brackets and trailing dot stripped, case
+	// folded) and wildcards are deliberately unsupported: rebinding
+	// presents whatever name the attacker's own zone serves, so "*"
+	// would empty the guard. The default is empty, which leaves
+	// loopback-only verdicts—and loopback and SSH-tunnel access—
+	// exactly as they were.
+	TrustedHosts []string `yaml:"trusted_hosts"`
 	// ReadTimeout is the maximum duration for reading the entire request.
 	ReadTimeout int `yaml:"read_timeout"`
 	// WriteTimeout is the maximum duration before timing out writes.
