@@ -313,8 +313,21 @@ func TestConcurrencyOverride_ExpiryLabelsTheEnforcedCap(t *testing.T) {
 		t.Errorf("expected the source to follow the enforced cap until the tick hands over, got %v", status["source"])
 	}
 
-	// Once the tick has run, both the cap and its provenance are the
-	// schedule's again.
+	// Resolving the cap retires an override whose boundary has arrived, so
+	// the path that resolves must also enforce what it resolved: a read on
+	// the exported surface — the one a future status page or collector
+	// would call — must not retire the override while leaving the
+	// orchestrator on the retired number under a schedule label (issue #264
+	// review).
+	if got := srv.EffectiveConcurrency(justAfter); got != 2 {
+		t.Fatalf("expected the read to resolve to the scheduled 2, got %d", got)
+	}
+	if got := srv.orchestrator.ConcurrencyCap(); got != 2 {
+		t.Fatalf("expected the read to leave the enforced cap at the number it returned (2), got %d", got)
+	}
+
+	// The sync tick reaches the same verdict, so the cap and its
+	// provenance are the schedule's again however the boundary is noticed.
 	srv.syncConcurrencyCap(justAfter)
 	status = srv.concurrencyStatus(justAfter)
 	if status["cap"] != 2 {

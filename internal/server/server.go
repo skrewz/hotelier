@@ -516,7 +516,7 @@ func (s *Server) reload(cfg config.ServerConfig) bool {
 		s.capOverride = nil
 		s.capOverrideExpires = time.Time{}
 	}
-	drain := s.pushConcurrencyCapLocked(cfg, time.Now())
+	_, drain := s.pushConcurrencyCapLocked(cfg, time.Now())
 
 	// Recreate persona store if personas changed (deep comparison catches
 	// edits to existing personas, not just additions/removals).
@@ -577,14 +577,20 @@ func (s *Server) reload(cfg config.ServerConfig) bool {
 const concurrencySyncInterval = 15 * time.Second
 
 // pushConcurrencyCapLocked resolves the cap for cfg at now and hands it to the
-// orchestrator. The caller must hold s.mu. It reports whether the cap rose —
-// unlimited outranking any number — which means work the schedule was holding
-// back may now start.
-func (s *Server) pushConcurrencyCapLocked(cfg config.ServerConfig, now time.Time) bool {
+// orchestrator, returning the number it enforced. The caller must hold s.mu. It
+// also reports whether the cap rose — unlimited outranking any number — which
+// means work the schedule was holding back may now start.
+//
+// Retirement and enforcement move together here on purpose: resolving an
+// override that has expired at its boundary is a write, so it belongs on the
+// path that also pushes the resolved value. A caller that resolved without
+// pushing would leave the orchestrator enforcing a retired override while every
+// status surface attributed it to the schedule (issue #264 review).
+func (s *Server) pushConcurrencyCapLocked(cfg config.ServerConfig, now time.Time) (int, bool) {
 	effective := s.effectiveCapLocked(cfg, now)
 	rose := capIsGreater(effective, s.orchestrator.ConcurrencyCap())
 	s.orchestrator.SetConcurrencyCap(effective)
-	return rose
+	return effective, rose
 }
 
 // effectiveCapLocked resolves the cap in force at now, honouring a live
@@ -611,16 +617,16 @@ func (s *Server) effectiveCapLocked(cfg config.ServerConfig, now time.Time) int 
 // pushes it into the orchestrator. It reports whether the cap rose, so the
 // caller can drain the queue (issue #249). Crossing a 07:00 boundary is not an
 // event the server receives from anyone; this is how the schedule is noticed.
-// Resolving may retire an override that has expired at its schedule
-// boundary, so this takes the write lock, can log, and must never be
-// called while the caller holds s.mu (the RWMutex is not reentrant) —
-// the same rule EffectiveConcurrency states.
+// It takes the write lock, can log, and must never be called while the caller
+// holds s.mu (the RWMutex is not reentrant) — the same rule EffectiveConcurrency
+// states.
 func (s *Server) syncConcurrencyCap(now time.Time) bool {
 	// A write lock: resolving the cap may expire and clear a live override
 	// (issue #264), which a read lock must not do.
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.pushConcurrencyCapLocked(s.cfg, now)
+	_, rose := s.pushConcurrencyCapLocked(s.cfg, now)
+	return rose
 }
 
 // setConcurrencyCapOverride installs newCap as the live concurrency cap
@@ -867,15 +873,27 @@ func (s *Server) Orchestrator() *orchestrator.Orchestrator {
 // resolved from the currently loaded configuration (issue #248). It reads
 // the config live, so a Reload carrying new concurrency keys takes effect
 // without a restart, and it honours a live runtime override set through
-// /api/concurrency (issue #264). Enforcement of the cap is a separate
-// concern; this is the single source of truth for "what is the cap right
-// now". Resolving may retire an override that has expired at its schedule
-// boundary, so this takes the write lock, can log, and must never be
-// called while the caller holds s.mu (the RWMutex is not reentrant).
+// /api/concurrency (issue #264).
+//
+// It is the single source of truth for "what is the cap right now" and it
+// leaves that statement true: it takes the write lock, because resolving may
+// retire an override whose schedule boundary has arrived, and it hands the
+// resolved number to the orchestrator on the way out. Retirement and
+// enforcement therefore cannot be separated by a read — the number it returns
+// is the number in force the instant it returns, so no caller can wire this
+// surface into a status page or collector and have the label outrun the cap
+// (issue #264 review). It does not run an assignment pass: a caller that found
+// the cap rise here and wants the held queue drained immediately must call
+// tryAssignPendingTasks itself, the way refreshConcurrency does; otherwise the
+// next sync tick drains it.
+//
+// Because it can log and write, it must never be called while the caller holds
+// s.mu (the RWMutex is not reentrant).
 func (s *Server) EffectiveConcurrency(now time.Time) int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.effectiveCapLocked(s.cfg, now)
+	effective, _ := s.pushConcurrencyCapLocked(s.cfg, now)
+	return effective
 }
 
 // Registry returns the guest registry (for testing, migration compat).
