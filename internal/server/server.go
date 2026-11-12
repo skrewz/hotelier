@@ -2683,7 +2683,8 @@ func parseCapValue(raw json.RawMessage) (int, error) {
 		// Decode into `any` rather than straight into a float64: encoding/json
 		// reads the four-letter literal `null` as a successful decode into a
 		// non-pointer number and leaves the target untouched, which here is
-		// the cap 0 — a fleet-wide pause the doc below says is refused.
+		// the cap 0 — a fleet-wide pause the function doc above says is
+		// refused.
 		// Through an `any` a null is a nil, the assertion fails, and the
 		// refusal stands, so both doors keep answering one value one way.
 		var v any

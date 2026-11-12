@@ -69,7 +69,7 @@ max_concurrent_tasks: 0
 
 | Field | Description | Default |
 |-------|-------------|--------|
-| `max_concurrent_tasks` | Cap on how many tasks the host is willing to run at any moment (`0` = unlimited). Used when no `concurrency_schedule` is set; the schedule takes precedence otherwise. | `0` |
+| `max_concurrent_tasks` | Cap on how many tasks the host is willing to run at any moment (`0` = unlimited). Used when no `concurrency_schedule` is set; the schedule takes precedence otherwise, and either is outranked while a live override is set — see **Changing the cap live** below. | `0` |
 | `concurrency_schedule` | Daily schedule of concurrency caps. Each entry (`{ at: "HH:MM", concurrency: N }`) takes effect at that wall-clock time and holds until the next entry; the last entry of the day holds through midnight to the first. In an entry `0` is a real cap and pauses all new work — the opposite of `max_concurrent_tasks: 0`, which means unlimited. The resolver keeps the two apart: it reports "no cap" as `config.ConcurrencyUnlimited` (`-1`), which no configuration can carry, so a returned `0` always means "start nothing". | — |
 | `schedule_timezone` | IANA zone name the schedule's `at` times are interpreted in, so boundaries follow the wall clock across DST. The server binary embeds the tz database (`time/tzdata`), so a zone name resolves even in the scratch container image, which ships no `/usr/share/zoneinfo`. | `"UTC"` |
 | `log_retention_days` | How many days of task logs the prune sweep keeps. Date directories older than today minus this many days are removed at startup and on the cleanup tick; the current day and any in-window day are left completely alone, and `queue_dir` is never touched. Following the `max_guests` convention, `0` disables pruning. | `14` |
@@ -129,17 +129,15 @@ the server by a loopback name are admitted — this machine itself, or a
 local authenticating proxy forwarding to it — so the route fails closed
 against strangers, and a DNS-rebound web page cannot borrow the
 operator's own browser to move the cap. A shared-secret mechanism for
-operators who are genuinely remote is a cross-route decision and lives
-with the rest of that posture question in issue #285 rather
-than here. The
-change takes effect
-at once, the way a reload does, and is never persisted to disk. It rules
-until the next boundary of the concurrency schedule, when the scheduled
-shrink or expansion takes over again; with no schedule it rules until the
-next config reload — which clears it and returns authority to the file — or
-a restart. While an override is installed the status surface names the source
-as `manual override`; the sync tick that lets the schedule take over clears
-the label with it.
+operators who are genuinely remote is a cross-route decision and lives with
+the rest of that posture question in issue #285 rather than here. The change
+takes effect at once, the way a reload does, and is never persisted to disk.
+It rules until the next boundary of the concurrency schedule, when the
+scheduled shrink or expansion takes over again; with no schedule it rules
+until the next config reload — which clears it and returns authority to the
+file — or a restart. While an override is installed the status surface names
+the source as `manual override`; the sync tick that lets the schedule take
+over clears the label with it.
 
 A queue the cap is holding back looks different from a pool with no matching
 guest, in the four places an operator reads:
