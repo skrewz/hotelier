@@ -335,6 +335,11 @@ var trustedHostNameRe = regexp.MustCompile(`^[a-z0-9_]([a-z0-9_-]*[a-z0-9_])?(\.
 // ValidateConcurrency does.
 func (c ServerConfig) ValidateTrustedHosts() error {
 	for _, entry := range c.TrustedHosts {
+		// A scheme needs saying for itself, not leaving to the generic return
+		// below: SplitHostPort reads "https" as the host and the rest as the
+		// port, so a URL normalises to "https"—a single label the regex above
+		// would accept. Refusing by the normalised name alone would let a
+		// pasted URL install as an entry that can never match.
 		if strings.Contains(entry, "/") {
 			return fmt.Errorf("trusted_hosts entry %q is not a host name: a scheme or a path does not belong in it, so it would match no Host header (write the host name alone)", entry)
 		}

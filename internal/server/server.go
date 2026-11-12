@@ -491,11 +491,9 @@ func (s *Server) reload(cfg config.ServerConfig) bool {
 		cfg.ConcurrencySchedule = old.ConcurrencySchedule
 		cfg.ScheduleTimezone = old.ScheduleTimezone
 	}
-	// A trusted_hosts entry no Host header can ever carry is a configuration
-	// error as well, and it matters more here than for most keys: the guard it
-	// feeds refuses with "not the operator", so a dead entry and a broken guard
-	// produce the same evidence. Keep the previous list, the way the concurrency
-	// keys are kept above.
+	// An entry no Host header can carry is a configuration error rather than a
+	// name that matches nothing in silence—see config.ValidateTrustedHosts for
+	// why. Keep the previous list, the way the concurrency keys are kept above.
 	if err := cfg.ValidateTrustedHosts(); err != nil {
 		s.log.Printf("invalid trusted_hosts configuration after reload: %v (keeping previous trusted_hosts)", err)
 		cfg.TrustedHosts = old.TrustedHosts
@@ -518,9 +516,9 @@ func (s *Server) reload(cfg config.ServerConfig) bool {
 	if !reflect.DeepEqual(cfg.ConcurrencySchedule, old.ConcurrencySchedule) || cfg.ScheduleTimezone != old.ScheduleTimezone {
 		s.log.Printf("concurrency_schedule updated: %d entries (timezone %q)", len(cfg.ConcurrencySchedule), cfg.ScheduleTimezone)
 	}
-	// Say the same for trusted_hosts (issue #286): editing the list under a
-	// running server otherwise lands silently, and this is the one key whose
-	// failure looks like a broken guard rather than a bad reload.
+	// Say the same for trusted_hosts (issue #286): an edit that lands silently
+	// is invisible until the first 403, and config.ValidateTrustedHosts says
+	// why this key's silence reads as a broken guard.
 	if !reflect.DeepEqual(cfg.TrustedHosts, old.TrustedHosts) {
 		s.log.Printf("trusted_hosts updated: %d names %v", len(cfg.TrustedHosts), cfg.TrustedHosts)
 	}
@@ -745,9 +743,10 @@ func New(cfg config.ServerConfig) *Server {
 		logger.Printf("invalid concurrency configuration: %v (a schedule the resolver cannot read falls back to max_concurrent_tasks=%s)", err, fallback)
 	}
 
-	// Same for trusted_hosts at startup: the file path refuses such a config
-	// in LoadServerConfig, but a config built in code would otherwise install
-	// an entry that matches nothing, and the only symptom is a 403 (issue #286).
+	// Same for trusted_hosts at startup: the file path refuses such a config in
+	// LoadServerConfig, but a config built in code would otherwise install an
+	// entry that can match nothing (issue #286; see config.ValidateTrustedHosts
+	// for why that is a refusal and not a no-op).
 	if err := cfg.ValidateTrustedHosts(); err != nil {
 		logger.Printf("invalid trusted_hosts configuration: %v (an entry no Host header can carry admits nothing)", err)
 	}
@@ -2568,17 +2567,16 @@ func isLoopbackPeer(r *http.Request) bool {
 // asked, so the peer half stays and a list entry only ever adds an
 // admissible name.
 // There are no wildcards: rebinding presents whatever name the attacker's
-// own zone serves, and config.ValidateTrustedHosts refuses an entry that
-// could match nothing rather than letting it fail closed in silence. What
-// setting the list costs is worth naming here: the verdict stops being
-// "this came from this machine" and becomes "this came through my proxy",
-// so while any name is configured the proxy itself must deny this route to
-// everyone but the operator—guest machines included—until #285 enforces
-// operator identity at the service; the README and server.example.yaml say
-// that to the operator. A shared-secret mechanism for genuinely remote
-// operators is part of the same cross-route decision and lives with the
-// rest of the posture question in issue #285, not here with one route's
-// share of it.
+// own zone serves, and config.ValidateTrustedHosts is why an entry no Host
+// header could carry never reaches this list. What setting the list costs is
+// worth naming here: the verdict stops being "this came from this machine"
+// and becomes "this came through my proxy", so while any name is configured
+// the proxy itself must deny this route to everyone but the operator—guest
+// machines included—until #285 enforces operator identity at the service;
+// the README and server.example.yaml say that to the operator. A
+// shared-secret mechanism for genuinely remote operators is part of the same
+// cross-route decision and lives with the rest of the posture question in
+// issue #285, not here with one route's share of it.
 func (s *Server) operatorAllowed(r *http.Request) bool {
 	if isLoopbackPeer(r) {
 		name := config.NormaliseHostName(r.Host)
