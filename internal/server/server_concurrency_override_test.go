@@ -143,6 +143,11 @@ func TestConcurrencyOverride_RejectsBadBodies(t *testing.T) {
 		`{"cap": ""}`,
 		`{"cap": "NaN"}`,
 		`{"cap": "inf"}`,
+		`{"cap": "5_0"}`,
+		`{"cap": "+7"}`,
+		`{"cap": "5."}`,
+		`{"cap": "0x1p4"}`,
+		`{"cap": "Infinity"}`,
 		`{"cap": -3.5}`,
 		`{"cap": 1e300}`,
 		`not json`,
@@ -160,13 +165,17 @@ func TestConcurrencyOverride_RejectsBadBodies(t *testing.T) {
 // TestConcurrencyOverride_NumericStringsSayWhatTheySpell: the dashboard
 // posts the typed text as a JSON string so the server owns the whole
 // grammar (issue #264 review); a string is read by the same rules as the
-// number or word it spells, and nothing else passes.
+// number or word it spells, and nothing else passes. "1e3" and "5.0" are
+// the spellings the number path accepts too — the two doors must answer
+// the same way for one value.
 func TestConcurrencyOverride_NumericStringsSayWhatTheySpell(t *testing.T) {
 	for body, want := range map[string]int{
 		`{"cap": "7"}`:         7,
 		`{"cap": "0"}`:         0,
 		`{"cap": "-1"}`:        config.ConcurrencyUnlimited,
 		`{"cap": "unlimited"}`: config.ConcurrencyUnlimited,
+		`{"cap": "1e3"}`:       1000,
+		`{"cap": "5.0"}`:       5,
 	} {
 		srv := capTestServer(t, config.ServerConfig{Host: "127.0.0.1", Port: 0, MaxConcurrentTasks: 3})
 		w := postConcurrency(t, srv, body)

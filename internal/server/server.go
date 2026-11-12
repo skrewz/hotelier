@@ -2636,7 +2636,10 @@ func (s *Server) HandleConcurrency(w http.ResponseWriter, r *http.Request) {
 // sentinel, and the string "unlimited" says the same thing in the words
 // the status surface uses. A string that spells a number — the shape the
 // dashboard posts, so the field never needs its own copy of this grammar
-// — reads as the number it spells. Anything else — a fraction, a
+// — is read by the JSON number grammar, the same one the number branch
+// above applies, so a value cannot be refused through one door and
+// applied through the other: "5_0", "+7" and "5." are not numbers and are
+// refused whether or not they are quoted. Anything else — a fraction, a
 // different string, null, a number too large to be a queue depth — is
 // refused, so a typo cannot silently pause or un-cap the fleet.
 func parseCapValue(raw json.RawMessage) (int, error) {
@@ -2650,7 +2653,8 @@ func parseCapValue(raw json.RawMessage) (int, error) {
 		if strings.EqualFold(s, "unlimited") {
 			return config.ConcurrencyUnlimited, nil
 		}
-		if f, err := strconv.ParseFloat(s, 64); err == nil && !strings.ContainsAny(s, "nNiIxX") {
+		var f float64
+		if err := json.Unmarshal([]byte(s), &f); err == nil {
 			return capFromNumber(f)
 		}
 	}
@@ -2658,9 +2662,8 @@ func parseCapValue(raw json.RawMessage) (int, error) {
 }
 
 // capFromNumber maps a parsed value onto a cap: fractions and the
-// infinities a lenient string parse can produce are not caps, any
-// negative number is the unlimited sentinel, and anything beyond a
-// plausible queue depth is refused.
+// infinities are not caps, any negative number is the unlimited sentinel,
+// and anything beyond a plausible queue depth is refused.
 func capFromNumber(n float64) (int, error) {
 	if math.IsNaN(n) || math.IsInf(n, 0) || n != math.Trunc(n) {
 		return 0, errors.New("cap must be a whole number")

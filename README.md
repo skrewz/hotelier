@@ -116,9 +116,12 @@ to lift the cap, `0` to pause new assignments — sets the live cap directly
 (issue #264). Any negative number says the same thing as `"unlimited"`:
 it maps to the same `config.ConcurrencyUnlimited` sentinel the resolver
 reports, and the server's parser is the one owner of that grammar — a
-string that spells a number says the same as the number it spells, so the
-dashboard can post the typed text verbatim (as a JSON string) and show the
-server's refusal when a value does not parse. Requests must say `Content-Type: application/json` (anything
+string is read by the same JSON number grammar as the number itself, so a
+value cannot be accepted through one door and refused through the other:
+`"1e3"` says 1000, while `"5_0"`, `"+7"` and `"5."` are not JSON numbers
+and are refused quoted or unquoted. The dashboard can post the typed text
+verbatim (as a JSON string) and show the server's refusal when a value does
+not parse. Requests must say `Content-Type: application/json` (anything
 else is `415`, a CSRF guard: the endpoint never answers a cross-origin
 simple POST), and bodies are capped at a kilobyte. The route also refuses
 callers who are not the operator (`403`): only loopback peers addressing
