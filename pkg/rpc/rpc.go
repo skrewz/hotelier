@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -832,12 +833,7 @@ func (c *Client) readLoop() {
 			continue
 		}
 
-		// If this is a response to a Call() (has ID), deliver it to the
-		// caller that made the request. Responses are routed by ID: the
-		// former shared callResp channel had no notion of which request a
-		// response answered, so concurrent Calls could consume each
-		// other's replies, and a reply arriving with no waiter wedged the
-		// next caller forever (issue #216).
+		// Responses (ID set) go to the Call that made the request (issue #216).
 		if msg.ID != nil {
 			c.deliverResponse(&msg)
 			continue
@@ -856,10 +852,10 @@ func (c *Client) readLoop() {
 }
 
 // deliverResponse hands a response to the Call waiting under its request
-// ID. A response whose ID matches no pending request — one that raced its
-// caller's timeout, or one that was never asked for — is logged and
-// ignored: it is never handed to an arbitrary waiter and never silently
-// dropped where it could later disturb one (issue #216).
+// ID. A response that matches no pending Call is logged and ignored, with
+// the two reasons kept apart: IDs come from the hub's counter, so an ID
+// above it is one the peer invented rather than one this client waited on
+// and forgot (issue #216).
 func (c *Client) deliverResponse(msg *JSONRPCMessage) {
 	key := string(*msg.ID)
 
@@ -868,17 +864,36 @@ func (c *Client) deliverResponse(msg *JSONRPCMessage) {
 	c.pendingMu.Unlock()
 
 	if !ok {
-		c.hub.logf("client %s: response for unknown or completed request id %s ignored", c.id, key)
+		if c.requested(key) {
+			c.logf("client %s: response for request id %q arrived after its caller gave up", c.id, key)
+		} else {
+			c.logf("client %s: response for request id %q this client never requested", c.id, key)
+		}
 		return
 	}
 
 	// The channel has capacity 1 and only this path sends, so the send
 	// never blocks even if the Call gave up (and deregistered) between
 	// the lookup and the send; such a response simply becomes garbage.
+	// The default branch is the duplicate: a second response for an ID
+	// whose Call has not yet woken, dropped with a log line.
 	select {
 	case ch <- msg:
 	default:
+		c.logf("client %s: second response for request id %q ignored", c.id, key)
 	}
+}
+
+// requested reports whether the given request ID was handed out by this
+// client's hub. Call takes IDs from hub.nextID, so every ID this client
+// can wait on is a positive integer at or below the counter's current
+// value; anything else came from the peer.
+func (c *Client) requested(id string) bool {
+	n, err := strconv.ParseInt(id, 10, 64)
+	if err != nil {
+		return false
+	}
+	return n > 0 && n <= c.hub.nextID.Load()
 }
 
 func (c *Client) handleNotification(msg JSONRPCMessage) {
