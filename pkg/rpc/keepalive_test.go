@@ -282,20 +282,22 @@ func TestKeepalivePingSurvivesTransientWriteError(t *testing.T) {
 
 	var attempts, failures atomic.Int64
 	const injectedFailures = 3
-	originalWritePing := writePing
-	writePing = func(conn *websocket.Conn, deadline time.Time) error {
+
+	clientHub := NewClientHub(testLogf(t))
+	client := NewClient("transient-ping-test", clientHub, testLogf(t))
+	client.SetKeepAlive(50*time.Millisecond, 500*time.Millisecond)
+	// Inject the failure into this client alone. A package-level hook would
+	// also run for the server-side connection of this test — and for any
+	// ping goroutine an earlier test left winding down, which is a data race
+	// under -race.
+	client.pingFn = func(conn *websocket.Conn, deadline time.Time) error {
 		if attempts.Add(1) <= injectedFailures {
 			failures.Add(1)
 			// Stands in for gorilla's unexported write-timeout error.
 			return fmt.Errorf("websocket: write timeout")
 		}
-		return originalWritePing(conn, deadline)
+		return conn.WriteControl(websocket.PingMessage, nil, deadline)
 	}
-	t.Cleanup(func() { writePing = originalWritePing })
-
-	clientHub := NewClientHub(testLogf(t))
-	client := NewClient("transient-ping-test", clientHub, testLogf(t))
-	client.SetKeepAlive(50*time.Millisecond, 500*time.Millisecond)
 
 	lost := make(chan struct{})
 	var lostOnce sync.Once
@@ -332,5 +334,53 @@ func TestKeepalivePingSurvivesTransientWriteError(t *testing.T) {
 	}
 	if err := json.Unmarshal(result, &out); err != nil || !out.OK {
 		t.Fatalf("unexpected call result: %s (err %v)", result, err)
+	}
+}
+
+// TestKeepalivePingFailureLogIsBounded proves a ping that fails forever does
+// not become one log line per tick. A peer that keeps the read side warm but
+// never drains its own socket can make every ping time out on the write mutex
+// for the life of the connection, and /ws upgrades anyone who can reach the
+// port — so the retry must stay quiet (issue #220).
+func TestKeepalivePingFailureLogIsBounded(t *testing.T) {
+	hub := NewHub(testLogf(t))
+	hub.SetKeepAlive(50*time.Millisecond, 100*time.Millisecond)
+	go hub.Run()
+	url := hubWithSilentDropServer(t, hub)
+
+	var attempts atomic.Int64
+	var pingLogs atomic.Int64
+	count := func(format string, args ...interface{}) {
+		if strings.Contains(fmt.Sprintf(format, args...), "keepalive ping") {
+			pingLogs.Add(1)
+		}
+	}
+
+	clientHub := NewClientHub(count)
+	client := NewClient("ping-log-bound", clientHub, count)
+	// The pong timeout stays far longer than the test, so the only thing
+	// going wrong here is the ping write.
+	client.SetKeepAlive(10*time.Millisecond, time.Second)
+	client.pingFn = func(*websocket.Conn, time.Time) error {
+		attempts.Add(1)
+		return fmt.Errorf("websocket: write timeout")
+	}
+
+	if err := client.Connect(url); err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+
+	time.Sleep(500 * time.Millisecond)
+	client.Close()
+
+	got, tried := pingLogs.Load(), attempts.Load()
+	if tried <= keepaliveFailureLogEvery {
+		t.Fatalf("only %d pings in the window; the test cannot bound anything", tried)
+	}
+	if got == 0 {
+		t.Fatal("a persistently failing ping logged nothing at all")
+	}
+	if limit := 1 + tried/keepaliveFailureLogEvery + 1; got > limit {
+		t.Fatalf("ping failures logged %d lines for %d failures; want at most %d", got, tried, limit)
 	}
 }

@@ -52,13 +52,14 @@ type ServerConfig struct {
 	// interval).
 	SilenceTimeout int `yaml:"silence_timeout"`
 	// KeepalivePingInterval is how often the server pings each WebSocket
-	// connection (seconds, 0 = default 10). Pings detect links that died
-	// without a FIN/RST reaching either side — the classic "proxy dropped an
-	// idle upstream" case (issue #220).
+	// connection (seconds, 0 = default 10 — rpc.DefaultKeepalivePingInterval).
+	// Pings detect links that died without a FIN/RST reaching either side — the
+	// classic "proxy dropped an idle upstream" case (issue #220).
 	KeepalivePingInterval int `yaml:"keepalive_ping_interval"`
 	// KeepalivePongTimeout is how long a connection may send nothing (data
-	// or pong) before the server drops it (seconds, 0 = default 30). Keep it
-	// well inside any reverse-proxy idle timeout (issue #220).
+	// or pong) before the server drops it (seconds, 0 = default 30 —
+	// rpc.DefaultKeepalivePongTimeout). Keep it well inside any
+	// reverse-proxy idle timeout (issue #220).
 	KeepalivePongTimeout int `yaml:"keepalive_pong_timeout"`
 	// TaskAssignmentTimeout is the duration before an ASSIGNED task is considered
 	// stuck. If a task has been ASSIGNED for longer than this and the guest has
@@ -160,13 +161,14 @@ type GuestConfig struct {
 	// 0 = use server default.
 	SilenceTimeout int `yaml:"silence_timeout"`
 	// KeepalivePingInterval is how often the guest sends WebSocket ping
-	// control frames (seconds, 0 = default 10). Deliberately shorter than
-	// heartbeat_interval so the transport notices a dead link before the
-	// application layer does (issue #220).
+	// control frames (seconds, 0 = default 10 — rpc.DefaultKeepalivePingInterval).
+	// Deliberately shorter than heartbeat_interval so the transport notices a
+	// dead link before the application layer does (issue #220).
 	KeepalivePingInterval int `yaml:"keepalive_ping_interval"`
 	// KeepalivePongTimeout is how long the guest tolerates a peer that
 	// answers neither data nor pongs before declaring the connection dead
-	// and reconnecting (seconds, 0 = default 30; issue #220).
+	// and reconnecting (seconds, 0 = default 30 —
+	// rpc.DefaultKeepalivePongTimeout; issue #220).
 	KeepalivePongTimeout int `yaml:"keepalive_pong_timeout"`
 	// WorkingDir is the base working directory for task execution.
 	WorkingDir string `yaml:"working_dir"`

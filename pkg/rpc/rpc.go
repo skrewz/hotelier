@@ -150,8 +150,10 @@ type Connection struct {
 	closed  atomic.Bool
 	closeCh chan struct{}
 
-	// WebSocket keepalive knobs (issue #220). Zero means the package
-	// defaults; set via Hub.SetKeepAlive before connections are created.
+	// WebSocket keepalive knobs this connection was armed with, resolved once
+	// in NewConnection (issue #220). Never mutated afterwards, so ReadLoop
+	// reads them without a lock; a Connection built outside NewConnection
+	// leaves them zero, which means the package defaults.
 	keepalivePing time.Duration
 	keepalivePong time.Duration
 }
@@ -166,12 +168,10 @@ func (c *Connection) ReadLoop() {
 		default:
 		}
 
-		// Enforce the keepalive deadline on the read goroutine (the only
-		// goroutine allowed to set it, per the gorilla concurrency rules).
-		// A peer that stops sending anything — data or pongs — fails the
-		// read within pingInterval + pongTimeout.
-		ping, pong := effectiveKeepalive(c.keepalivePing, c.keepalivePong)
-		if err := c.conn.SetReadDeadline(time.Now().Add(ping + pong)); err != nil {
+		// Push the keepalive deadline out from the goroutine performing the
+		// read; a peer that stops sending anything — data or pongs — fails
+		// the read within the window (issue #220).
+		if err := setKeepaliveDeadline(c.conn, c.keepalivePing, c.keepalivePong); err != nil {
 			c.hub.logf("connection %s: set read deadline: %v", c.id, err)
 			return
 		}
@@ -356,9 +356,14 @@ func (h *Hub) NewConnection(id string, conn *websocket.Conn, role ConnectionRole
 	}
 	// Arm keepalive before the connection is registered and its read loop
 	// starts (issue #220): a silently dead peer must be noticed even if
-	// neither side ever sends application data.
-	configureKeepalive(conn, ping+pong)
-	startKeepalivePing(conn, ping, c.closeCh, h.logf, "connection "+id+":")
+	// neither side ever sends application data. A deadline that cannot be
+	// set means the socket is already gone; logging here is enough because
+	// ReadLoop's own call fails a moment later and its deferred Close
+	// removes the connection, so nothing is left unmonitored.
+	if err := configureKeepalive(conn, ping, pong); err != nil {
+		h.logf("connection %s: arm keepalive: %v", id, err)
+	}
+	startKeepalivePing(conn, ping, c.closeCh, h.logf, "connection "+id+":", nil)
 	h.register <- c
 	return c
 }
@@ -662,10 +667,27 @@ type Client struct {
 	callTimeout atomic.Int64 // per-call response bound in ns (issue #215)
 	onClose     func()       // called when the connection is lost unexpectedly; guarded by mu
 
-	// WebSocket keepalive knobs (issue #220). Zero means the package
-	// defaults; set via SetKeepAlive before Connect.
+	// Configured WebSocket keepalive knobs (issue #220), guarded by mu:
+	// SetKeepAlive may be called at any time, including while a connection is
+	// live. Zero means the package defaults.
 	keepalivePing time.Duration
 	keepalivePong time.Duration
+
+	// The pair the connection now in flight was armed with, resolved once by
+	// ConnectWithTLS before the read goroutine starts and never mutated
+	// afterwards — so readLoop reads them without the lock and a later
+	// SetKeepAlive cannot move the read window out from under the ping
+	// cadence. It takes effect on the next Connect.
+	armedPing time.Duration
+	armedPong time.Duration
+
+	// pingFn overrides the ping control-frame write for this client. It is
+	// nil in production, where startKeepalivePing uses WriteControl, and set
+	// by a test that needs to inject a write failure into this connection
+	// alone (issue #220). Per instance rather than per package on purpose: a
+	// package-level hook would be called by every ping goroutine in the
+	// process and race with them under -race.
+	pingFn pingFunc
 }
 
 // DefaultCallTimeout bounds how long Client.Call waits for a response.
@@ -778,9 +800,13 @@ func (c *Client) SetOnClose(fn func()) {
 }
 
 // SetKeepAlive configures the WebSocket keepalive parameters used on the
-// next Connect (issue #220). A non-positive value selects the
-// corresponding package default.
+// next Connect (issue #220). A non-positive value selects the corresponding
+// package default. Safe to call at any time, including on a connected
+// client: it takes mu, and the connection already in flight keeps the knobs
+// it was armed with — matching Hub.SetKeepAlive.
 func (c *Client) SetKeepAlive(pingInterval, pongTimeout time.Duration) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	c.keepalivePing = pingInterval
 	c.keepalivePong = pongTimeout
 }
@@ -809,13 +835,28 @@ func (c *Client) ConnectWithTLS(url string, tlsConfig *tls.Config) error {
 	if err != nil {
 		return fmt.Errorf("dial: %w", err)
 	}
-	c.conn = conn
+
+	// Resolve the knobs once for this connection (issue #220): the read loop
+	// and the ping goroutine must agree on one pair, and a SetKeepAlive
+	// during the connection's life must not move half of it.
+	c.mu.Lock()
 	ping, pong := effectiveKeepalive(c.keepalivePing, c.keepalivePong)
-	configureKeepalive(conn, ping+pong)
+	c.mu.Unlock()
+
+	// A socket whose read deadline cannot be set is one keepalive cannot
+	// work on, so arming it is part of establishing the connection (issue
+	// #220): fail the Connect rather than leave a link nothing watches.
+	if err := configureKeepalive(conn, ping, pong); err != nil {
+		conn.Close()
+		return fmt.Errorf("arm keepalive: %w", err)
+	}
+
+	c.conn = conn
+	c.armedPing, c.armedPong = ping, pong
 	go c.hub.Run()
 	c.hub.register <- c
 	go c.readLoop()
-	startKeepalivePing(conn, ping, c.closeCh, c.hub.logf, "client "+c.id+":")
+	startKeepalivePing(conn, ping, c.closeCh, c.hub.logf, "client "+c.id+":", c.pingFn)
 	return nil
 }
 
@@ -865,12 +906,10 @@ func (c *Client) readLoop() {
 		default:
 		}
 
-		// Enforce the keepalive deadline on the read goroutine (the only
-		// goroutine allowed to set it, per the gorilla concurrency rules).
-		// A missed pong therefore fails ReadMessage within
-		// pingInterval + pongTimeout, firing onClose so Start reconnects.
-		ping, pong := effectiveKeepalive(c.keepalivePing, c.keepalivePong)
-		if err := c.conn.SetReadDeadline(time.Now().Add(ping + pong)); err != nil {
+		// Push the keepalive deadline out from the goroutine performing the
+		// read; a missed pong therefore fails ReadMessage within the window,
+		// firing onClose so guest.Start reconnects (issue #220).
+		if err := setKeepaliveDeadline(c.conn, c.armedPing, c.armedPong); err != nil {
 			c.hub.logf("client %s: set read deadline: %v", c.id, err)
 			return
 		}
