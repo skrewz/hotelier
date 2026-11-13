@@ -614,6 +614,7 @@ type Client struct {
 	mu          sync.Mutex
 	closed      atomic.Bool
 	closeCh     chan struct{}
+	logf        func(format string, args ...interface{})
 	pendingMu   sync.Mutex                      // guards pending (issue #216)
 	pending     map[string]chan *JSONRPCMessage // request ID -> waiting Call (issue #216)
 	callTimeout atomic.Int64                    // per-call response bound in ns (issue #215)
@@ -707,9 +708,13 @@ func (h *ClientHub) InvokeNotificationHandler(method string, params json.RawMess
 
 // NewClient creates a new JSON-RPC client.
 func NewClient(id string, hub *ClientHub, logf func(format string, args ...interface{})) *Client {
+	if logf == nil {
+		logf = hub.logf
+	}
 	c := &Client{
 		id:      id,
 		hub:     hub,
+		logf:    logf,
 		closeCh: make(chan struct{}),
 		pending: make(map[string]chan *JSONRPCMessage),
 	}
@@ -787,7 +792,7 @@ func (c *Client) fail(err error) {
 	if !c.shutdown() {
 		return
 	}
-	c.hub.logf("client %s: connection lost: %v", c.id, err)
+	c.logf("client %s: connection lost: %v", c.id, err)
 
 	c.mu.Lock()
 	onClose := c.onClose
@@ -812,7 +817,7 @@ func (c *Client) readLoop() {
 				websocket.CloseGoingAway,
 				websocket.CloseNormalClosure,
 				websocket.CloseAbnormalClosure) {
-				c.hub.logf("client %s read error: %v", c.id, err)
+				c.logf("client %s read error: %v", c.id, err)
 			}
 			// Notify the guest that the connection is lost. fail loads
 			// onClose under the mutex, so a concurrent SetOnClose cannot
@@ -823,7 +828,7 @@ func (c *Client) readLoop() {
 
 		var msg JSONRPCMessage
 		if err := json.Unmarshal(message, &msg); err != nil {
-			c.hub.logf("client %s: failed to parse message: %v", c.id, err)
+			c.logf("client %s: failed to parse message: %v", c.id, err)
 			continue
 		}
 
@@ -884,7 +889,7 @@ func (c *Client) handleNotification(msg JSONRPCMessage) {
 	if ok {
 		handler(msg.Method, msg.Params)
 	} else {
-		c.hub.logf("client %s: received notification: %s (no handler registered)", c.id, msg.Method)
+		c.logf("client %s: received notification: %s (no handler registered)", c.id, msg.Method)
 	}
 }
 
