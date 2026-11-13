@@ -13,12 +13,14 @@ import (
 )
 
 // startMethodReplyWSServer starts a WebSocket server that answers every
-// request with a result echoing the request's method. Calls to
-// "call.slow.method" are answered after a delay so a concurrent fast
-// call can overtake it; every other method is answered immediately.
-// Each request is answered on its own goroutine so responses can arrive
-// out of order — the case the shared channel cannot survive.
-func startMethodReplyWSServer(t *testing.T, slowDelay time.Duration) string {
+// request with a result echoing the request's method. Each request is
+// answered on its own goroutine so responses can arrive out of order.
+// Replies to holdMethod are held until a token arrives on release — an
+// empty holdMethod, which every test but the stale one uses, answers
+// everything as it arrives. written, when non-nil, is closed the first
+// time a held reply has been written, so a test can wait for that moment
+// instead of sleeping.
+func startMethodReplyWSServer(t *testing.T, holdMethod string, release chan struct{}, written chan struct{}) string {
 	t.Helper()
 
 	upgrader := websocket.Upgrader{
@@ -30,9 +32,10 @@ func startMethodReplyWSServer(t *testing.T, slowDelay time.Duration) string {
 			return
 		}
 		// gorilla/websocket allows only one writer per connection at a
-		// time (see the doc comment on Conn), so the delayed replies are
+		// time (see the doc comment on Conn), so the held replies are
 		// serialised against the immediate ones.
 		var writeMu sync.Mutex
+		var wroteOnce sync.Once
 		write := func(data []byte) error {
 			writeMu.Lock()
 			defer writeMu.Unlock()
@@ -56,15 +59,21 @@ func startMethodReplyWSServer(t *testing.T, slowDelay time.Duration) string {
 				if err != nil {
 					continue
 				}
-				resp := JSONRPCMessage{JSONRPC: "2.0", ID: req.ID, Result: result}
-				data, err := json.Marshal(resp)
+				data, err := json.Marshal(JSONRPCMessage{JSONRPC: "2.0", ID: req.ID, Result: result})
 				if err != nil {
 					continue
 				}
-				if req.Method == "call.slow.method" {
+				if holdMethod != "" && req.Method == holdMethod {
 					go func() {
-						time.Sleep(slowDelay)
-						write(data)
+						// Blocking here also proves the request
+						// reached the server.
+						<-release
+						if write(data) != nil {
+							return
+						}
+						if written != nil {
+							wroteOnce.Do(func() { close(written) })
+						}
 					}()
 					continue
 				}
@@ -80,16 +89,15 @@ func startMethodReplyWSServer(t *testing.T, slowDelay time.Duration) string {
 }
 
 // TestClientCallRoutesResponsesToTheirOwnCallers proves two concurrent
-// Calls for different methods each receive their own result. With the
-// old shared callResp channel either caller could consume the other's
-// response (issue #216).
+// Calls for different methods each receive their own result (issue #216).
 func TestClientCallRoutesResponsesToTheirOwnCallers(t *testing.T) {
-	url := startMethodReplyWSServer(t, 150*time.Millisecond)
+	release := make(chan struct{})
+	url := startMethodReplyWSServer(t, "call.slow.method", release, nil)
 	c := connectTestClient(t, url)
 	c.SetCallTimeout(5 * time.Second)
 
-	// Repeat enough that the old misdelivery (a response handed to an
-	// arbitrary waiter) cannot plausibly hide from the assertion.
+	// Repeat enough that a response handed to the wrong Call could not
+	// plausibly hide from the assertions.
 	const rounds = 20
 	for i := 0; i < rounds; i++ {
 		type outcome struct {
@@ -101,8 +109,10 @@ func TestClientCallRoutesResponsesToTheirOwnCallers(t *testing.T) {
 			r, err := c.Call("call.slow.method", nil)
 			slowCh <- outcome{r, err}
 		}()
-		// Let the slow caller enter its wait so the fast response can
-		// arrive while both callers are parked.
+		// Give the slow caller time to enter its wait so the fast reply
+		// lands while both callers are parked. Nothing is asserted against
+		// that delay: the slow reply is only let go below, once the fast
+		// Call has returned.
 		time.Sleep(20 * time.Millisecond)
 
 		fastResult, err := c.Call("call.fast.method", nil)
@@ -112,6 +122,9 @@ func TestClientCallRoutesResponsesToTheirOwnCallers(t *testing.T) {
 		if !strings.Contains(string(fastResult), "call.fast.method") {
 			t.Fatalf("round %d: fast call received %s — response misdelivered", i, fastResult)
 		}
+
+		// The held reply now lands while only the slow Call awaits it.
+		release <- struct{}{}
 
 		select {
 		case o := <-slowCh:
@@ -127,72 +140,32 @@ func TestClientCallRoutesResponsesToTheirOwnCallers(t *testing.T) {
 	}
 }
 
-// startLateFirstReplyWSServer answers "stale.first" only after delayFirst
-// (so the caller times out before it lands) and answers "stale.second"
-// immediately.
-func startLateFirstReplyWSServer(t *testing.T, delayFirst time.Duration) string {
-	t.Helper()
-
-	upgrader := websocket.Upgrader{
-		CheckOrigin: func(r *http.Request) bool { return true },
-	}
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		conn, err := upgrader.Upgrade(w, r, nil)
-		if err != nil {
-			return
-		}
-		go func() {
-			defer conn.Close()
-			for {
-				_, raw, err := conn.ReadMessage()
-				if err != nil {
-					return
-				}
-				var req JSONRPCMessage
-				if err := json.Unmarshal(raw, &req); err != nil {
-					continue
-				}
-				if req.ID == nil {
-					continue
-				}
-				result, err := json.Marshal(map[string]string{"echo": req.Method})
-				if err != nil {
-					continue
-				}
-				resp := JSONRPCMessage{JSONRPC: "2.0", ID: req.ID, Result: result}
-				if req.Method == "stale.first" {
-					time.Sleep(delayFirst)
-				}
-				data, err := json.Marshal(resp)
-				if err != nil {
-					continue
-				}
-				if err := conn.WriteMessage(websocket.TextMessage, data); err != nil {
-					return
-				}
-			}
-		}()
-	}))
-	t.Cleanup(srv.Close)
-
-	return "ws" + strings.TrimPrefix(srv.URL, "http")
-}
-
 // TestClientIgnoresResponseForCompletedRequest proves that a response
 // arriving after its caller has timed out is not handed to the next
-// caller: the late reply is ignored, and a later call still receives its
-// own result. With the shared channel the late reply squats in the
-// buffer and is misdelivered to — or wedges — the next Call (issue #216).
+// caller: the late reply is ignored and a later call still receives its
+// own result (issue #216).
 func TestClientIgnoresResponseForCompletedRequest(t *testing.T) {
-	url := startLateFirstReplyWSServer(t, 300*time.Millisecond)
+	release := make(chan struct{})
+	written := make(chan struct{})
+	url := startMethodReplyWSServer(t, "stale.first", release, written)
 	c := connectTestClient(t, url)
 
+	// The reply is held until released below, so it is the caller's own
+	// timeout that ends the call rather than a race against a fixed delay.
 	c.SetCallTimeout(100 * time.Millisecond)
 	if _, err := c.Call("stale.first", nil); err == nil {
 		t.Fatal("expected the first call to time out")
 	}
-	// Let the late reply land after the caller has given up.
-	time.Sleep(300 * time.Millisecond)
+
+	// Wait until the late reply has actually been written, so the next
+	// Call provably runs against a table whose late entry has already been
+	// discarded. The ceiling is a hang detector, not a timing bet.
+	release <- struct{}{}
+	select {
+	case <-written:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the late reply was never written")
+	}
 
 	c.SetCallTimeout(3 * time.Second)
 	result, err := c.Call("stale.second", nil)
@@ -206,7 +179,7 @@ func TestClientIgnoresResponseForCompletedRequest(t *testing.T) {
 
 // startStrayReplyWSServer answers "stray.watcher" with an unsolicited
 // response carrying an unrelated ID first, then answers the request
-// itself a moment later. The stray response matches no pending request.
+// itself. The stray response matches no pending request.
 func startStrayReplyWSServer(t *testing.T) string {
 	t.Helper()
 
@@ -238,7 +211,6 @@ func startStrayReplyWSServer(t *testing.T) string {
 				if err := conn.WriteMessage(websocket.TextMessage, stray); err != nil {
 					return
 				}
-				time.Sleep(50 * time.Millisecond)
 				result, _ := json.Marshal(map[string]string{"echo": "stray.watcher"})
 				data, _ := json.Marshal(JSONRPCMessage{JSONRPC: "2.0", ID: req.ID, Result: result})
 				if err := conn.WriteMessage(websocket.TextMessage, data); err != nil {
@@ -253,9 +225,8 @@ func startStrayReplyWSServer(t *testing.T) string {
 }
 
 // TestClientIgnoresResponseForUnknownID proves a response whose ID
-// matches no pending request is ignored rather than delivered: with the
-// shared channel it squatted in the buffer and the real response was
-// silently dropped, timing the caller out (issue #216).
+// matches no pending request is ignored rather than delivered, leaving
+// the real response to reach its own caller (issue #216).
 func TestClientIgnoresResponseForUnknownID(t *testing.T) {
 	url := startStrayReplyWSServer(t)
 	c := connectTestClient(t, url)
@@ -277,12 +248,23 @@ func (c *Client) pendingCount() int {
 	return len(c.pending)
 }
 
+// waitForPending blocks until n Calls await their response, so a test can
+// act on a Call being parked rather than guess when it will be.
+func waitForPending(t *testing.T, c *Client, n int) {
+	t.Helper()
+	for deadline := time.Now().Add(5 * time.Second); c.pendingCount() != n; {
+		if time.Now().After(deadline) {
+			t.Fatalf("pending calls: got %d, want %d", c.pendingCount(), n)
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
 // TestClientCallLeavesNoPendingEntries proves every exit path — success,
 // timeout and connection close — removes the pending entry, so the table
 // does not grow without bound (issue #216).
 func TestClientCallLeavesNoPendingEntries(t *testing.T) {
-	replyURL := startMethodReplyWSServer(t, time.Millisecond)
-	c := connectTestClient(t, replyURL)
+	c := connectTestClient(t, startMethodReplyWSServer(t, "", nil, nil))
 	c.SetCallTimeout(2 * time.Second)
 
 	for i := 0; i < 5; i++ {
@@ -294,7 +276,9 @@ func TestClientCallLeavesNoPendingEntries(t *testing.T) {
 		t.Errorf("after successful calls: %d pending entries remain", n)
 	}
 
-	// Timed-out calls must deregister too.
+	// Timed-out calls must deregister too. The deferred deregistration
+	// runs before Call returns, so the table is empty by the time the
+	// error is in hand.
 	silentURL := startSilentWSServer(t)
 	c2 := connectTestClient(t, silentURL)
 	c2.SetCallTimeout(50 * time.Millisecond)
@@ -303,8 +287,6 @@ func TestClientCallLeavesNoPendingEntries(t *testing.T) {
 			t.Fatal("expected timeout error")
 		}
 	}
-	// The timed-out entries are removed by the deferred deregistration,
-	// which runs before Call returns.
 	if n := c2.pendingCount(); n != 0 {
 		t.Errorf("after timed-out calls: %d pending entries remain", n)
 	}
@@ -318,7 +300,7 @@ func TestClientCallLeavesNoPendingEntries(t *testing.T) {
 		defer wg.Done()
 		_, _ = c3.Call("pending.closed", nil)
 	}()
-	time.Sleep(100 * time.Millisecond)
+	waitForPending(t, c3, 1)
 	c3.Close()
 	wg.Wait()
 	if n := c3.pendingCount(); n != 0 {
