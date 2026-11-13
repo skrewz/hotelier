@@ -593,14 +593,17 @@
         const guestHosts = {};
 
         // Task status filter state.  Keys are status strings (e.g. "COMPLETED").
-        // true = shown, false = hidden.  Defaults: COMPLETED hidden, all others shown.
+        // true = shown, false = hidden.  Defaults: PENDING, COMPLETED and
+        // CANCELLED hidden, all others shown. Cancelled tasks joined the
+        // hidden set for issue #289 — a settled terminal task has no live
+        // signal to report. The toggles below the bar reveal them on demand.
         let taskFilter = {
             PENDING:   false,
             ASSIGNED:  true,
             RUNNING:   true,
             COMPLETED: false,
             FAILED:    true,
-            CANCELLED: true,
+            CANCELLED: false,
         };
 
         // Task preference filter (issue #281). prefFilterText is the live

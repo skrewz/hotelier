@@ -1382,8 +1382,8 @@ const { chromium } = require('playwright');
   });
   if (filterResult.error) fail(filterResult.error);
   if (filterResult.buttonStates.length < 6) fail('Filter row should have at least 6 buttons, got ' + filterResult.buttonStates.length);
-  // Verify COMPLETED and PENDING are inactive by default
-  for (const hiddenStatus of ['COMPLETED', 'PENDING']) {
+  // Verify COMPLETED, PENDING and CANCELLED are inactive by default
+  for (const hiddenStatus of ['COMPLETED', 'PENDING', 'CANCELLED']) {
     const btn = filterResult.buttonStates.find(b => b.status === hiddenStatus);
     if (!btn) fail(hiddenStatus + ' filter button not found');
     if (btn.active) fail(hiddenStatus + ' filter should be inactive by default');
@@ -1391,11 +1391,11 @@ const { chromium } = require('playwright');
   }
   // Verify other statuses are active by default
   for (const btn of filterResult.buttonStates) {
-    if (btn.status !== 'COMPLETED' && btn.status !== 'PENDING' && !btn.active) {
+    if (btn.status !== 'COMPLETED' && btn.status !== 'PENDING' && btn.status !== 'CANCELLED' && !btn.active) {
       fail(btn.status + ' filter should be active by default');
     }
   }
-  console.log('PASS: Filter row rendered with', filterResult.buttonStates.length, 'buttons, COMPLETED and PENDING inactive by default');
+  console.log('PASS: Filter row rendered with', filterResult.buttonStates.length, 'buttons, COMPLETED, PENDING and CANCELLED inactive by default');
 
   // Verify pending and completed tasks are hidden by default
   const visibleTaskCount = await page.evaluate(() => {
