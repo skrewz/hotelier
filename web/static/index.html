@@ -2001,6 +2001,13 @@
             refreshTaskDetail(taskId);
         }
 
+        // closeTaskDetail returns to the task list through showTab('tasks') —
+        // the Tasks tab's own navigation, push to /tasks included — so the two
+        // paths cannot drift apart (issue #207).
+        function closeTaskDetail() {
+            showTab('tasks');
+        }
+
         // =====================================================================
         // Full-screen task logs (issue #205)
         // =====================================================================
