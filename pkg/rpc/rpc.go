@@ -7,7 +7,6 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
-	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -852,10 +851,11 @@ func (c *Client) readLoop() {
 }
 
 // deliverResponse hands a response to the Call waiting under its request
-// ID. A response that matches no pending Call is logged and ignored, with
-// the two reasons kept apart: IDs come from the hub's counter, so an ID
-// above it is one the peer invented rather than one this client waited on
-// and forgot (issue #216).
+// ID. A response that matches no pending Call is logged and ignored,
+// never handed to an arbitrary waiter (issue #216). Both ways a response
+// can arrive unclaimed — one the peer invented, and one whose caller gave
+// up — share this line and carry the full ID, so a reader can tell them
+// apart by correlating the ID with the callers' own timeout errors.
 func (c *Client) deliverResponse(msg *JSONRPCMessage) {
 	key := string(*msg.ID)
 
@@ -864,11 +864,7 @@ func (c *Client) deliverResponse(msg *JSONRPCMessage) {
 	c.pendingMu.Unlock()
 
 	if !ok {
-		if c.requested(key) {
-			c.logf("client %s: response for request id %q arrived after its caller gave up", c.id, key)
-		} else {
-			c.logf("client %s: response for request id %q this client never requested", c.id, key)
-		}
+		c.logf("client %s: response for request id %q ignored", c.id, key)
 		return
 	}
 
@@ -882,18 +878,6 @@ func (c *Client) deliverResponse(msg *JSONRPCMessage) {
 	default:
 		c.logf("client %s: second response for request id %q ignored", c.id, key)
 	}
-}
-
-// requested reports whether the given request ID was handed out by this
-// client's hub. Call takes IDs from hub.nextID, so every ID this client
-// can wait on is a positive integer at or below the counter's current
-// value; anything else came from the peer.
-func (c *Client) requested(id string) bool {
-	n, err := strconv.ParseInt(id, 10, 64)
-	if err != nil {
-		return false
-	}
-	return n > 0 && n <= c.hub.nextID.Load()
 }
 
 func (c *Client) handleNotification(msg JSONRPCMessage) {
