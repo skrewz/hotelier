@@ -962,9 +962,9 @@ func (c *Client) readLoop() {
 // deliverResponse hands a response to the Call waiting under its request
 // ID. A response that matches no pending Call is logged and ignored,
 // never handed to an arbitrary waiter (issue #216). Both ways a response
-// can arrive unclaimed — one the peer invented, and one whose caller gave
-// up — share this line and carry the full ID, so a reader can tell them
-// apart by correlating the ID with the callers' own timeout errors.
+// can arrive unclaimed — one the peer invented, and one whose caller
+// timed out — share this line and carry the full ID, which Call's own
+// timeout error names too, so a reader can tell them apart.
 func (c *Client) deliverResponse(msg *JSONRPCMessage) {
 	key := string(*msg.ID)
 
@@ -1066,7 +1066,9 @@ func (c *Client) Call(method string, params interface{}) (json.RawMessage, error
 	case <-c.closeCh:
 		return nil, fmt.Errorf("connection closed waiting for %s response", method)
 	case <-timer.C:
-		return nil, fmt.Errorf("timeout waiting for %s response", method)
+		// Name the ID so a late "response for request id ... ignored"
+		// line from deliverResponse pairs with this caller (issue #216).
+		return nil, fmt.Errorf("timeout waiting for %s response (id %s)", method, key)
 	}
 
 	if resp.Error != nil {
