@@ -888,7 +888,7 @@ func (c *Client) handleNotification(msg JSONRPCMessage) {
 	if ok {
 		handler(msg.Method, msg.Params)
 	} else {
-		c.logf("client %s: received notification: %s (no handler registered)", c.id, msg.Method)
+		c.logf("client %s: received notification: %q (no handler registered)", c.id, msg.Method)
 	}
 }
 
