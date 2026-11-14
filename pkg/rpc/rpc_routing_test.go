@@ -241,31 +241,18 @@ func TestClientIgnoresResponseForUnknownID(t *testing.T) {
 	}
 }
 
-// captureLogf returns a logf that records every line it is handed,
-// behind the same mutex guard testLogf uses, plus a reader for a
-// snapshot of the recorded lines.
+// captureLogf returns a logf that records every line it is handed, plus
+// a reader for a snapshot of the recorded lines. Unlike testLogf, which
+// guards calls from hubs and read loops that outlive their test, this
+// recorder has no concurrency machinery: its only user below drives
+// deliverResponse directly, so every call is on the test goroutine.
 func captureLogf(t *testing.T) (func(string, ...interface{}), func() []string) {
 	t.Helper()
-	var mu sync.Mutex
 	var logged []string
-	done := false
-	t.Cleanup(func() {
-		mu.Lock()
-		done = true
-		mu.Unlock()
-	})
 	logf := func(format string, args ...interface{}) {
-		mu.Lock()
-		defer mu.Unlock()
-		if !done {
-			logged = append(logged, fmt.Sprintf(format, args...))
-		}
+		logged = append(logged, fmt.Sprintf(format, args...))
 	}
-	lines := func() []string {
-		mu.Lock()
-		defer mu.Unlock()
-		return append([]string(nil), logged...)
-	}
+	lines := func() []string { return append([]string(nil), logged...) }
 	return logf, lines
 }
 
@@ -277,15 +264,12 @@ func captureLogf(t *testing.T) (func(string, ...interface{}), func() []string) {
 // no server-side timing reaches it deterministically; the test calls
 // deliverResponse directly against a pending entry whose channel
 // already holds the first response — exactly the state an unwoken Call
-// is in.
+// is in. deliverResponse reads only the pending table and logs through
+// the stored logf, so no connection is involved.
 func TestClientIgnoresSecondResponseForLiveRequest(t *testing.T) {
 	logf, lines := captureLogf(t)
 	hub := NewClientHub(testLogf(t))
 	c := NewClient("dup-reply-test", hub, logf)
-	if err := c.Connect(startSilentWSServer(t)); err != nil {
-		t.Fatalf("connect: %v", err)
-	}
-	t.Cleanup(c.Close)
 
 	id := json.RawMessage(`4242`)
 	key := string(id)
