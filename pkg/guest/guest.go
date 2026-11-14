@@ -432,6 +432,14 @@ func (g *Guest) claimRevokedWhileRunning(taskID string) bool {
 func (g *Guest) Connect() error {
 	client := rpc.NewClient(g.id, g.hub, g.log.Printf)
 
+	// WebSocket keepalive from config (issue #220): a silently dead link
+	// must fail the read deadline so onClose fires and Start reconnects.
+	// Zero (or negative) values fall back to the rpc package defaults.
+	client.SetKeepAlive(
+		time.Duration(g.config.KeepalivePingInterval)*time.Second,
+		time.Duration(g.config.KeepalivePongTimeout)*time.Second,
+	)
+
 	// Wire the connection-lost callback *before* connecting. Connect
 	// spawns the client's read loop, which reports a closed socket through
 	// this callback; registering it afterwards lets a connection that the

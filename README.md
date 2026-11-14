@@ -63,6 +63,8 @@ max_log_size: 1048576
 task_timeout: 3600
 heartbeat_interval: 30
 silence_timeout: 180
+keepalive_ping_interval: 10
+keepalive_pong_timeout: 30
 max_guests: 0
 max_concurrent_tasks: 0
 ```
@@ -74,6 +76,7 @@ max_concurrent_tasks: 0
 | `schedule_timezone` | IANA zone name the schedule's `at` times are interpreted in, so boundaries follow the wall clock across DST. The server binary embeds the tz database (`time/tzdata`), so a zone name resolves even in the scratch container image, which ships no `/usr/share/zoneinfo`. | `"UTC"` |
 | `trusted_hosts` | Host names a loopback peer may address this server by in place of a loopback one (issue #286). A local proxy forwards the incoming `Host`, so behind one the public name is what the identity guard on `POST /api/concurrency` sees; this list admits those names so the live cap stays reachable from a proxied dashboard. **Setting it changes that verdict from "this came from this machine" to "this came through my proxy", so the proxy must deny `POST /api/concurrency` to every principal that is not the operator**: until #285 enforces operator identity at the service, a certificate the proxy admits — a guest machine's included — would otherwise gain the fleet-wide pause button. The loopback-peer half of the guard is unchanged, matching is on the normalised name (port, brackets and trailing dot stripped, case folded), and an entry that is not an exact host name or IP address (a wildcard, a URL, a stray space) is a configuration error: the server refuses to start rather than ignoring the key, since one that could match nothing would fail closed in silence—fix the entry and restart. Write down only names **whose DNS you control**: the rule admits any exact entry on the list, so a listed name nobody owns is a DNS-rebinding target, which the loopback-only rule could never offer. The list only adds names, so loopback and SSH-tunnel access are unaffected. | empty (loopback-only) |
 | `log_retention_days` | How many days of task logs the prune sweep keeps. Date directories older than today minus this many days are removed at startup and on the cleanup tick; the current day and any in-window day are left completely alone, and `queue_dir` is never touched. Following the `max_guests` convention, `0` disables pruning. | `14` |
+| `keepalive_ping_interval`, `keepalive_pong_timeout` | WebSocket keepalive (issue #220), the mirror of the guest's pair: the host pings **every** connection — guests and browser dashboard tabs alike, which answer pings on their own — and drops one that sends neither data nor a pong within `keepalive_ping_interval + keepalive_pong_timeout`. This is how a link that died without a FIN or RST reaching either side (a proxy dropping an idle upstream) gets noticed server-side. `0` selects the default. Keep the window below any reverse-proxy idle timeout, and make sure a proxy in front of the host relays WebSocket control frames in both directions: if pings or pongs are swallowed on the way, a healthy link looks dead and is dropped once per window, and a dead one looks alive. | `10` / `30` |
 
 **The HTTP API performs no authentication and there is no TLS.** A server
 bound to `0.0.0.0` serves the dashboard, the guest registry and the task logs
@@ -216,6 +219,8 @@ tags:
   - "frontend"
 heartbeat_interval: 15
 task_timeout: 1800
+keepalive_ping_interval: 10
+keepalive_pong_timeout: 30
 working_dir: "/tmp/hotelier"
 log_level: "info"
 ```
@@ -226,6 +231,8 @@ log_level: "info"
 | `id` | Identity the guest registers under. Set it to something stable per machine (typically the hostname) and a process restart keeps the same identity in the registry; deployments template it. See [Guest identity](#guest-identity). | generated: `guest-<8 random hex>` |
 | `working_dir` | Base directory for task execution | `"/tmp/hotelier"` |
 | `log_level` | Logging level (`debug`, `info`, `warn`, `error`) | `"info"` |
+| `keepalive_ping_interval` | Seconds between WebSocket ping control frames (issue #220). A peer that answers neither data nor pongs within `keepalive_ping_interval + keepalive_pong_timeout` is considered gone and the guest reconnects. `0` selects the default. | `10` |
+| `keepalive_pong_timeout` | Seconds of silence (no data, no pong) tolerated before the connection is declared dead (issue #220). Keep the total window below any reverse-proxy idle timeout. `0` selects the default. | `30` |
 | `home_copies` | Home paths copied into every task's namespace jail (issue #201). Entries are relative to the guest's home directory: directories are copied recursively, files (e.g. a skill's dot-file config) are copied with their content and mode; entries that do not exist on this guest are skipped. Absolute paths and `..` components are rejected. | built-in set: `.pi`, `.certs`, `.forgejo-gitconfigs`, `.tokens` |
 
 Example with mTLS:
@@ -272,6 +279,16 @@ process is retired automatically once the guest has been silent for
 `silence_timeout` (stale-guest cleanup fails its task and removes the entry),
 by the guest unregistering on a graceful shutdown, or by the next fresh
 registration under the same id — which clears the task reference immediately.
+
+A link that died without either side seeing a close is usually noticed sooner
+than `silence_timeout` allows, by the WebSocket keepalive pair
+(issue #220): the host pings every connection and drops one that answers
+neither data nor a pong within `keepalive_ping_interval +
+keepalive_pong_timeout`. Dropping the socket runs the connection-lost path,
+so a task that was running on the unreachable guest is re-queued inside that
+window and the guest reconnects; the registry entry itself still follows the
+three paths above. A guest that is merely idle is not affected — its pongs
+keep the link up.
 
 ## Task Submission
 

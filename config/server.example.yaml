@@ -36,6 +36,14 @@ heartbeat_interval: 30
 # stale: its running task is failed and it is removed from the registry.
 # 0 disables stale-guest removal.
 silence_timeout: 180
+# WebSocket keepalive (issue #220): the server pings every connection and
+# drops it if nothing (data or pong) comes back within
+# keepalive_ping_interval + keepalive_pong_timeout. Detects links that died
+# without either side seeing a close (e.g. a proxy dropping an idle
+# upstream). 0 selects the built-in defaults (10 / 30 seconds). Keep the
+# detection window below any reverse-proxy idle timeout.
+keepalive_ping_interval: 10
+keepalive_pong_timeout: 30
 max_guests: 0
 # Static cap on how many tasks the host is willing to run at any moment
 # (0 = unlimited). Used as-is when no concurrency_schedule is configured;
