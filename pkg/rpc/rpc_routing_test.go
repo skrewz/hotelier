@@ -2,6 +2,7 @@ package rpc
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -238,6 +239,83 @@ func TestClientIgnoresResponseForUnknownID(t *testing.T) {
 	if !strings.Contains(string(result), "stray.watcher") {
 		t.Errorf("call received %s — an unknown-ID response disturbed it", result)
 	}
+}
+
+// captureLogf returns a logf that records every line it is handed,
+// behind the same mutex guard testLogf uses, plus a reader for a
+// snapshot of the recorded lines.
+func captureLogf(t *testing.T) (func(string, ...interface{}), func() []string) {
+	t.Helper()
+	var mu sync.Mutex
+	var logged []string
+	done := false
+	t.Cleanup(func() {
+		mu.Lock()
+		done = true
+		mu.Unlock()
+	})
+	logf := func(format string, args ...interface{}) {
+		mu.Lock()
+		defer mu.Unlock()
+		if !done {
+			logged = append(logged, fmt.Sprintf(format, args...))
+		}
+	}
+	lines := func() []string {
+		mu.Lock()
+		defer mu.Unlock()
+		return append([]string(nil), logged...)
+	}
+	return logf, lines
+}
+
+// TestClientIgnoresSecondResponseForLiveRequest proves a second
+// response for an ID whose Call has not yet woken is logged and
+// dropped, not queued behind the first, whose receipt the Call keeps
+// intact (issue #216). The branch is entered in production by a race
+// between the Call waking and readLoop processing the second reply, so
+// no server-side timing reaches it deterministically; the test calls
+// deliverResponse directly against a pending entry whose channel
+// already holds the first response — exactly the state an unwoken Call
+// is in.
+func TestClientIgnoresSecondResponseForLiveRequest(t *testing.T) {
+	logf, lines := captureLogf(t)
+	hub := NewClientHub(testLogf(t))
+	c := NewClient("dup-reply-test", hub, logf)
+	if err := c.Connect(startSilentWSServer(t)); err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	t.Cleanup(c.Close)
+
+	id := json.RawMessage(`4242`)
+	key := string(id)
+	ch := make(chan *JSONRPCMessage, 1)
+	first := &JSONRPCMessage{JSONRPC: "2.0", ID: &id}
+	ch <- first // the Call has not woken: its channel still holds the reply
+	c.pendingMu.Lock()
+	c.pending[key] = ch
+	c.pendingMu.Unlock()
+
+	c.deliverResponse(&JSONRPCMessage{JSONRPC: "2.0", ID: &id})
+
+	if len(ch) != 1 {
+		t.Errorf("duplicate response was queued: channel holds %d, want 1", len(ch))
+	}
+	select {
+	case got := <-ch:
+		if got != first {
+			t.Error("the pending channel holds the duplicate, not the Call's own first response")
+		}
+	default:
+		t.Fatal("the pending channel was drained")
+	}
+	want := `second response for request id "4242" ignored`
+	for _, line := range lines() {
+		if strings.Contains(line, want) {
+			return
+		}
+	}
+	t.Errorf("the dropped duplicate left no log line; logged: %q", lines())
 }
 
 // pendingCount reports how many requests await their response.
