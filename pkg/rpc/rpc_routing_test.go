@@ -16,10 +16,10 @@ import (
 // request with a result echoing the request's method. Each request is
 // answered on its own goroutine so responses can arrive out of order.
 // Replies to holdMethod are held until a token arrives on release — an
-// empty holdMethod, which every test but the stale one uses, answers
-// everything as it arrives. written, when non-nil, is closed the first
-// time a held reply has been written, so a test can wait for that moment
-// instead of sleeping.
+// empty holdMethod, which every test but the routing and stale ones
+// uses, answers everything as it arrives. written, when non-nil, is
+// closed once the held reply has been written, so a test can wait for
+// that moment instead of sleeping.
 func startMethodReplyWSServer(t *testing.T, holdMethod string, release chan struct{}, written chan struct{}) string {
 	t.Helper()
 
@@ -35,7 +35,6 @@ func startMethodReplyWSServer(t *testing.T, holdMethod string, release chan stru
 		// time (see the doc comment on Conn), so the held replies are
 		// serialised against the immediate ones.
 		var writeMu sync.Mutex
-		var wroteOnce sync.Once
 		write := func(data []byte) error {
 			writeMu.Lock()
 			defer writeMu.Unlock()
@@ -72,7 +71,7 @@ func startMethodReplyWSServer(t *testing.T, holdMethod string, release chan stru
 							return
 						}
 						if written != nil {
-							wroteOnce.Do(func() { close(written) })
+							close(written)
 						}
 					}()
 					continue
