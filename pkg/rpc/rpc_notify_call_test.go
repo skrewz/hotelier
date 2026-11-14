@@ -16,8 +16,9 @@ import (
 // a notification handler that performs a Call must not deadlock the client.
 //
 // readLoop used to dispatch notification handlers synchronously. A handler
-// that called Client.Call then waited on callResp — a channel only readLoop
-// drains — so both parked forever: the handler's Call never returned, no
+// that called Client.Call then waited on the client's shared response
+// channel (since removed) — a channel only readLoop drains — so both
+// parked forever: the handler's Call never returned, no
 // further message was ever read, and onClose (the reconnect signal) could
 // never fire. This mirrors the guest's task.cancel handler answering with
 // guest.cancelled.

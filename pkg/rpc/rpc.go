@@ -663,9 +663,11 @@ type Client struct {
 	mu          sync.Mutex
 	closed      atomic.Bool
 	closeCh     chan struct{}
-	callResp    chan *JSONRPCMessage
-	callTimeout atomic.Int64 // per-call response bound in ns (issue #215)
-	onClose     func()       // called when the connection is lost unexpectedly; guarded by mu
+	logf        func(format string, args ...interface{})
+	pendingMu   sync.Mutex                      // guards pending (issue #216)
+	pending     map[string]chan *JSONRPCMessage // request ID -> waiting Call (issue #216)
+	callTimeout atomic.Int64                    // per-call response bound in ns (issue #215)
+	onClose     func()                          // called when the connection is lost unexpectedly; guarded by mu
 
 	// Configured WebSocket keepalive knobs (issue #220), guarded by mu:
 	// SetKeepAlive may be called at any time, including while a connection is
@@ -777,11 +779,15 @@ func (h *ClientHub) InvokeNotificationHandler(method string, params json.RawMess
 
 // NewClient creates a new JSON-RPC client.
 func NewClient(id string, hub *ClientHub, logf func(format string, args ...interface{})) *Client {
+	if logf == nil {
+		logf = hub.logf
+	}
 	c := &Client{
-		id:       id,
-		hub:      hub,
-		closeCh:  make(chan struct{}),
-		callResp: make(chan *JSONRPCMessage, 1),
+		id:      id,
+		hub:     hub,
+		logf:    logf,
+		closeCh: make(chan struct{}),
+		pending: make(map[string]chan *JSONRPCMessage),
 	}
 	c.callTimeout.Store(int64(DefaultCallTimeout))
 	return c
@@ -856,7 +862,7 @@ func (c *Client) ConnectWithTLS(url string, tlsConfig *tls.Config) error {
 	go c.hub.Run()
 	c.hub.register <- c
 	go c.readLoop()
-	startKeepalivePing(conn, ping, c.closeCh, c.hub.logf, "client "+c.id+":", c.pingFn)
+	startKeepalivePing(conn, ping, c.closeCh, c.logf, "client "+c.id+":", c.pingFn)
 	return nil
 }
 
@@ -887,7 +893,7 @@ func (c *Client) fail(err error) {
 	if !c.shutdown() {
 		return
 	}
-	c.hub.logf("client %s: connection lost: %v", c.id, err)
+	c.logf("client %s: connection lost: %v", c.id, err)
 
 	c.mu.Lock()
 	onClose := c.onClose
@@ -910,7 +916,7 @@ func (c *Client) readLoop() {
 		// read; a missed pong therefore fails ReadMessage within the window,
 		// firing onClose so guest.Start reconnects (issue #220).
 		if err := setKeepaliveDeadline(c.conn, c.armedPing, c.armedPong); err != nil {
-			c.hub.logf("client %s: set read deadline: %v", c.id, err)
+			c.logf("client %s: set read deadline: %v", c.id, err)
 			return
 		}
 
@@ -920,7 +926,7 @@ func (c *Client) readLoop() {
 				websocket.CloseGoingAway,
 				websocket.CloseNormalClosure,
 				websocket.CloseAbnormalClosure) {
-				c.hub.logf("client %s read error: %v", c.id, err)
+				c.logf("client %s read error: %v", c.id, err)
 			}
 			// Notify the guest that the connection is lost. fail loads
 			// onClose under the mutex, so a concurrent SetOnClose cannot
@@ -931,29 +937,55 @@ func (c *Client) readLoop() {
 
 		var msg JSONRPCMessage
 		if err := json.Unmarshal(message, &msg); err != nil {
-			c.hub.logf("client %s: failed to parse message: %v", c.id, err)
+			c.logf("client %s: failed to parse message: %v", c.id, err)
 			continue
 		}
 
-		// If this is a response to a Call() (has ID), deliver it to the caller
+		// Responses (ID set) go to the Call that made the request (issue #216).
 		if msg.ID != nil {
-			select {
-			case c.callResp <- &msg:
-			default:
-				// caller not waiting, discard
-			}
+			c.deliverResponse(&msg)
 			continue
 		}
 
 		// Handle incoming notifications from server (no ID).
 		// Dispatch off the readLoop: a handler that performs a Call would
-		// otherwise wait on callResp for a response that only readLoop can
-		// deliver — a self-deadlock that wedges the connection forever
+		// otherwise wait for a response that only readLoop can deliver — a
+		// self-deadlock that wedges the connection forever
 		// (issue #214). Guests must therefore keep their handlers safe to
 		// run concurrently.
 		if msg.Method != "" {
 			go c.handleNotification(msg)
 		}
+	}
+}
+
+// deliverResponse hands a response to the Call waiting under its request
+// ID. A response that matches no pending Call is logged and ignored,
+// never handed to an arbitrary waiter (issue #216). Both ways a response
+// can arrive unclaimed — one the peer invented, and one whose caller
+// timed out — share this line and carry the full ID, which Call's own
+// timeout error names too, so a reader can tell them apart.
+func (c *Client) deliverResponse(msg *JSONRPCMessage) {
+	key := string(*msg.ID)
+
+	c.pendingMu.Lock()
+	ch, ok := c.pending[key]
+	c.pendingMu.Unlock()
+
+	if !ok {
+		c.logf("client %s: response for request id %q ignored", c.id, key)
+		return
+	}
+
+	// The channel has capacity 1 and only this path sends, so the send
+	// never blocks even if the Call gave up (and deregistered) between
+	// the lookup and the send; such a response simply becomes garbage.
+	// The default branch is the duplicate: a second response for an ID
+	// whose Call has not yet woken, dropped with a log line.
+	select {
+	case ch <- msg:
+	default:
+		c.logf("client %s: second response for request id %q ignored", c.id, key)
 	}
 }
 
@@ -965,7 +997,7 @@ func (c *Client) handleNotification(msg JSONRPCMessage) {
 	if ok {
 		handler(msg.Method, msg.Params)
 	} else {
-		c.hub.logf("client %s: received notification: %s (no handler registered)", c.id, msg.Method)
+		c.logf("client %s: received notification: %q (no handler registered)", c.id, msg.Method)
 	}
 }
 
@@ -982,6 +1014,22 @@ func (c *Client) Call(method string, params interface{}) (json.RawMessage, error
 
 	id := c.hub.nextID.Add(1)
 	idBytes, _ := json.Marshal(id)
+
+	// Register this Call under the ID it allocated so the readLoop can
+	// route the response back here and only here. The buffer of 1 means
+	// the readLoop's send never blocks on a caller that has already gone
+	// away; the deferred delete keeps the table empty once Call returns,
+	// whatever path it takes (issue #216).
+	key := string(idBytes)
+	respCh := make(chan *JSONRPCMessage, 1)
+	c.pendingMu.Lock()
+	c.pending[key] = respCh
+	c.pendingMu.Unlock()
+	defer func() {
+		c.pendingMu.Lock()
+		delete(c.pending, key)
+		c.pendingMu.Unlock()
+	}()
 
 	msg := &JSONRPCMessage{
 		JSONRPC: "2.0",
@@ -1005,19 +1053,22 @@ func (c *Client) Call(method string, params interface{}) (json.RawMessage, error
 		return nil, err
 	}
 
-	// Wait for the response delivered by the readLoop goroutine, but never
-	// block forever: a lost connection or a response that never arrives
-	// must surface as an error, not a silent hang (issue #215).
+	// Wait for the response delivered by the readLoop goroutine to this
+	// Call's own channel, but never block forever: a lost connection or a
+	// response that never arrives must surface as an error, not a silent
+	// hang (issues #215, #216).
 	timer := time.NewTimer(time.Duration(c.callTimeout.Load()))
 	defer timer.Stop()
 
 	var resp *JSONRPCMessage
 	select {
-	case resp = <-c.callResp:
+	case resp = <-respCh:
 	case <-c.closeCh:
 		return nil, fmt.Errorf("connection closed waiting for %s response", method)
 	case <-timer.C:
-		return nil, fmt.Errorf("timeout waiting for %s response", method)
+		// Name the ID so a late "response for request id ... ignored"
+		// line from deliverResponse pairs with this caller (issue #216).
+		return nil, fmt.Errorf("timeout waiting for %s response (id %s)", method, key)
 	}
 
 	if resp.Error != nil {
