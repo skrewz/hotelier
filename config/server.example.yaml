@@ -113,7 +113,8 @@ log_retention_days: 14
 # browser may fetch it directly; hotelier fetches on the browser's behalf:
 # one call to /api/v1/users/<login>, one GET of the avatar_url it names.
 # The fetch resizes once and stores the small render keyed by login, so the
-# email-hash in the avatar URL is never a stored key.
+# email-hash in the avatar URL is never a stored key. That render stays until
+# the file is removed; revalidation is issue #276.
 #
 # Leaving forge_url empty configures the proxy off: the route answers 503,
 # which stays distinct from a 404 for an identity the forge does not know.
