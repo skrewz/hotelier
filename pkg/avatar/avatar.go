@@ -114,8 +114,11 @@ type miss struct {
 // negativeTTL is how long a miss is remembered. Long enough that a dashboard
 // render of an identity without a face costs one round trip rather than one
 // per request, short enough that a login created or repaired after the miss is
-// not shut out for longer than a reload cycle. Cache policy in full is issue
-// #276's; this is only the failure discipline of this route.
+// not shut out for longer than a reload cycle. The window covers misses the
+// forge actually gave us: a request the viewer abandoned, or one this client
+// ran out of time on, is not a verdict on the identity and is not remembered
+// (see abandoned). Cache policy in full is issue #276's; this is only the
+// failure discipline of this route.
 const negativeTTL = 60 * time.Second
 
 // negativeMaxEntries bounds what a stream of invented logins can hold in
@@ -232,10 +235,22 @@ func (p *Proxy) resolve(ctx context.Context, login string) ([]byte, int, error) 
 	data, status, err := p.fetch(ctx, login)
 	if status == http.StatusOK {
 		delete(p.neg, login)
-	} else {
+	} else if !abandoned(err) {
 		p.rememberMiss(login, status)
 	}
 	return data, status, err
+}
+
+// abandoned reports whether a miss's cause is this request rather than the
+// forge. A handler's context is cancelled when the client's connection closes
+// (net/http cancels it when a browser drops an in-flight <img>, and
+// Server.Shutdown cancels whatever is still running), and the client's own
+// 15s timeout surfaces as a deadline the forge never caused. Either way the
+// forge was never asked, so remembering the 502 would hand one viewer's
+// aborted page render to every other viewer of a healthy login as a minute of
+// empty faces.
+func abandoned(err error) bool {
+	return errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)
 }
 
 // rememberMiss records the status a miss earned, keeping the store bounded by

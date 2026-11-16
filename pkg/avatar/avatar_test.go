@@ -2,6 +2,7 @@ package avatar
 
 import (
 	"bytes"
+	"context"
 	"crypto/tls"
 	"encoding/binary"
 	"encoding/json"
@@ -711,6 +712,56 @@ func TestServeRemembersAnUpstreamFailure(t *testing.T) {
 	}
 	if got := f.apiHits.Load(); got != 1 {
 		t.Errorf("API hits = %d, want 1", got)
+	}
+}
+
+// A request whose own context was cancelled is this server's business, not
+// the forge's: an <img> a dashboard dropped mid-load, a Shutdown. Ending that
+// fetch must not write a minute of 502s over a healthy login for everyone
+// else, so the abandoned request keeps its miss to itself.
+func TestServeACancelledRequestIsNotRemembered(t *testing.T) {
+	f := newForgeStub(t)
+	held := make(chan struct{}, 1)
+	var holdMu sync.Mutex
+	var holding bool
+	orig := f.srv.Config.Handler
+	f.srv.Config.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasPrefix(r.URL.Path, "/api/v1/users/") {
+			holdMu.Lock()
+			first := !holding
+			holding = true
+			holdMu.Unlock()
+			if first {
+				held <- struct{}{} // the first round trip is under way
+				<-r.Context().Done()
+			}
+		}
+		orig.ServeHTTP(w, r)
+	})
+	p, dir := newProxy(t, f)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	result := make(chan *httptest.ResponseRecorder, 1)
+	go func() {
+		rec := httptest.NewRecorder()
+		p.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, PathPrefix+"alice", nil).WithContext(ctx))
+		result <- rec
+	}()
+	<-held
+	cancel() // the re-render closed the connection this request rode on
+	rec := <-result
+	if rec.Code == http.StatusOK {
+		t.Fatal("an abandoned request was answered with a tile, want its own miss")
+	}
+
+	// The next viewer of that same healthy login must pay for the round trip
+	// the first one walked away from, not inherit its failure.
+	if code := get(p, "alice").Code; code != http.StatusOK {
+		t.Fatalf("the next viewer got %d with %d API hits: an abandoned request was remembered as an upstream failure",
+			code, f.apiHits.Load())
+	}
+	if files := storeFiles(t, dir); len(files) != 1 || files[0] != "alice.png" {
+		t.Errorf("store = %v, want the tile the second request fetched", files)
 	}
 }
 
