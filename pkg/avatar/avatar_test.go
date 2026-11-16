@@ -90,13 +90,11 @@ func writePNGChunk(buf *bytes.Buffer, kind string, data []byte) {
 // allocation: the byte cap bounds the wire, and the header a decoder reads
 // before it allocates is the source's own claim about its dimensions.
 func TestNormaliseRefusesOverlargeDeclaredDimensions(t *testing.T) {
-	p, _ := newProxy(t, newForgeStub(t))
-
-	if _, err := p.normalise(pngHeaderClaiming(t, 20000, 20000)); !errors.Is(err, errTooLarge) {
+	if _, err := normalise(pngHeaderClaiming(t, 20000, 20000)); !errors.Is(err, errTooLarge) {
 		t.Fatalf("err = %v, want errTooLarge", err)
 	}
 	// The source dimensions the issue says the forge returns stay well inside.
-	if _, err := p.normalise(encodePNG(t, 592, 592)); err != nil {
+	if _, err := normalise(encodePNG(t, 592, 592)); err != nil {
 		t.Errorf("normalise of a 592x592 source: %v, want no error", err)
 	}
 }

@@ -137,8 +137,10 @@ type miss struct {
 const negativeTTL = 60 * time.Second
 
 // negativeMaxEntries bounds what a stream of invented logins can hold in
-// memory. Evicting the entry due to expire soonest keeps the bound exact while
-// discarding the memories that were closest to being worthless anyway.
+// memory. Nothing in the brief says which remembered miss dies when the memory
+// is full, so the whole of it is dropped rather than a victim chosen: the
+// difference from the finer rule is at most one extra round trip per login in
+// the next window.
 const negativeMaxEntries = 4096
 
 // New validates the configuration and builds the proxy.
@@ -310,8 +312,9 @@ func abandoned(err error) bool {
 	return errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)
 }
 
-// rememberMiss records the status a miss earned, keeping the store bounded by
-// dropping expired entries first and then the entry due to expire soonest.
+// rememberMiss records the status a miss earned, keeping the memory bounded by
+// recycling expired entries first and dropping it whole when none have
+// expired.
 func (p *Proxy) rememberMiss(login string, status int) {
 	now := time.Now()
 	if len(p.neg) >= negativeMaxEntries {
@@ -320,15 +323,9 @@ func (p *Proxy) rememberMiss(login string, status int) {
 				delete(p.neg, name)
 			}
 		}
-	}
-	if len(p.neg) >= negativeMaxEntries {
-		soonest, victim := now.Add(time.Hour), ""
-		for name, m := range p.neg {
-			if m.expires.Before(soonest) {
-				soonest, victim = m.expires, name
-			}
+		if len(p.neg) >= negativeMaxEntries {
+			clear(p.neg)
 		}
-		delete(p.neg, victim)
 	}
 	p.neg[login] = miss{status: status, expires: now.Add(negativeTTL)}
 }
@@ -411,7 +408,7 @@ func (p *Proxy) fetch(ctx context.Context, login string) ([]byte, int, error) {
 	if err != nil {
 		return fail(http.StatusBadGateway, "reading GET %s: %w", imgURL, err)
 	}
-	render, err := p.normalise(body)
+	render, err := normalise(body)
 	if err != nil {
 		return fail(http.StatusBadGateway, "GET %s: %w", imgURL, err)
 	}
@@ -441,7 +438,7 @@ var errTooLarge = errors.New("avatar declares too many pixels")
 // transparent square, re-encoded as PNG. Generated identicons pass through
 // as ordinary avatars (decision recorded on the tracker): the API exposes
 // no "has explicit avatar" signal, so suppression would be guesswork.
-func (p *Proxy) normalise(body []byte) ([]byte, error) {
+func normalise(body []byte) ([]byte, error) {
 	// Read the header before decoding: the dimensions a file claims are what
 	// the decoder would allocate, and honouring an unchecked claim would let
 	// a few hundred bytes cost hundreds of megabytes.
