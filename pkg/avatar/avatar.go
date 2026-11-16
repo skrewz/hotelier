@@ -78,6 +78,11 @@ type Config struct {
 	// one without the other is a configuration error.
 	ClientCert string
 	ClientKey  string
+	// Logf receives one quiet line per miss that reached the forge, naming
+	// the login, the upstream and the cause. The response the browser sees
+	// is the same short line either way; this is what makes "no faces on the
+	// dashboard" answerable from the journal. Nil keeps the proxy silent.
+	Logf func(format string, args ...any)
 }
 
 // Proxy serves normalised avatar tiles for forge logins.
@@ -93,6 +98,8 @@ type Proxy struct {
 	// caller cannot keep the forge's certificate-authenticated path hot one
 	// login at a time. Guarded by mu.
 	neg map[string]miss
+	// logf is never nil; New gives it a sink that discards.
+	logf func(format string, args ...any)
 }
 
 // miss is a remembered absence: the status the identity earned, and when the
@@ -138,7 +145,11 @@ func New(cfg Config) (*Proxy, error) {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return nil, fmt.Errorf("create avatar cache dir: %w", err)
 	}
-	return &Proxy{
+	logf := cfg.Logf
+	if logf == nil {
+		logf = func(string, ...any) {}
+	}
+	p := &Proxy{
 		forge: u,
 		client: &http.Client{
 			Transport: transport,
@@ -152,7 +163,9 @@ func New(cfg Config) (*Proxy, error) {
 		},
 		cacheDir: dir,
 		neg:      map[string]miss{},
-	}, nil
+		logf:     logf,
+	}
+	return p, nil
 }
 
 // ServeHTTP serves GET /avatar/<login>.
@@ -173,7 +186,13 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	data, status := p.resolve(r.Context(), login)
+	data, status, err := p.resolve(r.Context(), login)
+	if err != nil {
+		// The browser gets the same short line it always got; the journal
+		// gets the cause. A miss that was merely remembered says nothing,
+		// because it was said when it happened.
+		p.logf("avatar miss for %q: %v", login, err)
+	}
 	switch status {
 	case http.StatusOK:
 		writeTile(w, data)
@@ -198,7 +217,7 @@ func writeTile(w http.ResponseWriter, data []byte) {
 // resolve answers a login from the store, from the memory of a recent miss, or
 // by fetching. It is the only path to the forge, and it holds mu throughout so
 // a queue of viewers for one login costs one round trip.
-func (p *Proxy) resolve(ctx context.Context, login string) ([]byte, int) {
+func (p *Proxy) resolve(ctx context.Context, login string) ([]byte, int, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
@@ -206,19 +225,19 @@ func (p *Proxy) resolve(ctx context.Context, login string) ([]byte, int) {
 	// for the same login must be served from what that fetch stored, not
 	// launch its own round trip.
 	if data, err := os.ReadFile(filepath.Join(p.cacheDir, login+".png")); err == nil {
-		return data, http.StatusOK
+		return data, http.StatusOK, nil
 	}
 	if m, ok := p.neg[login]; ok && time.Now().Before(m.expires) {
-		return nil, m.status
+		return nil, m.status, nil
 	}
 
-	data, status := p.fetch(ctx, login)
+	data, status, err := p.fetch(ctx, login)
 	if status == http.StatusOK {
 		delete(p.neg, login)
 	} else {
 		p.rememberMiss(login, status)
 	}
-	return data, status
+	return data, status, err
 }
 
 // rememberMiss records the status a miss earned, keeping the store bounded by
@@ -246,41 +265,53 @@ func (p *Proxy) rememberMiss(login string, status int) {
 
 // fetch performs the two-request round trip, stores the render, and returns
 // the status this request deserves: 200 with the tile, 404 for an identity
-// the forge does not know, or 502 for every other miss. No failure path
+// the forge does not know, or 502 for every other miss, and the cause of a
+// miss for the log — the response body never carries it. No failure path
 // stores anything. Callers reach it through resolve, which holds mu.
-func (p *Proxy) fetch(ctx context.Context, login string) ([]byte, int) {
+func (p *Proxy) fetch(ctx context.Context, login string) ([]byte, int, error) {
+	// fail names the cause behind a miss. Every return below is a different
+	// story in the journal — an expired client certificate, an ingress that
+	// answered 400 with HTML, a cache directory that went read-only — even
+	// though the browser sees one short line for all of them.
+	fail := func(status int, format string, args ...any) ([]byte, int, error) {
+		return nil, status, fmt.Errorf(format, args...)
+	}
+
 	// Request 1: the identity's avatar_url from the forge API. A 404 is
 	// absence, not unreachability; say so distinctly. Everything else
 	// non-200 (the ingress's 4xx HTML pages included) is a miss.
 	apiURL := p.forge.JoinPath("/api/v1/users/", login).String()
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, apiURL, nil)
 	if err != nil {
-		return nil, http.StatusBadGateway
+		return fail(http.StatusBadGateway, "building GET %s: %w", apiURL, err)
 	}
 	req.Header.Set("Accept", "application/json")
 	resp, err := p.client.Do(req)
 	if err != nil {
-		return nil, http.StatusBadGateway
+		return fail(http.StatusBadGateway, "GET %s: %w", apiURL, err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode == http.StatusNotFound {
-		return nil, http.StatusNotFound
+		return fail(http.StatusNotFound, "GET %s: no such identity", apiURL)
 	}
 	if resp.StatusCode != http.StatusOK {
-		return nil, http.StatusBadGateway
+		return fail(http.StatusBadGateway, "GET %s: upstream status %d", apiURL, resp.StatusCode)
 	}
 	var user struct {
 		AvatarURL string `json:"avatar_url"`
 	}
-	if err := json.NewDecoder(io.LimitReader(resp.Body, maxResponseBytes)).Decode(&user); err != nil || user.AvatarURL == "" {
-		return nil, http.StatusBadGateway
+	if err := json.NewDecoder(io.LimitReader(resp.Body, maxResponseBytes)).Decode(&user); err != nil {
+		return fail(http.StatusBadGateway, "decoding GET %s: %w", apiURL, err)
+	}
+	if user.AvatarURL == "" {
+		return fail(http.StatusBadGateway, "GET %s names no avatar_url", apiURL)
 	}
 
 	// avatar_url never points off the forge (site invariant). Enforce it:
 	// an off-origin URL is a miss and is never requested.
 	imgURL, err := p.forge.Parse(user.AvatarURL)
 	if err != nil || imgURL.Scheme != p.forge.Scheme || imgURL.Host != p.forge.Host {
-		return nil, http.StatusBadGateway
+		return fail(http.StatusBadGateway, "avatar_url %q is not on the forge origin %s", user.AvatarURL, p.forge.Host)
 	}
 
 	// Request 2: the image itself. Redirects are not chased (the client is
@@ -288,35 +319,35 @@ func (p *Proxy) fetch(ctx context.Context, login string) ([]byte, int) {
 	// non-200 miss.
 	imgReq, err := http.NewRequestWithContext(ctx, http.MethodGet, imgURL.String(), nil)
 	if err != nil {
-		return nil, http.StatusBadGateway
+		return fail(http.StatusBadGateway, "building GET %s: %w", imgURL, err)
 	}
 	imgResp, err := p.client.Do(imgReq)
 	if err != nil {
-		return nil, http.StatusBadGateway
+		return fail(http.StatusBadGateway, "GET %s: %w", imgURL, err)
 	}
 	defer imgResp.Body.Close()
 	if imgResp.StatusCode != http.StatusOK {
-		return nil, http.StatusBadGateway
+		return fail(http.StatusBadGateway, "GET %s: upstream status %d", imgURL, imgResp.StatusCode)
 	}
 	// Validate the content type before anything is written: the ingress
 	// answers some failures 200-shaped with HTML, and a non-image is a
 	// miss, never a body.
 	mediaType, _, err := mime.ParseMediaType(imgResp.Header.Get("Content-Type"))
 	if err != nil || !acceptedImageTypes[mediaType] {
-		return nil, http.StatusBadGateway
+		return fail(http.StatusBadGateway, "GET %s: content type %q is not an image", imgURL, imgResp.Header.Get("Content-Type"))
 	}
 	body, err := io.ReadAll(io.LimitReader(imgResp.Body, maxResponseBytes))
 	if err != nil {
-		return nil, http.StatusBadGateway
+		return fail(http.StatusBadGateway, "reading GET %s: %w", imgURL, err)
 	}
 	render, err := p.normalise(body)
 	if err != nil {
-		return nil, http.StatusBadGateway
+		return fail(http.StatusBadGateway, "GET %s: %w", imgURL, err)
 	}
 	if err := p.store(login, render); err != nil {
-		return nil, http.StatusBadGateway
+		return fail(http.StatusBadGateway, "storing the render for %q: %w", login, err)
 	}
-	return render, http.StatusOK
+	return render, http.StatusOK, nil
 }
 
 // maxResponseBytes bounds what one upstream response may deliver; avatars

@@ -645,6 +645,52 @@ func expireMisses(p *Proxy) {
 	}
 }
 
+// A miss says why in the journal: an expired client certificate, an ingress
+// answering 400 with HTML and a read-only cache directory must not read alike
+// to whoever is asked why the dashboard has no faces. The response stays the
+// same short line, and a miss that was only remembered says nothing again.
+func TestServeLogsTheCauseOfAMiss(t *testing.T) {
+	f := newForgeStub(t)
+	f.mu.Lock()
+	f.apiStatus = http.StatusBadRequest
+	f.mu.Unlock()
+
+	var mu sync.Mutex
+	var lines []string
+	p, err := New(Config{
+		ForgeURL: f.srv.URL,
+		CacheDir: t.TempDir(),
+		Logf: func(format string, args ...any) {
+			mu.Lock()
+			defer mu.Unlock()
+			lines = append(lines, fmt.Sprintf(format, args...))
+		},
+	})
+	if err != nil {
+		t.Fatalf("avatar.New: %v", err)
+	}
+
+	if code := get(p, "alice").Code; code != http.StatusBadGateway {
+		t.Fatalf("status = %d, want 502", code)
+	}
+	mu.Lock()
+	logged := strings.Join(lines, "\n")
+	mu.Unlock()
+	if !strings.Contains(logged, "alice") || !strings.Contains(logged, "400") {
+		t.Errorf("log = %q, want the login and the upstream cause", logged)
+	}
+
+	mu.Lock()
+	before := len(lines)
+	mu.Unlock()
+	get(p, "alice")
+	mu.Lock()
+	defer mu.Unlock()
+	if len(lines) != before {
+		t.Errorf("a remembered miss logged %d further lines, want 0", len(lines)-before)
+	}
+}
+
 // New refuses a ForgeURL that cannot be an absolute http(s) origin: a proxy
 // that could never reach the forge must not start in a half-life.
 func TestNewRejectsUnusableForgeURL(t *testing.T) {

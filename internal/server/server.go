@@ -795,6 +795,7 @@ func New(cfg config.ServerConfig) *Server {
 			CacheDir:   cfg.AvatarCacheDir,
 			ClientCert: cfg.ForgeClientCert,
 			ClientKey:  cfg.ForgeClientKey,
+			Logf:       logger.Printf,
 		})
 		if err != nil {
 			logger.Printf("avatar proxy disabled: %v", err)
