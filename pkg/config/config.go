@@ -2,6 +2,7 @@ package config
 
 import (
 	"crypto/tls"
+	"errors"
 	"fmt"
 	"net"
 	"net/url"
@@ -695,22 +696,38 @@ func validateHomeCopies(entries []string) error {
 // Returns nil if neither ClientCert nor ClientKey is set.
 // Returns an error if the cert or key files cannot be read.
 func (g *GuestConfig) TLSConfig() (*tls.Config, error) {
-	if g.ClientCert == "" && g.ClientKey == "" {
+	return clientTLSConfig(g.ClientCert, g.ClientKey)
+}
+
+// TLSConfig builds a *tls.Config for the mTLS pair the forge's ingress
+// demands when hotelier fetches avatars (issue #275). Returns nil if neither
+// ForgeClientCert nor ForgeClientKey is set; an error if only one is set, or
+// if the pair cannot be read.
+func (s *ServerConfig) TLSConfig() (*tls.Config, error) {
+	return clientTLSConfig(s.ForgeClientCert, s.ForgeClientKey)
+}
+
+// clientTLSConfig is the one place this program turns a client certificate
+// pair into a *tls.Config. Both callers present a long-lived service identity,
+// so the protocol floor is stated here rather than left to whichever default
+// crypto/tls happens to carry when this file is next edited: Go's current
+// client minimum is TLS 1.2, and spelling it out keeps that intent through a
+// Go upgrade or a refactor of the transports that consume it.
+func clientTLSConfig(certPath, keyPath string) (*tls.Config, error) {
+	if certPath == "" && keyPath == "" {
 		return nil, nil
 	}
-
-	if g.ClientCert == "" || g.ClientKey == "" {
-		return nil, os.ErrInvalid
+	if certPath == "" || keyPath == "" {
+		return nil, errors.New("client cert and key must be set together")
 	}
-
-	cert, err := tls.LoadX509KeyPair(g.ClientCert, g.ClientKey)
+	cert, err := tls.LoadX509KeyPair(certPath, keyPath)
 	if err != nil {
 		return nil, fmt.Errorf("load client cert/key: %w", err)
 	}
-
 	return &tls.Config{
 		Certificates: []tls.Certificate{cert},
 		RootCAs:      nil, // trust system CAs
+		MinVersion:   tls.VersionTLS12,
 	}, nil
 }
 

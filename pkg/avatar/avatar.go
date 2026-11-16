@@ -73,11 +73,13 @@ type Config struct {
 	ForgeURL string
 	// CacheDir is the directory holding one PNG per login.
 	CacheDir string
-	// ClientCert and ClientKey are the paths of the mTLS client pair the
-	// forge's ingress demands. Both empty means no client certificate;
-	// one without the other is a configuration error.
-	ClientCert string
-	ClientKey  string
+	// TLSClientConfig is the transport configuration for the forge hop: nil
+	// to present no client certificate, otherwise the pair the forge's
+	// ingress demands, built by config.ServerConfig.TLSConfig so the pair
+	// has one home (issue #275). A non-nil config carrying a certificate
+	// over a plain http forge_url is refused: the credential would be
+	// dropped on the floor without a word.
+	TLSClientConfig *tls.Config
 	// Logf receives one quiet line per miss that reached the forge, naming
 	// the login, the upstream and the cause. The response the browser sees
 	// is the same short line either way; this is what makes "no faces on the
@@ -127,16 +129,12 @@ func New(cfg Config) (*Proxy, error) {
 	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
 		return nil, fmt.Errorf("forge_url %q is not an absolute http(s) origin", cfg.ForgeURL)
 	}
-	if (cfg.ClientCert == "") != (cfg.ClientKey == "") {
-		return nil, fmt.Errorf("forge client cert and key must be set together")
-	}
 	transport := http.DefaultTransport.(*http.Transport).Clone()
-	if cfg.ClientCert != "" {
-		cert, err := tls.LoadX509KeyPair(cfg.ClientCert, cfg.ClientKey)
-		if err != nil {
-			return nil, fmt.Errorf("load forge client cert/key: %w", err)
+	if cfg.TLSClientConfig != nil {
+		if u.Scheme != "https" {
+			return nil, fmt.Errorf("forge_url %q is not https, so a forge client certificate would never be presented", cfg.ForgeURL)
 		}
-		transport.TLSClientConfig = &tls.Config{Certificates: []tls.Certificate{cert}}
+		transport.TLSClientConfig = cfg.TLSClientConfig.Clone()
 	}
 	dir := cfg.CacheDir
 	if dir == "" {

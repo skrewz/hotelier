@@ -790,18 +790,22 @@ func New(cfg config.ServerConfig) *Server {
 	// way the disk log store's failures are: the dashboard keeps serving
 	// without faces rather than the process failing over a picture.
 	if cfg.ForgeURL != "" {
-		proxy, err := avatar.New(avatar.Config{
-			ForgeURL:   cfg.ForgeURL,
-			CacheDir:   cfg.AvatarCacheDir,
-			ClientCert: cfg.ForgeClientCert,
-			ClientKey:  cfg.ForgeClientKey,
-			Logf:       logger.Printf,
-		})
+		forgeTLS, err := cfg.TLSConfig()
 		if err != nil {
 			logger.Printf("avatar proxy disabled: %v", err)
 		} else {
-			s.avatar = proxy
-			logger.Printf("avatar proxy enabled: %s -> %s", avatar.PathPrefix, cfg.ForgeURL)
+			proxy, err := avatar.New(avatar.Config{
+				ForgeURL:        cfg.ForgeURL,
+				CacheDir:        cfg.AvatarCacheDir,
+				TLSClientConfig: forgeTLS,
+				Logf:            logger.Printf,
+			})
+			if err != nil {
+				logger.Printf("avatar proxy disabled: %v", err)
+			} else {
+				s.avatar = proxy
+				logger.Printf("avatar proxy enabled: %s -> %s", avatar.PathPrefix, cfg.ForgeURL)
+			}
 		}
 	}
 

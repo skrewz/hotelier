@@ -2,6 +2,7 @@ package avatar
 
 import (
 	"bytes"
+	"crypto/tls"
 	"encoding/binary"
 	"encoding/json"
 	"errors"
@@ -688,6 +689,20 @@ func TestServeLogsTheCauseOfAMiss(t *testing.T) {
 	defer mu.Unlock()
 	if len(lines) != before {
 		t.Errorf("a remembered miss logged %d further lines, want 0", len(lines)-before)
+	}
+}
+
+// A client certificate over a plain http forge_url would be dropped without a
+// word, so the pairing is refused rather than quietly degraded to an
+// unauthenticated hop.
+func TestNewRefusesClientCertificateOverPlainHTTP(t *testing.T) {
+	_, err := New(Config{
+		ForgeURL:        "http://forge.example.com",
+		CacheDir:        t.TempDir(),
+		TLSClientConfig: &tls.Config{Certificates: []tls.Certificate{{}}},
+	})
+	if err == nil {
+		t.Fatal("New with a cert pair over http succeeded, want an error")
 	}
 }
 
