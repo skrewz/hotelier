@@ -793,23 +793,7 @@ func TestServeRemembersAnUpstreamFailure(t *testing.T) {
 // else, so the abandoned request keeps its miss to itself.
 func TestServeACancelledRequestIsNotRemembered(t *testing.T) {
 	f := newForgeStub(t)
-	held := make(chan struct{}, 1)
-	var holdMu sync.Mutex
-	var holding bool
-	orig := f.srv.Config.Handler
-	f.srv.Config.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if strings.HasPrefix(r.URL.Path, "/api/v1/users/") {
-			holdMu.Lock()
-			first := !holding
-			holding = true
-			holdMu.Unlock()
-			if first {
-				held <- struct{}{} // the first round trip is under way
-				<-r.Context().Done()
-			}
-		}
-		orig.ServeHTTP(w, r)
-	})
+	arrived := parkFirstAPIRoundTrip(t, f)
 	p, dir := newProxy(t, f)
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -819,7 +803,7 @@ func TestServeACancelledRequestIsNotRemembered(t *testing.T) {
 		p.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, PathPrefix+"alice", nil).WithContext(ctx))
 		result <- rec
 	}()
-	<-held
+	awaitArrival(t, arrived)
 	cancel() // the re-render closed the connection this request rode on
 	rec := <-result
 	if rec.Code == http.StatusOK {
@@ -834,6 +818,236 @@ func TestServeACancelledRequestIsNotRemembered(t *testing.T) {
 	}
 	if files := storeFiles(t, dir); len(files) != 1 || files[0] != "alice.png" {
 		t.Errorf("store = %v, want the tile the second request fetched", files)
+	}
+}
+
+// parkFirstAPIRoundTrip parks the stub's first API request until that request's
+// own context is done, and signals when it arrives. A test can then be certain a
+// fetch is in flight — the login's flight is registered before the round trip
+// starts and retired only when it ends — and can decide what becomes of it.
+func parkFirstAPIRoundTrip(t *testing.T, f *forgeStub) (arrived chan struct{}) {
+	t.Helper()
+	arrived = make(chan struct{}, 1)
+	var mu sync.Mutex
+	var parked bool
+	orig := f.srv.Config.Handler
+	f.srv.Config.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasPrefix(r.URL.Path, "/api/v1/users/") {
+			mu.Lock()
+			first := !parked
+			parked = true
+			mu.Unlock()
+			if first {
+				arrived <- struct{}{}
+				<-r.Context().Done()
+			}
+		}
+		orig.ServeHTTP(w, r)
+	})
+	return arrived
+}
+
+// awaitArrival blocks until a parked round trip says it is under way. The wait is
+// bounded so that a fetch which never reached the stub fails the test rather than
+// hanging it.
+func awaitArrival(t *testing.T, arrived chan struct{}) {
+	t.Helper()
+	select {
+	case <-arrived:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the fetch never reached the stub")
+	}
+}
+
+// A viewer queued behind a fetch its leader abandoned looks again rather than
+// inheriting a miss nobody was answered: the queue must not be a second route to
+// the bug the last round closed, where one aborted page render left every other
+// viewer of a healthy login with a minute of 502s. The leader is on a deadline,
+// which is also the room the queued viewers have to reach the wait they are meant
+// to be in, and nothing waits on that clock: the test waits on the stub's signal
+// and then on the leader's own response.
+func TestServeViewerQueuedBehindAnAbandonedFetchDoesNotInheritItsMiss(t *testing.T) {
+	f := newForgeStub(t)
+	arrived := parkFirstAPIRoundTrip(t, f)
+	p, dir := newProxy(t, f)
+
+	leaderCtx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	defer cancel()
+	leader := make(chan int, 1)
+	go func() {
+		rec := httptest.NewRecorder()
+		p.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, PathPrefix+"alice", nil).WithContext(leaderCtx))
+		leader <- rec.Code
+	}()
+	// The leader's fetch is under way, so its flight is on the map and any
+	// viewer started now can only queue behind it.
+	awaitArrival(t, arrived)
+
+	const viewers = 4
+	codes := make([]int, viewers)
+	var wg sync.WaitGroup
+	for i := range codes {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			codes[i] = get(p, "alice").Code
+		}()
+	}
+
+	leaderCode := <-leader
+	wg.Wait()
+	if leaderCode == http.StatusOK {
+		t.Fatal("the abandoned leader was answered with a tile, want its own miss")
+	}
+	for i, code := range codes {
+		if code != http.StatusOK {
+			t.Fatalf("viewer %d: status = %d, want 200: a queued viewer inherited an abandoned fetch's miss", i, code)
+		}
+	}
+	if got := f.apiHits.Load(); got != 2 {
+		t.Errorf("API hits = %d, want 2: the leader's aborted round trip and one fetch the viewers shared", got)
+	}
+	if names := storeFiles(t, dir); len(names) != 1 || names[0] != "alice.png" {
+		t.Errorf("store = %v, want the tile the viewers fetched once", names)
+	}
+}
+
+// The other exit a queued viewer has is leaving itself. That must not answer from
+// the fetch it walked away from — which never got an answer to hand on — and it
+// must not stop that fetch either: the leader finishes for whoever is still
+// there, and the next viewer finds the render on disk.
+func TestServeViewerWhoLeavesKeepsItsOwnMissAndTheFetchCarriesOn(t *testing.T) {
+	f := newForgeStub(t)
+	// release lets the parked round trip go, whether the test reaches the point
+	// of wanting it or fails before then and leaves the cleanup to do it.
+	releaseCh := make(chan struct{})
+	var releaseOnce sync.Once
+	release := func() { releaseOnce.Do(func() { close(releaseCh) }) }
+	defer release()
+	arrived := make(chan struct{}, 1)
+	var mu sync.Mutex
+	var parked bool
+	orig := f.srv.Config.Handler
+	f.srv.Config.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasPrefix(r.URL.Path, "/api/v1/users/") {
+			mu.Lock()
+			first := !parked
+			parked = true
+			mu.Unlock()
+			if first {
+				arrived <- struct{}{}
+				select {
+				case <-releaseCh:
+				case <-r.Context().Done(): // the leader left too, which this test is not about
+				}
+			}
+		}
+		orig.ServeHTTP(w, r)
+	})
+	p, dir := newProxy(t, f)
+
+	leader := make(chan int, 1)
+	go func() {
+		rec := httptest.NewRecorder()
+		p.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, PathPrefix+"alice", nil))
+		leader <- rec.Code
+	}()
+	awaitArrival(t, arrived) // the leader is in its round trip, so the next viewer can only queue
+
+	// This viewer's connection is already closed by the time it reaches the
+	// wait: a browser that gave up on an <img> before its tile came back.
+	leftCtx, cancelLeft := context.WithCancel(context.Background())
+	cancelLeft()
+	left := httptest.NewRecorder()
+	p.ServeHTTP(left, httptest.NewRequest(http.MethodGet, PathPrefix+"alice", nil).WithContext(leftCtx))
+	if left.Code != http.StatusBadGateway {
+		t.Fatalf("the viewer who left got %d, want 502: absence was claimed where nothing was answered", left.Code)
+	}
+
+	release()
+	if code := <-leader; code != http.StatusOK {
+		t.Fatalf("leader: status = %d, want 200: one viewer leaving broke the fetch it shared", code)
+	}
+	if names := storeFiles(t, dir); len(names) != 1 || names[0] != "alice.png" {
+		t.Fatalf("store = %v, want the render the leader stored", names)
+	}
+	if code := get(p, "alice").Code; code != http.StatusOK {
+		t.Fatalf("the next viewer: status = %d, want 200 from the render the leader finished", code)
+	}
+	if got := f.apiHits.Load(); got != 1 {
+		t.Errorf("API hits = %d, want 1: a viewer leaving must not cost another round trip", got)
+	}
+}
+
+// Whose clock ran out decides what a miss says about the identity. The client's
+// timeout firing on a forge that never answered is a fact about the forge, and
+// the memory exists so a degraded upstream is probed once per window rather than
+// once per inbound request; a deadline on the viewer's own request is not a
+// verdict at all, and the next viewer of that login still gets a fetch.
+func TestServeRemembersAMissUnlessTheViewerStoppedIt(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		// exactly one of these is the clock that expires
+		clientTimeout    time.Duration
+		viewerDeadline   time.Duration
+		wantFirst        int
+		wantAPIHitsAfter int
+		wantSecond       int
+	}{
+		{
+			name:             "this client timed out on a forge that never answered",
+			clientTimeout:    250 * time.Millisecond,
+			wantFirst:        http.StatusBadGateway,
+			wantAPIHitsAfter: 1,
+			wantSecond:       http.StatusBadGateway,
+		},
+		{
+			name:             "the viewer's own request ran out of time",
+			viewerDeadline:   250 * time.Millisecond,
+			wantFirst:        http.StatusBadGateway,
+			wantAPIHitsAfter: 2,
+			wantSecond:       http.StatusOK,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newForgeStub(t)
+			arrived := parkFirstAPIRoundTrip(t, f)
+			p, _ := newProxy(t, f)
+			if tc.clientTimeout > 0 {
+				// This row is about that timeout, so the test shortens the clock New
+				// sets rather than waiting 15s on it.
+				p.client.Timeout = tc.clientTimeout
+			}
+
+			ctx := context.Background()
+			if tc.viewerDeadline > 0 {
+				var cancel context.CancelFunc
+				ctx, cancel = context.WithTimeout(ctx, tc.viewerDeadline)
+				defer cancel()
+			}
+			req := httptest.NewRequest(http.MethodGet, PathPrefix+"alice", nil).WithContext(ctx)
+			done := make(chan *httptest.ResponseRecorder, 1)
+			go func() {
+				rec := httptest.NewRecorder()
+				p.ServeHTTP(rec, req)
+				done <- rec
+			}()
+			awaitArrival(t, arrived)
+			// However the first request ends, it is over before the second is made:
+			// whichever clock expires cancels the round trip the stub is parked on,
+			// and the parked handler returns on that.
+			first := <-done
+			if first.Code != tc.wantFirst {
+				t.Fatalf("first status = %d, want %d", first.Code, tc.wantFirst)
+			}
+
+			if code := get(p, "alice").Code; code != tc.wantSecond {
+				t.Errorf("second status = %d, want %d", code, tc.wantSecond)
+			}
+			if got := int(f.apiHits.Load()); got != tc.wantAPIHitsAfter {
+				t.Errorf("API hits = %d, want %d", got, tc.wantAPIHitsAfter)
+			}
+		})
 	}
 }
 

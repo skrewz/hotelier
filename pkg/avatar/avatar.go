@@ -117,6 +117,10 @@ type flight struct {
 	data   []byte
 	status int
 	err    error
+	// abandoned says the fetch was ended by a viewer's own request rather than
+	// by the forge, so it carries no verdict: a viewer still queued behind it
+	// looks again rather than inheriting a miss nobody was answered.
+	abandoned bool
 }
 
 // miss is a remembered absence: the status the identity earned, and when the
@@ -130,17 +134,13 @@ type miss struct {
 // render of an identity without a face costs one round trip rather than one
 // per request, short enough that a login created or repaired after the miss is
 // not shut out for longer than a reload cycle. The window covers misses the
-// forge actually gave us: a request the viewer abandoned, or one this client
-// ran out of time on, is not a verdict on the identity and is not remembered
-// (see abandoned). Cache policy in full is issue #276's; this is only the
-// failure discipline of this route.
+// forge actually gave us: a request the viewer abandoned is not a verdict on
+// the identity and is not remembered (see Proxy.settle). Cache policy in full
+// is issue #276's; this is only the failure discipline of this route.
 const negativeTTL = 60 * time.Second
 
 // negativeMaxEntries bounds what a stream of invented logins can hold in
-// memory. Nothing in the brief says which remembered miss dies when the memory
-// is full, so the whole of it is dropped rather than a victim chosen: the
-// difference from the finer rule is at most one extra round trip per login in
-// the next window.
+// memory.
 const negativeMaxEntries = 4096
 
 // New validates the configuration and builds the proxy.
@@ -199,8 +199,7 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	path := filepath.Join(p.cacheDir, login+".png")
-	if data, err := os.ReadFile(path); err == nil {
+	if data, err := os.ReadFile(p.entry(login)); err == nil {
 		writeTile(w, data)
 		return
 	}
@@ -246,7 +245,7 @@ func (p *Proxy) resolve(ctx context.Context, login string) ([]byte, int, error) 
 		// the store is what keeps a queued caller from paying for a round trip
 		// the fetch it waited on has already made.
 		p.mu.Lock()
-		if data, err := os.ReadFile(filepath.Join(p.cacheDir, login+".png")); err == nil {
+		if data, err := os.ReadFile(p.entry(login)); err == nil {
 			p.mu.Unlock()
 			return data, http.StatusOK, nil
 		}
@@ -270,7 +269,7 @@ func (p *Proxy) resolve(ctx context.Context, login string) ([]byte, int, error) 
 				// whoever stayed, and leaving is no verdict on the login.
 				return nil, http.StatusBadGateway, ctx.Err()
 			}
-			if abandoned(f.err) {
+			if f.abandoned {
 				// The request that led the shared fetch was cancelled before the
 				// forge answered, so it has nothing to hand on. Look again: the
 				// store if it got that far, otherwise a fetch of this viewer's.
@@ -280,36 +279,37 @@ func (p *Proxy) resolve(ctx context.Context, login string) ([]byte, int, error) 
 		}
 
 		data, status, err := p.fetch(ctx, login)
-		p.settle(login, f, data, status, err)
+		p.settle(ctx, login, f, data, status, err)
 		return data, status, err
 	}
 }
 
 // settle publishes a fetch's result, records an answered miss, and takes the
-// login's flight off the map so the next viewer starts from the store.
-func (p *Proxy) settle(login string, f *flight, data []byte, status int, err error) {
+// login's flight off the map so the next viewer starts from the store. ctx is
+// the context of the request that led the fetch, and it is what a miss is read
+// against: a fetch whose own request was still live asked the forge and got
+// nothing back, so the miss says something about the identity and is remembered
+// for negativeTTL — the client's 15s timeout included, since it is the forge
+// that failed to answer and a degraded upstream is exactly what the memory
+// exists to stop this route re-probing once per inbound request. A fetch ended
+// by that request's context — a browser that dropped an in-flight <img>, a
+// Server.Shutdown, a viewer-side deadline — has no answer to hand on, so it
+// keeps its 502 to itself rather than writing a minute of empty faces over a
+// healthy login.
+func (p *Proxy) settle(ctx context.Context, login string, f *flight, data []byte, status int, err error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	delete(p.flights, login)
 	if status == http.StatusOK {
 		delete(p.neg, login)
-	} else if !abandoned(err) {
-		p.rememberMiss(login, status)
+	} else {
+		f.abandoned = ctx.Err() != nil
+		if !f.abandoned {
+			p.rememberMiss(login, status)
+		}
 	}
 	f.data, f.status, f.err = data, status, err
 	close(f.done)
-}
-
-// abandoned reports whether a miss's cause is this request rather than the
-// forge. A handler's context is cancelled when the client's connection closes
-// (net/http cancels it when a browser drops an in-flight <img>, and
-// Server.Shutdown cancels whatever is still running), and the client's own
-// 15s timeout surfaces as a deadline the forge never caused. Either way the
-// forge was never asked, so remembering the 502 would hand one viewer's
-// aborted page render to every other viewer of a healthy login as a minute of
-// empty faces.
-func abandoned(err error) bool {
-	return errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)
 }
 
 // rememberMiss records the status a miss earned, keeping the memory bounded by
@@ -472,6 +472,13 @@ func normalise(body []byte) ([]byte, error) {
 	return out.Bytes(), nil
 }
 
+// entry names the file a login's render is stored in. The login is the key the
+// whole package is named after, so reads and renames must never derive it
+// separately.
+func (p *Proxy) entry(login string) string {
+	return filepath.Join(p.cacheDir, login+".png")
+}
+
 // store writes the render temp-and-rename, so a reader either sees the old
 // entry or the new one, never a partial file. A failed rename is a miss, not
 // corruption: the temp file is removed and the error returned.
@@ -489,7 +496,7 @@ func (p *Proxy) store(login string, render []byte) error {
 	if err := tmp.Close(); err != nil {
 		return fmt.Errorf("close temp render: %w", err)
 	}
-	if err := os.Rename(tmpName, filepath.Join(p.cacheDir, login+".png")); err != nil {
+	if err := os.Rename(tmpName, p.entry(login)); err != nil {
 		return fmt.Errorf("rename render into place: %w", err)
 	}
 	return nil
