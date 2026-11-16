@@ -5,6 +5,7 @@ import (
 	"encoding/binary"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"hash/crc32"
 	"image"
 	"image/color"
@@ -533,6 +534,114 @@ func TestServeConcurrentMissesFetchOnce(t *testing.T) {
 	}
 	if got := f.apiHits.Load(); got != 1 {
 		t.Errorf("API hits = %d, want 1 (one round trip for eight viewers)", got)
+	}
+}
+
+// A miss is remembered for negativeTTL: the route is unauthenticated, so
+// without that memory every inbound request for an unknown or transiently
+// broken login buys a fresh pair of requests on the forge, paid for with
+// hotelier's own client certificate.
+func TestServeRemembersUnknownIdentityBetweenRequests(t *testing.T) {
+	f := newForgeStub(t)
+	orig := f.srv.Config.Handler
+	f.srv.Config.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasPrefix(r.URL.Path, "/api/v1/users/") {
+			f.apiHits.Add(1)
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		orig.ServeHTTP(w, r)
+	})
+	p, dir := newProxy(t, f)
+
+	first := get(p, "ghost")
+	second := get(p, "ghost")
+
+	if first.Code != http.StatusNotFound || second.Code != http.StatusNotFound {
+		t.Fatalf("statuses = %d and %d, want 404 both times", first.Code, second.Code)
+	}
+	if got := f.apiHits.Load(); got != 1 {
+		t.Errorf("API hits = %d, want 1: a remembered miss costs no round trip", got)
+	}
+	if files := storeFiles(t, dir); len(files) != 0 {
+		t.Errorf("store must be empty after misses, got %v", files)
+	}
+}
+
+// The memory covers an unreachable or misbehaving forge as readily as an
+// unknown identity, so a slow upstream is re-probed once per window rather than
+// once per page render.
+func TestServeRemembersAnUpstreamFailure(t *testing.T) {
+	f := newForgeStub(t)
+	f.mu.Lock()
+	f.apiStatus = http.StatusBadRequest
+	f.mu.Unlock()
+	p, _ := newProxy(t, f)
+
+	first := get(p, "alice")
+	second := get(p, "alice")
+
+	if first.Code != http.StatusBadGateway || second.Code != http.StatusBadGateway {
+		t.Fatalf("statuses = %d and %d, want 502 both times", first.Code, second.Code)
+	}
+	if got := f.apiHits.Load(); got != 1 {
+		t.Errorf("API hits = %d, want 1", got)
+	}
+}
+
+// Remembering is not caching a verdict: once the window closes the identity is
+// looked up again, so a login created or repaired after the miss gets its face
+// without a human touching the store.
+func TestServeFetchesAgainOnceAMissExpires(t *testing.T) {
+	f := newForgeStub(t)
+	orig := f.srv.Config.Handler
+	var known atomic.Bool
+	f.srv.Config.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasPrefix(r.URL.Path, "/api/v1/users/") && !known.Load() {
+			f.apiHits.Add(1)
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		orig.ServeHTTP(w, r)
+	})
+	p, _ := newProxy(t, f)
+
+	if code := get(p, "alice").Code; code != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404", code)
+	}
+	expireMisses(p)
+	known.Store(true)
+	if code := get(p, "alice").Code; code != http.StatusOK {
+		t.Fatalf("status after the window = %d, want 200", code)
+	}
+	if got := f.apiHits.Load(); got != 2 {
+		t.Errorf("API hits = %d, want 2 (the miss was not permanent)", got)
+	}
+}
+
+// The memory is bounded: an attacker inventing logins must not convert the
+// forge's load into an unbounded allocation here either.
+func TestNegativeStoreStaysBounded(t *testing.T) {
+	p, _ := newProxy(t, newForgeStub(t))
+
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	for i := range negativeMaxEntries + 64 {
+		p.rememberMiss(fmt.Sprintf("user%06d", i), http.StatusNotFound)
+	}
+	if len(p.neg) > negativeMaxEntries {
+		t.Fatalf("negative store holds %d entries, want at most %d", len(p.neg), negativeMaxEntries)
+	}
+}
+
+// expireMisses ages every remembered miss out, standing in for the window
+// closing without the test waiting on a wall clock.
+func expireMisses(p *Proxy) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	for login, m := range p.neg {
+		m.expires = time.Now().Add(-time.Second)
+		p.neg[login] = m
 	}
 }
 

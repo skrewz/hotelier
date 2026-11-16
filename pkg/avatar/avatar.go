@@ -13,7 +13,9 @@
 // Failure discipline: status and content type are both validated before
 // anything is written. A non-image or an error body is a miss, never a
 // body. The render is written temp-and-rename, so a failed rename leaves
-// the previous entry intact rather than a half-written file.
+// the previous entry intact rather than a half-written file, and a miss is
+// remembered briefly so the route cannot be made to re-pay the forge once
+// per inbound request.
 package avatar
 
 import (
@@ -84,9 +86,33 @@ type Proxy struct {
 	client   *http.Client
 	cacheDir string
 	// mu serialises upstream fetches so a cold store cannot stampede the
-	// forge with one API plus image request per concurrent viewer.
+	// forge with one API plus image request per concurrent viewer. It also
+	// guards neg.
 	mu sync.Mutex
+	// neg remembers recent misses, keyed by login, so an unauthenticated
+	// caller cannot keep the forge's certificate-authenticated path hot one
+	// login at a time. Guarded by mu.
+	neg map[string]miss
 }
+
+// miss is a remembered absence: the status the identity earned, and when the
+// memory expires and the forge is asked again.
+type miss struct {
+	status  int
+	expires time.Time
+}
+
+// negativeTTL is how long a miss is remembered. Long enough that a dashboard
+// render of an identity without a face costs one round trip rather than one
+// per request, short enough that a login created or repaired after the miss is
+// not shut out for longer than a reload cycle. Cache policy in full is issue
+// #276's; this is only the failure discipline of this route.
+const negativeTTL = 60 * time.Second
+
+// negativeMaxEntries bounds what a stream of invented logins can hold in
+// memory. Evicting the entry due to expire soonest keeps the bound exact while
+// discarding the memories that were closest to being worthless anyway.
+const negativeMaxEntries = 4096
 
 // New validates the configuration and builds the proxy.
 func New(cfg Config) (*Proxy, error) {
@@ -125,6 +151,7 @@ func New(cfg Config) (*Proxy, error) {
 			},
 		},
 		cacheDir: dir,
+		neg:      map[string]miss{},
 	}, nil
 }
 
@@ -146,7 +173,7 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	data, status := p.fetch(r.Context(), login)
+	data, status := p.resolve(r.Context(), login)
 	switch status {
 	case http.StatusOK:
 		writeTile(w, data)
@@ -168,21 +195,60 @@ func writeTile(w http.ResponseWriter, data []byte) {
 	_, _ = w.Write(data)
 }
 
-// fetch performs the two-request round trip, stores the render, and returns
-// the status this request deserves: 200 with the tile, 404 for an identity
-// the forge does not know, or 502 for every other miss. No failure path
-// stores anything.
-func (p *Proxy) fetch(ctx context.Context, login string) ([]byte, int) {
+// resolve answers a login from the store, from the memory of a recent miss, or
+// by fetching. It is the only path to the forge, and it holds mu throughout so
+// a queue of viewers for one login costs one round trip.
+func (p *Proxy) resolve(ctx context.Context, login string) ([]byte, int) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
-	// Re-check the store under the lock: a caller that queued behind a
-	// fetch for the same login must be served from what that fetch stored,
-	// not launch its own round trip.
+	// Re-check the store under the lock: a caller that queued behind a fetch
+	// for the same login must be served from what that fetch stored, not
+	// launch its own round trip.
 	if data, err := os.ReadFile(filepath.Join(p.cacheDir, login+".png")); err == nil {
 		return data, http.StatusOK
 	}
+	if m, ok := p.neg[login]; ok && time.Now().Before(m.expires) {
+		return nil, m.status
+	}
 
+	data, status := p.fetch(ctx, login)
+	if status == http.StatusOK {
+		delete(p.neg, login)
+	} else {
+		p.rememberMiss(login, status)
+	}
+	return data, status
+}
+
+// rememberMiss records the status a miss earned, keeping the store bounded by
+// dropping expired entries first and then the entry due to expire soonest.
+func (p *Proxy) rememberMiss(login string, status int) {
+	now := time.Now()
+	if len(p.neg) >= negativeMaxEntries {
+		for name, m := range p.neg {
+			if !now.Before(m.expires) {
+				delete(p.neg, name)
+			}
+		}
+	}
+	if len(p.neg) >= negativeMaxEntries {
+		soonest, victim := now.Add(time.Hour), ""
+		for name, m := range p.neg {
+			if m.expires.Before(soonest) {
+				soonest, victim = m.expires, name
+			}
+		}
+		delete(p.neg, victim)
+	}
+	p.neg[login] = miss{status: status, expires: now.Add(negativeTTL)}
+}
+
+// fetch performs the two-request round trip, stores the render, and returns
+// the status this request deserves: 200 with the tile, 404 for an identity
+// the forge does not know, or 502 for every other miss. No failure path
+// stores anything. Callers reach it through resolve, which holds mu.
+func (p *Proxy) fetch(ctx context.Context, login string) ([]byte, int) {
 	// Request 1: the identity's avatar_url from the forge API. A 404 is
 	// absence, not unreachability; say so distinctly. Everything else
 	// non-200 (the ingress's 4xx HTML pages included) is a miss.
