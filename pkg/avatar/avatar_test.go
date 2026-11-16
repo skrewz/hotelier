@@ -10,6 +10,7 @@ import (
 	"hash/crc32"
 	"image"
 	"image/color"
+	"image/gif"
 	"image/jpeg"
 	"image/png"
 	"net/http"
@@ -506,9 +507,14 @@ func TestServeUnreachableForgeStoresNothingAndRecovers(t *testing.T) {
 func TestServeConcurrentMissesFetchOnce(t *testing.T) {
 	f := newForgeStub(t)
 	gate := make(chan struct{})
+	inFlight := make(chan struct{}, 1)
 	orig := f.srv.Config.Handler
 	f.srv.Config.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if strings.HasPrefix(r.URL.Path, "/api/v1/users/") {
+			select {
+			case inFlight <- struct{}{}:
+			default: // a second round trip: let it through and fail the count below
+			}
 			<-gate // hold the first fetch until the queue has built up
 		}
 		orig.ServeHTTP(w, r)
@@ -524,7 +530,7 @@ func TestServeConcurrentMissesFetchOnce(t *testing.T) {
 			codes[i] = get(p, "alice").Code
 		}()
 	}
-	time.Sleep(100 * time.Millisecond) // let every goroutine reach ServeHTTP
+	<-inFlight // the fetch is under way; the others are queued behind it or will find the render
 	close(gate)
 	wg.Wait()
 
@@ -535,6 +541,124 @@ func TestServeConcurrentMissesFetchOnce(t *testing.T) {
 	}
 	if got := f.apiHits.Load(); got != 1 {
 		t.Errorf("API hits = %d, want 1 (one round trip for eight viewers)", got)
+	}
+}
+
+// The issue's last verification case: a render that cannot be renamed into
+// place is a miss, not corruption. Here the entry's place is held by a
+// directory, so the store read misses, the fetch runs, and the rename fails.
+func TestServeFailedRenameIsAMissAndKeepsWhatWasThere(t *testing.T) {
+	f := newForgeStub(t)
+	dir := t.TempDir()
+	if err := os.Mkdir(filepath.Join(dir, "alice.png"), 0o755); err != nil {
+		t.Fatalf("place the entry: %v", err)
+	}
+	kept := filepath.Join(dir, "alice.png", "render")
+	if err := os.WriteFile(kept, []byte("previous render"), 0o644); err != nil {
+		t.Fatalf("place the render: %v", err)
+	}
+	p, err := New(Config{ForgeURL: f.srv.URL, CacheDir: dir})
+	if err != nil {
+		t.Fatalf("avatar.New: %v", err)
+	}
+
+	if code := get(p, "alice").Code; code != http.StatusBadGateway {
+		t.Fatalf("status = %d, want 502 when the render cannot be renamed into place", code)
+	}
+	if names := storeFiles(t, dir); len(names) != 1 || names[0] != "alice.png" {
+		t.Errorf("store = %v, want no temp file left beside what was already there", names)
+	}
+	survivor, err := os.ReadFile(kept)
+	if err != nil || string(survivor) != "previous render" {
+		t.Errorf("what the entry held = %q (%v), want it left intact", survivor, err)
+	}
+}
+
+// The other half of the discipline: a store that cannot even take the temp
+// file is a miss, and says nothing by leaving a partial file behind.
+func TestServeFailedTempCreateIsAMissAndStoresNothing(t *testing.T) {
+	f := newForgeStub(t)
+	dir := t.TempDir()
+	if err := os.Chmod(dir, 0o500); err != nil {
+		t.Fatalf("make the store read-only: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(dir, 0o755) })
+	p, err := New(Config{ForgeURL: f.srv.URL, CacheDir: dir})
+	if err != nil {
+		t.Fatalf("avatar.New: %v", err)
+	}
+
+	if code := get(p, "alice").Code; code != http.StatusBadGateway {
+		t.Fatalf("status = %d, want 502 when no temp file can be created", code)
+	}
+	if err := os.Chmod(dir, 0o755); err != nil {
+		t.Fatalf("restore the store: %v", err)
+	}
+	if names := storeFiles(t, dir); len(names) != 0 {
+		t.Errorf("store = %v, want nothing written by a failed store", names)
+	}
+}
+
+// Nothing in the suite is square by construction, but every source so far
+// was: fitting and centring only show themselves on a landscape source, where
+// stretching the source to the full square would put colour where the
+// letterboxing belongs. This is the case a doc comment promises.
+func TestServeFitsAndCentresALandscapeSource(t *testing.T) {
+	f := newForgeStub(t)
+	f.mu.Lock()
+	f.imageBody = encodePNG(t, 592, 300)
+	f.mu.Unlock()
+	p, dir := newProxy(t, f)
+
+	if code := get(p, "alice").Code; code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 for a landscape source", code)
+	}
+	stored, err := os.ReadFile(filepath.Join(dir, "alice.png"))
+	if err != nil {
+		t.Fatalf("stored render missing: %v", err)
+	}
+	img, err := png.Decode(bytes.NewReader(stored))
+	if err != nil {
+		t.Fatalf("stored render is not a PNG: %v", err)
+	}
+	if b := img.Bounds(); b.Dx() != DefaultTileSize || b.Dy() != DefaultTileSize {
+		t.Fatalf("stored render = %dx%d, want %dx%d", b.Dx(), b.Dy(), DefaultTileSize, DefaultTileSize)
+	}
+	// 592 is the edge that fits the tile exactly, so 300 lands on 32 rows
+	// centred at y=16..47: transparent above and below, opaque inside.
+	for _, y := range []int{8, 56} {
+		if _, _, _, a := img.At(0, y).RGBA(); a != 0 {
+			t.Errorf("alpha at y=%d = %d, want 0: the source was stretched, not fitted", y, a)
+		}
+	}
+	if _, _, _, a := img.At(0, 32).RGBA(); a == 0 {
+		t.Error("alpha at the centre row = 0, want the fitted source there")
+	}
+}
+
+// GIF is in the accepted set, so it must actually decode: a registered decoder
+// nobody exercises is an entry that cannot fail a test.
+func TestServeAcceptsGIFAndStoresPNG(t *testing.T) {
+	f := newForgeStub(t)
+	var buf bytes.Buffer
+	if err := gif.Encode(&buf, makeImage(400, 400), nil); err != nil {
+		t.Fatalf("encode gif: %v", err)
+	}
+	f.mu.Lock()
+	f.imageType = "image/gif"
+	f.imageBody = buf.Bytes()
+	f.mu.Unlock()
+	p, dir := newProxy(t, f)
+
+	if code := get(p, "alice").Code; code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 for a GIF source", code)
+	}
+	stored, err := os.ReadFile(filepath.Join(dir, "alice.png"))
+	if err != nil {
+		t.Fatalf("stored render missing: %v", err)
+	}
+	if _, err := png.Decode(bytes.NewReader(stored)); err != nil {
+		t.Errorf("stored render is not a PNG: %v", err)
 	}
 }
 
