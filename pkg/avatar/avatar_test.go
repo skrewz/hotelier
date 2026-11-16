@@ -111,17 +111,6 @@ func newForgeStub(t *testing.T) *forgeStub {
 	return f
 }
 
-func (f *forgeStub) set(what string, value string) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	switch what {
-	case "avatarURL":
-		f.avatarURL = value
-	case "imageType":
-		f.imageType = value
-	}
-}
-
 func (f *forgeStub) totalHits() int {
 	return int(f.apiHits.Load() + f.imageHits.Load())
 }
@@ -292,7 +281,9 @@ func TestServeChangedEmailHashDoesNotSpawnSecondEntry(t *testing.T) {
 		t.Fatalf("first fetch: status = %d", rec.Code)
 	}
 	// The account's email changes: the API now names a different hash.
-	f.set("avatarURL", f.srv.URL+"/avatars/"+strings.Repeat("b", 64)+".png")
+	f.mu.Lock()
+	f.avatarURL = f.srv.URL + "/avatars/" + strings.Repeat("b", 64) + ".png"
+	f.mu.Unlock()
 
 	// While the tile is stored, the proxy must not even re-fetch.
 	if rec := get(p, "alice"); rec.Code != http.StatusOK {
@@ -344,7 +335,9 @@ func TestServeRejectsOffForgeAvatarURL(t *testing.T) {
 		t.Errorf("proxy fetched avatar_url off the forge: %s", r.URL.Path)
 	}))
 	t.Cleanup(other.Close)
-	f.set("avatarURL", other.URL+"/x.png")
+	f.mu.Lock()
+	f.avatarURL = other.URL + "/x.png"
+	f.mu.Unlock()
 	p, dir := newProxy(t, f)
 
 	rec := get(p, "alice")
