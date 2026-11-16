@@ -75,8 +75,6 @@ type Config struct {
 	// one without the other is a configuration error.
 	ClientCert string
 	ClientKey  string
-	// TileSize overrides DefaultTileSize (0 selects the default).
-	TileSize int
 }
 
 // Proxy serves normalised avatar tiles for forge logins.
@@ -84,7 +82,6 @@ type Proxy struct {
 	forge    *url.URL
 	client   *http.Client
 	cacheDir string
-	tile     int
 	// mu serialises upstream fetches so a cold store cannot stampede the
 	// forge with one API plus image request per concurrent viewer.
 	mu sync.Mutex
@@ -107,10 +104,6 @@ func New(cfg Config) (*Proxy, error) {
 		}
 		transport.TLSClientConfig = &tls.Config{Certificates: []tls.Certificate{cert}}
 	}
-	tile := cfg.TileSize
-	if tile == 0 {
-		tile = DefaultTileSize
-	}
 	dir := cfg.CacheDir
 	if dir == "" {
 		return nil, fmt.Errorf("avatar cache dir must not be empty")
@@ -131,7 +124,6 @@ func New(cfg Config) (*Proxy, error) {
 			},
 		},
 		cacheDir: dir,
-		tile:     tile,
 	}, nil
 }
 
@@ -278,12 +270,12 @@ func (p *Proxy) normalise(body []byte) ([]byte, error) {
 	if h := img.Bounds().Dy(); h > b {
 		b = h
 	}
-	scale := float64(p.tile) / float64(b)
+	scale := float64(DefaultTileSize) / float64(b)
 	w := max(1, int(float64(img.Bounds().Dx())*scale))
 	h := max(1, int(float64(img.Bounds().Dy())*scale))
-	dst := image.NewNRGBA(image.Rect(0, 0, p.tile, p.tile))
-	x := (p.tile - w) / 2
-	y := (p.tile - h) / 2
+	dst := image.NewNRGBA(image.Rect(0, 0, DefaultTileSize, DefaultTileSize))
+	x := (DefaultTileSize - w) / 2
+	y := (DefaultTileSize - h) / 2
 	draw.CatmullRom.Scale(dst, image.Rect(x, y, x+w, y+h), img, img.Bounds(), draw.Over, nil)
 	var out bytes.Buffer
 	if err := png.Encode(&out, dst); err != nil {
