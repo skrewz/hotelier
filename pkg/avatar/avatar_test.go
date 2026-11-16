@@ -545,6 +545,57 @@ func TestServeConcurrentMissesFetchOnce(t *testing.T) {
 	}
 }
 
+// Deduplicating a login's fetches must not serialise the route: a cold store
+// holding N identities warms them at once, and one hung request stalls the
+// login it belongs to rather than every tile on the page.
+func TestServeFetchesDifferentLoginsInParallel(t *testing.T) {
+	f := newForgeStub(t)
+	var mu sync.Mutex
+	arrived := map[string]bool{}
+	both := make(chan struct{})
+	var serialised atomic.Bool
+	var once sync.Once
+	orig := f.srv.Config.Handler
+	f.srv.Config.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasPrefix(r.URL.Path, "/api/v1/users/") {
+			mu.Lock()
+			arrived[strings.TrimPrefix(r.URL.Path, "/api/v1/users/")] = true
+			if len(arrived) == 2 {
+				once.Do(func() { close(both) })
+			}
+			mu.Unlock()
+			// Hold each round trip until the other login is in flight too.
+			select {
+			case <-both:
+			case <-time.After(2 * time.Second):
+				serialised.Store(true) // the other login never got as far as the forge
+			}
+		}
+		orig.ServeHTTP(w, r)
+	})
+	p, _ := newProxy(t, f)
+
+	var wg sync.WaitGroup
+	codes := make([]int, 2)
+	for i, login := range []string{"alice", "bob"} {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			codes[i] = get(p, login).Code
+		}()
+	}
+	wg.Wait()
+
+	for i, code := range codes {
+		if code != http.StatusOK {
+			t.Fatalf("login %d: status = %d, want 200", i, code)
+		}
+	}
+	if serialised.Load() {
+		t.Error("the second login never reached the forge while the first was in flight: one fetch holds up every other login")
+	}
+}
+
 // The issue's last verification case: a render that cannot be renamed into
 // place is a miss, not corruption. Here the entry's place is held by a
 // directory, so the store read misses, the fetch runs, and the rename fails.

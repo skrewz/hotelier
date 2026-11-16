@@ -92,16 +92,31 @@ type Proxy struct {
 	forge    *url.URL
 	client   *http.Client
 	cacheDir string
-	// mu serialises upstream fetches so a cold store cannot stampede the
-	// forge with one API plus image request per concurrent viewer. It also
-	// guards neg.
+	// mu guards the two maps below and nothing else: it is never held across
+	// a round trip, so one login's slow or hung fetch cannot stall another's
+	// for the length of the client's timeout.
 	mu sync.Mutex
+	// flights holds the fetch each login has in progress, so a cold store
+	// asks the forge for one identity once however many dashboards opened at
+	// the same time, while different identities are fetched at once. Guarded
+	// by mu.
+	flights map[string]*flight
 	// neg remembers recent misses, keyed by login, so an unauthenticated
 	// caller cannot keep the forge's certificate-authenticated path hot one
 	// login at a time. Guarded by mu.
 	neg map[string]miss
 	// logf is never nil; New gives it a sink that discards.
 	logf func(format string, args ...any)
+}
+
+// flight is one fetch in progress, shared by every viewer of the same login.
+// The leader publishes its result and closes done; both happen under mu, so a
+// waiter that has observed done also sees the result.
+type flight struct {
+	done   chan struct{}
+	data   []byte
+	status int
+	err    error
 }
 
 // miss is a remembered absence: the status the identity earned, and when the
@@ -163,6 +178,7 @@ func New(cfg Config) (*Proxy, error) {
 			},
 		},
 		cacheDir: dir,
+		flights:  map[string]*flight{},
 		neg:      map[string]miss{},
 		logf:     logf,
 	}
@@ -215,30 +231,71 @@ func writeTile(w http.ResponseWriter, data []byte) {
 	_, _ = w.Write(data)
 }
 
-// resolve answers a login from the store, from the memory of a recent miss, or
-// by fetching. It is the only path to the forge, and it holds mu throughout so
-// a queue of viewers for one login costs one round trip.
+// resolve answers a login from the store, from the memory of a recent miss,
+// from the fetch another viewer of the same login already has in progress, or
+// by starting that fetch. It is the only path to the forge, and it keeps "one
+// identity, one round trip" per login rather than one for the whole server:
+// viewers of the same identity share one fetch, viewers of different ones
+// never wait on each other.
 func (p *Proxy) resolve(ctx context.Context, login string) ([]byte, int, error) {
+	for {
+		// One short pass under the lock: the store, the memory of a recent
+		// miss, then whether this login already has a fetch running. Re-checking
+		// the store is what keeps a queued caller from paying for a round trip
+		// the fetch it waited on has already made.
+		p.mu.Lock()
+		if data, err := os.ReadFile(filepath.Join(p.cacheDir, login+".png")); err == nil {
+			p.mu.Unlock()
+			return data, http.StatusOK, nil
+		}
+		if m, ok := p.neg[login]; ok && time.Now().Before(m.expires) {
+			p.mu.Unlock()
+			return nil, m.status, nil
+		}
+		f, leads := p.flights[login], false
+		if f == nil {
+			f = &flight{done: make(chan struct{})}
+			p.flights[login] = f
+			leads = true
+		}
+		p.mu.Unlock()
+
+		if !leads {
+			select {
+			case <-f.done:
+			case <-ctx.Done():
+				// This viewer left. The fetch they were waiting on carries on for
+				// whoever stayed, and leaving is no verdict on the login.
+				return nil, http.StatusBadGateway, ctx.Err()
+			}
+			if abandoned(f.err) {
+				// The request that led the shared fetch was cancelled before the
+				// forge answered, so it has nothing to hand on. Look again: the
+				// store if it got that far, otherwise a fetch of this viewer's.
+				continue
+			}
+			return f.data, f.status, f.err
+		}
+
+		data, status, err := p.fetch(ctx, login)
+		p.settle(login, f, data, status, err)
+		return data, status, err
+	}
+}
+
+// settle publishes a fetch's result, records an answered miss, and takes the
+// login's flight off the map so the next viewer starts from the store.
+func (p *Proxy) settle(login string, f *flight, data []byte, status int, err error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-
-	// Re-check the store under the lock: a caller that queued behind a fetch
-	// for the same login must be served from what that fetch stored, not
-	// launch its own round trip.
-	if data, err := os.ReadFile(filepath.Join(p.cacheDir, login+".png")); err == nil {
-		return data, http.StatusOK, nil
-	}
-	if m, ok := p.neg[login]; ok && time.Now().Before(m.expires) {
-		return nil, m.status, nil
-	}
-
-	data, status, err := p.fetch(ctx, login)
+	delete(p.flights, login)
 	if status == http.StatusOK {
 		delete(p.neg, login)
 	} else if !abandoned(err) {
 		p.rememberMiss(login, status)
 	}
-	return data, status, err
+	f.data, f.status, f.err = data, status, err
+	close(f.done)
 }
 
 // abandoned reports whether a miss's cause is this request rather than the
@@ -280,7 +337,8 @@ func (p *Proxy) rememberMiss(login string, status int) {
 // the status this request deserves: 200 with the tile, 404 for an identity
 // the forge does not know, or 502 for every other miss, and the cause of a
 // miss for the log — the response body never carries it. No failure path
-// stores anything. Callers reach it through resolve, which holds mu.
+// stores anything. Callers reach it through resolve, which lets one login's
+// fetch run at a time.
 func (p *Proxy) fetch(ctx context.Context, login string) ([]byte, int, error) {
 	// fail names the cause behind a miss. Every return below is a different
 	// story in the journal — an expired client certificate, an ingress that
