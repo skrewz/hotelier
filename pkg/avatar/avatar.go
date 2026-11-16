@@ -21,6 +21,7 @@ import (
 	"context"
 	"crypto/tls"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"image"
 	_ "image/gif"  // registered so image.Decode can read GIF sources
@@ -256,12 +257,34 @@ func (p *Proxy) fetch(ctx context.Context, login string) ([]byte, int) {
 // are kilobytes, and anything approaching this is not an avatar.
 const maxResponseBytes = 8 << 20
 
-// normalise decodes the source image and produces the single canonical
-// render: the longest edge fitted into tile x tile, centred on a
+// maxSourcePixels bounds the *decoded* frame, which the byte cap above cannot:
+// a 646 KB PNG can declare 10000x10000 and ask the process for 381 MB. The
+// ceiling sits comfortably above the 592² source dimensions the forge returns
+// (issue #275), so it refuses a hostile header rather than a real avatar.
+const maxSourcePixels = 4096 * 4096
+
+// errTooLarge marks a source whose own header declares more pixels than the
+// ceiling allows. It is a miss like any other: nothing is stored.
+var errTooLarge = errors.New("avatar declares too many pixels")
+
+// normalise decodes the source image, once its header's declared dimensions
+// have cleared the pixel ceiling, and produces the single canonical render:
+// the longest edge fitted into DefaultTileSize x DefaultTileSize, centred on a
 // transparent square, re-encoded as PNG. Generated identicons pass through
 // as ordinary avatars (decision recorded on the tracker): the API exposes
 // no "has explicit avatar" signal, so suppression would be guesswork.
 func (p *Proxy) normalise(body []byte) ([]byte, error) {
+	// Read the header before decoding: the dimensions a file claims are what
+	// the decoder would allocate, and honouring an unchecked claim would let
+	// a few hundred bytes cost hundreds of megabytes.
+	cfg, _, err := image.DecodeConfig(bytes.NewReader(body))
+	if err != nil {
+		return nil, fmt.Errorf("read avatar image header: %w", err)
+	}
+	if cfg.Width <= 0 || cfg.Height <= 0 ||
+		int64(cfg.Width)*int64(cfg.Height) > int64(maxSourcePixels) {
+		return nil, fmt.Errorf("%w: %dx%d over %d", errTooLarge, cfg.Width, cfg.Height, maxSourcePixels)
+	}
 	img, _, err := image.Decode(bytes.NewReader(body))
 	if err != nil {
 		return nil, fmt.Errorf("decode avatar image: %w", err)

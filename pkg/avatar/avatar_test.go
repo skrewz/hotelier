@@ -2,7 +2,10 @@ package avatar
 
 import (
 	"bytes"
+	"encoding/binary"
 	"encoding/json"
+	"errors"
+	"hash/crc32"
 	"image"
 	"image/color"
 	"image/jpeg"
@@ -46,6 +49,52 @@ func encodeJPEG(t *testing.T, w, h int) []byte {
 		t.Fatalf("encode jpeg: %v", err)
 	}
 	return buf.Bytes()
+}
+
+// pngHeaderClaiming returns the bytes of a file a PNG decoder will accept as
+// a PNG whose IHDR declares the given dimensions, without encoding any of the
+// pixels it claims: 20000x20000 costs a handful of bytes on the wire and
+// 1.6 GB if anything honours the header. That gap is what the pixel ceiling
+// exists to close.
+func pngHeaderClaiming(t *testing.T, w, h int) []byte {
+	t.Helper()
+	buf := bytes.NewBuffer([]byte{0x89, 'P', 'N', 'G', '\r', '\n', 0x1a, '\n'})
+	ihdr := make([]byte, 13) // 8-bit RGBA; compression, filter and interlace stay zero
+	binary.BigEndian.PutUint32(ihdr[0:4], uint32(w))
+	binary.BigEndian.PutUint32(ihdr[4:8], uint32(h))
+	ihdr[8] = 8
+	ihdr[9] = 6
+	writePNGChunk(buf, "IHDR", ihdr)
+	return buf.Bytes()
+}
+
+func writePNGChunk(buf *bytes.Buffer, kind string, data []byte) {
+	var length [4]byte
+	binary.BigEndian.PutUint32(length[:], uint32(len(data)))
+	buf.Write(length[:])
+	buf.WriteString(kind)
+	buf.Write(data)
+	crc := crc32.NewIEEE()
+	_, _ = crc.Write([]byte(kind))
+	_, _ = crc.Write(data)
+	var sum [4]byte
+	binary.BigEndian.PutUint32(sum[:], crc.Sum32())
+	buf.Write(sum[:])
+}
+
+// The pixel ceiling is what stands between a small file and a large
+// allocation: the byte cap bounds the wire, and the header a decoder reads
+// before it allocates is the source's own claim about its dimensions.
+func TestNormaliseRefusesOverlargeDeclaredDimensions(t *testing.T) {
+	p, _ := newProxy(t, newForgeStub(t))
+
+	if _, err := p.normalise(pngHeaderClaiming(t, 20000, 20000)); !errors.Is(err, errTooLarge) {
+		t.Fatalf("err = %v, want errTooLarge", err)
+	}
+	// The source dimensions the issue says the forge returns stay well inside.
+	if _, err := p.normalise(encodePNG(t, 592, 592)); err != nil {
+		t.Errorf("normalise of a 592x592 source: %v, want no error", err)
+	}
 }
 
 // forgeStub is a stand-in for the forge: it answers the users API with an
@@ -237,6 +286,26 @@ func TestServeNonImageContentTypeIsMissAndStoresNothing(t *testing.T) {
 	}
 	if files := storeFiles(t, dir); len(files) != 0 {
 		t.Errorf("store must be empty after a miss, got %v", files)
+	}
+}
+
+// The byte cap bounds the wire, not the framebuffer: a decodable file may
+// declare dimensions no avatar could ever have. Anything over the ceiling is a
+// miss before a single pixel is allocated, and stores nothing.
+func TestServeRefusesOverlargeDeclaredDimensionsBeforeDecoding(t *testing.T) {
+	f := newForgeStub(t)
+	f.mu.Lock()
+	f.imageBody = pngHeaderClaiming(t, 20000, 20000)
+	f.mu.Unlock()
+	p, dir := newProxy(t, f)
+
+	rec := get(p, "alice")
+
+	if rec.Code != http.StatusBadGateway {
+		t.Fatalf("status = %d, want 502 for a source over the pixel ceiling", rec.Code)
+	}
+	if files := storeFiles(t, dir); len(files) != 0 {
+		t.Errorf("store must be empty after a pixel-ceiling miss, got %v", files)
 	}
 }
 
