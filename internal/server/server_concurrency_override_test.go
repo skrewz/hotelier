@@ -19,8 +19,6 @@ func postConcurrency(t *testing.T, srv *Server, body string) *httptest.ResponseR
 	t.Helper()
 	req := httptest.NewRequest(http.MethodPost, "/api/concurrency", bytes.NewReader([]byte(body)))
 	req.Header.Set("Content-Type", "application/json")
-	req.RemoteAddr = "127.0.0.1:1234" // the operator by the posture this route enforces
-	req.Host = "127.0.0.1:8080"       // addressing the server by a loopback name, as an operator's request does
 	w := httptest.NewRecorder()
 	srv.HandleConcurrency(w, req)
 	return w
@@ -378,8 +376,6 @@ func TestConcurrencyOverride_RejectsCrossSiteSimplePOSTs(t *testing.T) {
 	srv := capTestServer(t, config.ServerConfig{Host: "127.0.0.1", Port: 0, MaxConcurrentTasks: 3})
 	for _, ct := range []string{"", "text/plain", "application/x-www-form-urlencoded", "application/xml"} {
 		req := httptest.NewRequest(http.MethodPost, "/api/concurrency", strings.NewReader(`{"cap": 0}`))
-		req.RemoteAddr = "127.0.0.1:1234" // identity settled; only the Content-Type is in question
-		req.Host = "127.0.0.1:8080"
 		if ct != "" {
 			req.Header.Set("Content-Type", ct)
 		}
@@ -397,8 +393,6 @@ func TestConcurrencyOverride_RejectsCrossSiteSimplePOSTs(t *testing.T) {
 	// like must not lock out a correct client).
 	req := httptest.NewRequest(http.MethodPost, "/api/concurrency", strings.NewReader(`{"cap": 1}`))
 	req.Header.Set("Content-Type", "application/json; charset=utf-8")
-	req.RemoteAddr = "127.0.0.1:1234"
-	req.Host = "localhost:8080"
 	w := httptest.NewRecorder()
 	srv.HandleConcurrency(w, req)
 	if w.Code != http.StatusOK {
@@ -406,17 +400,17 @@ func TestConcurrencyOverride_RejectsCrossSiteSimplePOSTs(t *testing.T) {
 	}
 }
 
-// TestConcurrencyOverride_RequiresOperatorIdentity: reaching the route is
-// not a credential (reviews 1635 and 1671). A non-loopback peer cannot
-// pause the fleet or lift its cap, and a loopback peer only speaks for
-// the operator while it addresses the server by a loopback name—or, once
-// server.trusted_hosts names one (issue #286), by a configured name: the
-// DNS-rebinding attempt — a browser posting from 127.0.0.1 with a foreign
-// domain in Host — is refused with the cap exactly where it stood.
-func TestConcurrencyOverride_RequiresOperatorIdentity(t *testing.T) {
-	postFrom := func(t *testing.T, srv *Server, remote, host string) *httptest.ResponseRecorder {
+// TestConcurrencyOverride_AnyPeerTheEdgeAdmitsSetsTheCap: this route asks no
+// question about who is asking (issue #294). It is like every other route
+// here: the HTTP API performs no authentication, and the network edge — a
+// loopback bind or an authenticating proxy — decides who reaches it. The
+// requests below are the shapes that edge produces: the operator's own
+// machine, a local proxy forwarding the public Host it was addressed by, and
+// a proxy whose peer address is not loopback at all. Each must move the cap.
+func TestConcurrencyOverride_AnyPeerTheEdgeAdmitsSetsTheCap(t *testing.T) {
+	postFrom := func(t *testing.T, srv *Server, remote, host, body string) *httptest.ResponseRecorder {
 		t.Helper()
-		req := httptest.NewRequest(http.MethodPost, "/api/concurrency", strings.NewReader(`{"cap": 1}`))
+		req := httptest.NewRequest(http.MethodPost, "/api/concurrency", strings.NewReader(body))
 		req.Header.Set("Content-Type", "application/json")
 		req.RemoteAddr = remote
 		req.Host = host
@@ -425,75 +419,24 @@ func TestConcurrencyOverride_RequiresOperatorIdentity(t *testing.T) {
 		return w
 	}
 
-	srv := capTestServer(t, config.ServerConfig{Host: "127.0.0.1", Port: 0, MaxConcurrentTasks: 3})
-	if w := postFrom(t, srv, "203.0.113.9:5555", "127.0.0.1:8080"); w.Code != http.StatusForbidden {
-		t.Fatalf("expected an anonymous remote POST to be refused with 403, got %d: %s", w.Code, w.Body.String())
-	}
-	if got := srv.orchestrator.ConcurrencyCap(); got != 3 {
-		t.Fatalf("expected a refused request to leave the cap at 3, got %d", got)
-	}
-	if w := postFrom(t, srv, "127.0.0.1:4321", "attacker.example:8080"); w.Code != http.StatusForbidden {
-		t.Fatalf("expected a DNS-rebinding POST (loopback peer, foreign Host) to be refused with 403, got %d: %s", w.Code, w.Body.String())
-	}
-	if got := srv.orchestrator.ConcurrencyCap(); got != 3 {
-		t.Fatalf("expected the rebinding attempt to leave the cap at 3, got %d", got)
-	}
-	for _, host := range []string{"127.0.0.1:8080", "localhost:8080", "[::1]:8080"} {
-		if w := postFrom(t, srv, "127.0.0.1:4321", host); w.Code != http.StatusOK {
-			t.Fatalf("Host %q: expected a loopback POST to be admitted, got %d: %s", host, w.Code, w.Body.String())
+	srv := capTestServer(t, config.ServerConfig{Host: "0.0.0.0", Port: 0, MaxConcurrentTasks: 3})
+	for _, peer := range []struct {
+		remote, host, body string
+		cap                int
+	}{
+		{"127.0.0.1:4321", "127.0.0.1:8080", `{"cap": 1}`, 1},
+		{"127.0.0.1:4321", "hotelier.example.com", `{"cap": 1}`, 1},
+		{"192.0.2.9:5555", "hotelier.example.com", `{"cap": 2}`, 2},
+		{"[2001:db8::1]:5555", "hotelier.example.com:8443", `{"cap": 2}`, 2},
+	} {
+		if w := postFrom(t, srv, peer.remote, peer.host, peer.body); w.Code != http.StatusOK {
+			t.Fatalf("peer %s Host %q: expected 200 from a peer the edge admitted, got %d: %s",
+				peer.remote, peer.host, w.Code, w.Body.String())
 		}
-	}
-	if got := srv.orchestrator.ConcurrencyCap(); got != 1 {
-		t.Fatalf("expected the admitted request to set the cap to 1, got %d", got)
-	}
-
-	// With trusted_hosts configured (issue #286) the only change is
-	// which names a loopback peer may address the server by. The entry
-	// is written case-folded, ported and dotted to prove the config
-	// side is read through the same normaliser as the request side, and
-	// carries a blank entry to prove a blank Host matches nothing.
-	trusted := capTestServer(t, config.ServerConfig{
-		Host: "127.0.0.1", Port: 0, MaxConcurrentTasks: 3,
-		TrustedHosts: []string{"Hotelier.Example.Com:8443.", ""},
-	})
-
-	// The peer half of the guard is unchanged: Host says which server
-	// the client meant, not who asked, so a remote peer presenting a
-	// configured name is still a stranger—and the refusal names the
-	// rule that applied.
-	w := postFrom(t, trusted, "203.0.113.9:5555", "hotelier.example.com")
-	if w.Code != http.StatusForbidden {
-		t.Fatalf("expected a remote POST with a trusted Host to be refused with 403, got %d: %s", w.Code, w.Body.String())
-	}
-	if body := w.Body.String(); !strings.Contains(body, "loopback or configured host name") {
-		t.Fatalf("expected the 403 body to name the rule that applied, got %q", body)
-	}
-	if got := trusted.orchestrator.ConcurrencyCap(); got != 3 {
-		t.Fatalf("expected the remote trusted-name attempt to leave the cap at 3, got %d", got)
-	}
-
-	// A name that was not configured is still refused from a loopback
-	// peer—and so is the empty Host, whatever the blank entry says.
-	for _, host := range []string{"attacker.example:8080", "hotelier.example.com.evil.example", "hotelier.example.com]", "[hotelier.example.com", ""} {
-		if w := postFrom(t, trusted, "127.0.0.1:4321", host); w.Code != http.StatusForbidden {
-			t.Fatalf("Host %q: expected an unconfigured Host from a loopback peer to be refused with 403, got %d: %s", host, w.Code, w.Body.String())
+		if got := srv.orchestrator.ConcurrencyCap(); got != peer.cap {
+			t.Fatalf("peer %s Host %q: expected the cap at the orchestrator to be %d, got %d",
+				peer.remote, peer.host, peer.cap, got)
 		}
-	}
-	if got := trusted.orchestrator.ConcurrencyCap(); got != 3 {
-		t.Fatalf("expected the refused attempts to leave the cap at 3, got %d", got)
-	}
-
-	// A configured name from a loopback peer is admitted, and the
-	// verdict is on the normalised name: case, port and trailing dot
-	// spell one name. The list only adds, so loopback names still pass
-	// with the list non-empty.
-	for _, host := range []string{"hotelier.example.com:7352", "Hotelier.Example.Com", "hotelier.example.com.", "[hotelier.example.com]", "localhost:8080"} {
-		if w := postFrom(t, trusted, "127.0.0.1:4321", host); w.Code != http.StatusOK {
-			t.Fatalf("Host %q: expected a loopback POST with a trusted or loopback name to be admitted, got %d: %s", host, w.Code, w.Body.String())
-		}
-	}
-	if got := trusted.orchestrator.ConcurrencyCap(); got != 1 {
-		t.Fatalf("expected the admitted request to set the cap to 1, got %d", got)
 	}
 }
 
