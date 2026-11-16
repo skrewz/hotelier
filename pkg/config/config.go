@@ -106,6 +106,19 @@ type ServerConfig struct {
 	// environment variables and file copies that are applied to a task's
 	// working directory. See pkg/persona for details.
 	Personas []persona.Persona `yaml:"personas"`
+	// ForgeURL is the forge's absolute origin, the avatar proxy's upstream
+	// (issue #275). When empty the /avatar/ route answers 503: the proxy is
+	// configured off, distinctly from an identity the forge does not know.
+	ForgeURL string `yaml:"forge_url"`
+	// AvatarCacheDir is the directory holding one normalised PNG per login
+	// for the avatar proxy (issue #275). Required when ForgeURL is set.
+	AvatarCacheDir string `yaml:"avatar_cache_dir"`
+	// ForgeClientCert and ForgeClientKey are the mTLS client pair the
+	// forge's ingress demands when hotelier fetches avatars (issue #275).
+	// Both unset means hotelier presents no client certificate; one without
+	// the other is a configuration error that disables the proxy.
+	ForgeClientCert string `yaml:"forge_client_cert"`
+	ForgeClientKey  string `yaml:"forge_client_key"`
 }
 
 // ConcurrencyUnlimited is the value EffectiveConcurrency returns when no cap

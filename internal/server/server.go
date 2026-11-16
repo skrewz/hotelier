@@ -23,6 +23,7 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 
+	"hotelier/pkg/avatar"
 	"hotelier/pkg/config"
 	"hotelier/pkg/fatalwriter"
 	"hotelier/pkg/logstore"
@@ -365,6 +366,10 @@ type Server struct {
 	capOverrideExpires time.Time
 	webDir             string
 	templateDir        string
+	// avatar is the avatar proxy for GET /avatar/<login> (issue #275).
+	// Nil when forge_url is unset or its configuration was refused at
+	// startup; HandleAvatar then answers 503.
+	avatar *avatar.Proxy
 }
 
 // claimStats returns the counters behind /api/guests.
@@ -780,6 +785,25 @@ func New(cfg config.ServerConfig) *Server {
 		logger.Printf("loaded %d persona(s): %v", len(cfg.Personas), s.personaStore.List())
 	}
 
+	// Initialize the avatar proxy when forge_url names an upstream (issue
+	// #275). A refused configuration disables the route and is logged, the
+	// way the disk log store's failures are: the dashboard keeps serving
+	// without faces rather than the process failing over a picture.
+	if cfg.ForgeURL != "" {
+		proxy, err := avatar.New(avatar.Config{
+			ForgeURL:   cfg.ForgeURL,
+			CacheDir:   cfg.AvatarCacheDir,
+			ClientCert: cfg.ForgeClientCert,
+			ClientKey:  cfg.ForgeClientKey,
+		})
+		if err != nil {
+			logger.Printf("avatar proxy disabled: %v", err)
+		} else {
+			s.avatar = proxy
+			logger.Printf("avatar proxy enabled: %s -> %s", avatar.PathPrefix, cfg.ForgeURL)
+		}
+	}
+
 	// Initialize disk-backed log store if configured
 	if cfg.LogDir != "" {
 		disk, err := logstore.New(cfg.LogDir)
@@ -871,6 +895,11 @@ func (s *Server) Start() error {
 	mux.HandleFunc("/api/health", s.HandleHealth)
 	mux.HandleFunc("/api/logs", s.HandleLogs)
 	mux.HandleFunc("/api/logs/", s.HandleLogEntry)
+
+	// Avatar proxy (issue #275): GET /avatar/<login> resolves a forge
+	// identity to a normalised tile. Unauthenticated like the other read
+	// surfaces; it stores and serves only what the forge API publishes.
+	mux.HandleFunc(avatar.PathPrefix, s.HandleAvatar)
 
 	// Prometheus scrape endpoint. Like /api/health it is unauthenticated, and
 	// it publishes only fixed-label gauges — no task IDs, guest IDs, personas
@@ -2066,6 +2095,18 @@ func capLabel(cap int) interface{} {
 		return "unlimited"
 	}
 	return cap
+}
+
+// HandleAvatar serves GET /avatar/<login> through the avatar proxy
+// (issue #275). With the proxy configured off—no forge_url, or a refused
+// configuration—the route says so with a 503, keeping "not configured"
+// distinct from "no such identity" (a 404 the browser will cache).
+func (s *Server) HandleAvatar(w http.ResponseWriter, r *http.Request) {
+	if s.avatar == nil {
+		http.Error(w, "avatar proxy not configured", http.StatusServiceUnavailable)
+		return
+	}
+	s.avatar.ServeHTTP(w, r)
 }
 
 // handleHealth returns the server health status.
