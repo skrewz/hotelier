@@ -55,6 +55,15 @@ func encodeJPEG(t *testing.T, w, h int) []byte {
 	return buf.Bytes()
 }
 
+func encodeGIF(t *testing.T, w, h int) []byte {
+	t.Helper()
+	var buf bytes.Buffer
+	if err := gif.Encode(&buf, makeImage(w, h), nil); err != nil {
+		t.Fatalf("encode gif: %v", err)
+	}
+	return buf.Bytes()
+}
+
 // pngHeaderClaiming returns the bytes of a file a PNG decoder will accept as
 // a PNG whose IHDR declares the given dimensions, without encoding any of the
 // pixels it claims: 20000x20000 costs a handful of bytes on the wire and
@@ -625,27 +634,27 @@ func TestServeFailedRenameIsAMissAndKeepsWhatWasThere(t *testing.T) {
 }
 
 // The other half of the discipline: a store that cannot even take the temp
-// file is a miss, and says nothing by leaving a partial file behind.
+// file is a miss, and says nothing by leaving a partial file behind. The path
+// is a regular file rather than a directory made read-only, so CreateTemp
+// fails for every uid instead of only for the non-root ones.
 func TestServeFailedTempCreateIsAMissAndStoresNothing(t *testing.T) {
 	f := newForgeStub(t)
 	dir := t.TempDir()
-	if err := os.Chmod(dir, 0o500); err != nil {
-		t.Fatalf("make the store read-only: %v", err)
+	blocked := filepath.Join(dir, "store")
+	if err := os.WriteFile(blocked, []byte("not a directory"), 0o644); err != nil {
+		t.Fatalf("place the store path: %v", err)
 	}
-	t.Cleanup(func() { _ = os.Chmod(dir, 0o755) })
 	p, err := New(Config{ForgeURL: f.srv.URL, CacheDir: dir})
 	if err != nil {
 		t.Fatalf("avatar.New: %v", err)
 	}
+	p.cacheDir = blocked
 
 	if code := get(p, "alice").Code; code != http.StatusBadGateway {
 		t.Fatalf("status = %d, want 502 when no temp file can be created", code)
 	}
-	if err := os.Chmod(dir, 0o755); err != nil {
-		t.Fatalf("restore the store: %v", err)
-	}
-	if names := storeFiles(t, dir); len(names) != 0 {
-		t.Errorf("store = %v, want nothing written by a failed store", names)
+	if names := storeFiles(t, dir); len(names) != 1 || names[0] != "store" {
+		t.Errorf("store = %v, want only the path this test placed there", names)
 	}
 }
 
@@ -686,29 +695,43 @@ func TestServeFitsAndCentresALandscapeSource(t *testing.T) {
 	}
 }
 
-// GIF is in the accepted set, so it must actually decode: a registered decoder
-// nobody exercises is an entry that cannot fail a test.
-func TestServeAcceptsGIFAndStoresPNG(t *testing.T) {
-	f := newForgeStub(t)
-	var buf bytes.Buffer
-	if err := gif.Encode(&buf, makeImage(400, 400), nil); err != nil {
-		t.Fatalf("encode gif: %v", err)
+// Every content type the proxy accepts must actually decode and land on the
+// canonical PNG render, and the table has to move with the map it covers: an
+// entry in acceptedImageTypes that no test fetches is an entry that cannot
+// fail a test.
+func TestServeAcceptsEveryAcceptedImageType(t *testing.T) {
+	encoders := map[string]func(t *testing.T) []byte{
+		"image/png":  func(t *testing.T) []byte { return encodePNG(t, 309, 309) },
+		"image/jpeg": func(t *testing.T) []byte { return encodeJPEG(t, 400, 400) },
+		"image/gif":  func(t *testing.T) []byte { return encodeGIF(t, 400, 400) },
 	}
-	f.mu.Lock()
-	f.imageType = "image/gif"
-	f.imageBody = buf.Bytes()
-	f.mu.Unlock()
-	p, dir := newProxy(t, f)
+	if len(encoders) != len(acceptedImageTypes) {
+		t.Fatalf("acceptedImageTypes holds %d entries, the table covers %d", len(acceptedImageTypes), len(encoders))
+	}
 
-	if code := get(p, "alice").Code; code != http.StatusOK {
-		t.Fatalf("status = %d, want 200 for a GIF source", code)
-	}
-	stored, err := os.ReadFile(filepath.Join(dir, "alice.png"))
-	if err != nil {
-		t.Fatalf("stored render missing: %v", err)
-	}
-	if _, err := png.Decode(bytes.NewReader(stored)); err != nil {
-		t.Errorf("stored render is not a PNG: %v", err)
+	for mediaType, encode := range encoders {
+		t.Run(mediaType, func(t *testing.T) {
+			if !acceptedImageTypes[mediaType] {
+				t.Fatalf("%q is no longer accepted, so this source now has no route", mediaType)
+			}
+			f := newForgeStub(t)
+			f.mu.Lock()
+			f.imageType, f.imageBody = mediaType, encode(t)
+			f.mu.Unlock()
+			p, dir := newProxy(t, f)
+
+			rec := get(p, "alice")
+			if rec.Code != http.StatusOK {
+				t.Fatalf("status = %d (body %q)", rec.Code, rec.Body.String())
+			}
+			stored, err := os.ReadFile(filepath.Join(dir, "alice.png"))
+			if err != nil {
+				t.Fatalf("stored render missing: %v", err)
+			}
+			if _, err := png.Decode(bytes.NewReader(stored)); err != nil {
+				t.Errorf("stored render is not a PNG: %v", err)
+			}
+		})
 	}
 }
 
@@ -937,27 +960,5 @@ func TestNewRejectsUnusableForgeURL(t *testing.T) {
 		if _, err := New(Config{ForgeURL: u, CacheDir: t.TempDir()}); err == nil {
 			t.Errorf("New(%q) succeeded, want an error", u)
 		}
-	}
-}
-
-// JPEG sources are accepted and re-encoded to the canonical PNG render.
-func TestServeAcceptsJPEGAndStoresPNG(t *testing.T) {
-	f := newForgeStub(t)
-	f.mu.Lock()
-	f.imageType = "image/jpeg"
-	f.imageBody = encodeJPEG(t, 400, 400)
-	f.mu.Unlock()
-	p, dir := newProxy(t, f)
-
-	rec := get(p, "alice")
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status = %d (body %q)", rec.Code, rec.Body.String())
-	}
-	stored, err := os.ReadFile(filepath.Join(dir, "alice.png"))
-	if err != nil {
-		t.Fatalf("stored render missing: %v", err)
-	}
-	if _, err := png.Decode(bytes.NewReader(stored)); err != nil {
-		t.Errorf("stored render is not a PNG: %v", err)
 	}
 }
