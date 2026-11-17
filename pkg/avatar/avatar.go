@@ -285,17 +285,11 @@ func (p *Proxy) resolve(ctx context.Context, login string) ([]byte, int, error) 
 }
 
 // settle publishes a fetch's result, records an answered miss, and takes the
-// login's flight off the map so the next viewer starts from the store. ctx is
-// the context of the request that led the fetch, and it is what a miss is read
-// against: a fetch whose own request was still live asked the forge and got
-// nothing back, so the miss says something about the identity and is remembered
-// for negativeTTL — the client's 15s timeout included, since it is the forge
-// that failed to answer and a degraded upstream is exactly what the memory
-// exists to stop this route re-probing once per inbound request. A fetch ended
-// by that request's context — a browser that dropped an in-flight <img>, a
-// Server.Shutdown, a viewer-side deadline — has no answer to hand on, so it
-// keeps its 502 to itself rather than writing a minute of empty faces over a
-// healthy login.
+// login's flight off the map so the next viewer starts from the store. A miss
+// is read against ctx — the context of the request that led the fetch: a miss
+// with that context still live is the forge failing to answer and is
+// remembered for negativeTTL; a fetch ended by that context has no answer to
+// hand on and keeps its 502 to itself.
 func (p *Proxy) settle(ctx context.Context, login string, f *flight, data []byte, status int, err error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()

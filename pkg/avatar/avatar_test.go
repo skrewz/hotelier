@@ -793,7 +793,7 @@ func TestServeRemembersAnUpstreamFailure(t *testing.T) {
 // else, so the abandoned request keeps its miss to itself.
 func TestServeACancelledRequestIsNotRemembered(t *testing.T) {
 	f := newForgeStub(t)
-	arrived := parkFirstAPIRoundTrip(t, f)
+	arrived, _ := parkFirstAPIRoundTrip(t, f)
 	p, dir := newProxy(t, f)
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -821,13 +821,19 @@ func TestServeACancelledRequestIsNotRemembered(t *testing.T) {
 	}
 }
 
-// parkFirstAPIRoundTrip parks the stub's first API request until that request's
-// own context is done, and signals when it arrives. A test can then be certain a
-// fetch is in flight — the login's flight is registered before the round trip
-// starts and retired only when it ends — and can decide what becomes of it.
-func parkFirstAPIRoundTrip(t *testing.T, f *forgeStub) (arrived chan struct{}) {
+// parkFirstAPIRoundTrip parks the stub's first API request until release is
+// called or that request's own context ends, and signals when it arrives. A
+// test can then be certain a fetch is in flight — the login's flight is
+// registered before the round trip starts and retired only when it ends — and
+// can decide what becomes of it. A test that ends the parked request by other
+// means can ignore release: the parked round trip ends when the request's own
+// context does, as it always eventually would.
+func parkFirstAPIRoundTrip(t *testing.T, f *forgeStub) (arrived chan struct{}, release func()) {
 	t.Helper()
 	arrived = make(chan struct{}, 1)
+	releaseCh := make(chan struct{})
+	var releaseOnce sync.Once
+	release = func() { releaseOnce.Do(func() { close(releaseCh) }) }
 	var mu sync.Mutex
 	var parked bool
 	orig := f.srv.Config.Handler
@@ -839,12 +845,15 @@ func parkFirstAPIRoundTrip(t *testing.T, f *forgeStub) (arrived chan struct{}) {
 			mu.Unlock()
 			if first {
 				arrived <- struct{}{}
-				<-r.Context().Done()
+				select {
+				case <-releaseCh:
+				case <-r.Context().Done():
+				}
 			}
 		}
 		orig.ServeHTTP(w, r)
 	})
-	return arrived
+	return arrived, release
 }
 
 // awaitArrival blocks until a parked round trip says it is under way. The wait is
@@ -860,15 +869,14 @@ func awaitArrival(t *testing.T, arrived chan struct{}) {
 }
 
 // A viewer queued behind a fetch its leader abandoned looks again rather than
-// inheriting a miss nobody was answered: the queue must not be a second route to
-// the bug the last round closed, where one aborted page render left every other
-// viewer of a healthy login with a minute of 502s. The leader is on a deadline,
+// inheriting a miss nobody was answered: one aborted page render must not
+// leave every other viewer of a healthy login with a minute of 502s. The leader is on a deadline,
 // which is also the room the queued viewers have to reach the wait they are meant
 // to be in, and nothing waits on that clock: the test waits on the stub's signal
 // and then on the leader's own response.
 func TestServeViewerQueuedBehindAnAbandonedFetchDoesNotInheritItsMiss(t *testing.T) {
 	f := newForgeStub(t)
-	arrived := parkFirstAPIRoundTrip(t, f)
+	arrived, _ := parkFirstAPIRoundTrip(t, f)
 	p, dir := newProxy(t, f)
 
 	leaderCtx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
@@ -920,30 +928,8 @@ func TestServeViewerWhoLeavesKeepsItsOwnMissAndTheFetchCarriesOn(t *testing.T) {
 	f := newForgeStub(t)
 	// release lets the parked round trip go, whether the test reaches the point
 	// of wanting it or fails before then and leaves the cleanup to do it.
-	releaseCh := make(chan struct{})
-	var releaseOnce sync.Once
-	release := func() { releaseOnce.Do(func() { close(releaseCh) }) }
+	arrived, release := parkFirstAPIRoundTrip(t, f)
 	defer release()
-	arrived := make(chan struct{}, 1)
-	var mu sync.Mutex
-	var parked bool
-	orig := f.srv.Config.Handler
-	f.srv.Config.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if strings.HasPrefix(r.URL.Path, "/api/v1/users/") {
-			mu.Lock()
-			first := !parked
-			parked = true
-			mu.Unlock()
-			if first {
-				arrived <- struct{}{}
-				select {
-				case <-releaseCh:
-				case <-r.Context().Done(): // the leader left too, which this test is not about
-				}
-			}
-		}
-		orig.ServeHTTP(w, r)
-	})
 	p, dir := newProxy(t, f)
 
 	leader := make(chan int, 1)
@@ -1011,7 +997,7 @@ func TestServeRemembersAMissUnlessTheViewerStoppedIt(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			f := newForgeStub(t)
-			arrived := parkFirstAPIRoundTrip(t, f)
+			arrived, _ := parkFirstAPIRoundTrip(t, f)
 			p, _ := newProxy(t, f)
 			if tc.clientTimeout > 0 {
 				// This row is about that timeout, so the test shortens the clock New
