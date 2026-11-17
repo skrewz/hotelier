@@ -868,6 +868,22 @@ func awaitArrival(t *testing.T, arrived chan struct{}) {
 	}
 }
 
+// awaitAPIHits blocks until the stub has counted n API requests. A parked round
+// trip counts its hit only when it resumes — which can be after its client has
+// given up on it — so a test reading the tally after a parked fetch waits for
+// that round trip to finish rather than assume it already has.
+func awaitAPIHits(t *testing.T, f *forgeStub, n int) {
+	t.Helper()
+	deadline := time.After(5 * time.Second)
+	for int(f.apiHits.Load()) < n {
+		select {
+		case <-deadline:
+			t.Fatalf("API hits = %d after 5s, want %d", f.apiHits.Load(), n)
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
+}
+
 // A viewer queued behind a fetch its leader abandoned looks again rather than
 // inheriting a miss nobody was answered: one aborted page render must not
 // leave every other viewer of a healthy login with a minute of 502s. The leader is on a deadline,
@@ -1030,6 +1046,7 @@ func TestServeRemembersAMissUnlessTheViewerStoppedIt(t *testing.T) {
 			if code := get(p, "alice").Code; code != tc.wantSecond {
 				t.Errorf("second status = %d, want %d", code, tc.wantSecond)
 			}
+			awaitAPIHits(t, f, tc.wantAPIHitsAfter)
 			if got := int(f.apiHits.Load()); got != tc.wantAPIHitsAfter {
 				t.Errorf("API hits = %d, want %d", got, tc.wantAPIHitsAfter)
 			}
