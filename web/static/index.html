@@ -310,7 +310,13 @@
         .badge-completed { background: #052e16; color: #22c55e; }
         .badge-failed { background: #450a0a; color: #ef4444; }
         .badge-cancelled { background: #1c1917; color: #78716c; }
-        .badge-priority { background: #1e293b; color: #fbbf24; margin-left: 0.25rem; }
+        /* Priority chip (issue #295): the current priority emoji sits
+           between the ⬆️/⬇️ bump arrows, all inside one chip. A direction
+           that cannot be taken (up from firefighter, down from orangutan)
+           renders inert at 30% opacity. */
+        .badge-priority { display: inline-flex; align-items: center; gap: 0.125rem; background: #1e293b; color: #fbbf24; margin-left: 0.25rem; }
+        .badge-priority .priority-bump { background: none; border: none; padding: 0; font-size: inherit; line-height: 1; cursor: pointer; }
+        .badge-priority .priority-bump.priority-bump-disabled { opacity: 0.3; cursor: default; }
         .persona-badge { display: inline-block; padding: 0.125rem 0.375rem; border-radius: 0.25rem; font-size: 0.625rem; font-weight: 600; }
         .persona-badge-0 { background: #1e1045; color: #c4b5fd; }
         .persona-badge-1 { background: #1e3a5f; color: #93c5fd; }
@@ -1230,9 +1236,9 @@
                 const rerunBtn = isRerunnable ? `<button class="btn btn-sm btn-ghost" onclick="event.stopPropagation(); rerunTask('${t.id}')">🔄</button>` : '';
                 const btnRow = (rerunBtn || cancelBtn) ? `<div class="task-btn-row">${rerunBtn}${cancelBtn}</div>` : '';
                 const logCount = t.log_count != null ? ` · ${t.log_count} log${t.log_count === 1 ? '' : 's'}${listSpinnerHTML(t)}` : '';
-                // Priority label shown only for PENDING tasks, with the
-                // bump controls alongside it (issue #266).
-                const priorityLabel = t.status === 'PENDING' && t.priority ? `<span class="badge badge-priority" title="Priority">🔜${priorityToEmoji(t.priority)}</span>${priorityBumpButtonsHTML(t.id, t.priority, true)}` : '';
+                // Priority chip shown only for PENDING tasks (issues #266,
+                // #295): current priority between the bump arrows.
+                const priorityLabel = t.status === 'PENDING' && t.priority ? priorityChipHTML(t.id, t.priority, true) : '';
                 const personaBadge = t.persona ? ` <span class="persona-badge ${personaColourClass(t.persona)}" title="Persona: ${escapeHtml(t.persona)}">🧑 ${escapeHtml(t.persona)}</span>` : '';
                 return `<div class="task-item ${itemClass}${isActive}" onclick="selectTask('${t.id}')">
                     <div class="task-id">${taskTitleHTML(t)}${t.id} <span class="badge ${badgeClass}">${t.status}</span>${priorityLabel}${personaBadge}</div>
@@ -1901,29 +1907,30 @@
         // The bump buttons step one position along this ladder (issue #266).
         const PRIORITY_LADDER = ['firefighter', 'teacher', 'orangutan'];
 
-        // priorityBumpButtonsHTML renders the ⬆️/⬇️ controls for a pending
-        // task. Each button shows an arrow and the emoji of the priority it
-        // would move the task TO: an orangutan task therefore only shows
-        // "⬆️🧑‍🏫", a firefighter task only "⬇️🧑‍🏫", a teacher task both
-        // (issue #266).
+        // priorityChipHTML renders the priority chip for a pending task
+        // (issue #295): the current priority emoji centred between the
+        // ⬆️/⬇️ bump controls. Both arrows always render; a direction that
+        // cannot be taken (up from firefighter, down from orangutan) is
+        // disabled and dimmed to 30% opacity via .priority-bump-disabled
+        // (ladder rule from issue #266).
         //
-        // stopPropagation is set for buttons embedded in clickable list
-        // rows, where a click must not also select the task.
-        function priorityBumpButtonsHTML(taskId, priority, stopPropagation) {
+        // stopPropagation is set for chips embedded in clickable list
+        // rows, where an arrow click must not also select the task.
+        function priorityChipHTML(taskId, priority, stopPropagation) {
             const idx = PRIORITY_LADDER.indexOf(priority);
             if (idx === -1) return '';
             const guard = stopPropagation ? 'event.stopPropagation(); ' : '';
             const attr = `data-task-id="${escapeAttr(taskId)}" data-priority="${escapeAttr(priority)}"`;
-            let html = '';
-            if (idx > 0) {
-                const up = PRIORITY_LADDER[idx - 1];
-                html += `<button class="btn btn-sm btn-ghost priority-bump priority-bump-up" ${attr} data-dir="up" title="Raise priority to ${escapeAttr(priorityToEmoji(up))} (${escapeAttr(up)})" onclick="${guard}bumpPriority(this.dataset.taskId, this.dataset.priority, this.dataset.dir)">&#x2B06;&#xFE0F;${priorityToEmoji(up)}</button>`;
-            }
-            if (idx < PRIORITY_LADDER.length - 1) {
-                const down = PRIORITY_LADDER[idx + 1];
-                html += `<button class="btn btn-sm btn-ghost priority-bump priority-bump-down" ${attr} data-dir="down" title="Lower priority to ${escapeAttr(priorityToEmoji(down))} (${escapeAttr(down)})" onclick="${guard}bumpPriority(this.dataset.taskId, this.dataset.priority, this.dataset.dir)">&#x2B07;&#xFE0F;${priorityToEmoji(down)}</button>`;
-            }
-            return html;
+            const arrow = (dir, target, verb) => {
+                const glyph = dir === 'up' ? '&#x2B06;&#xFE0F;' : '&#x2B07;&#xFE0F;';
+                const enabled = target !== undefined;
+                const title = enabled
+                    ? `${verb} to ${priorityToEmoji(target)} (${target})`
+                    : `${verb} — already at the ${dir === 'up' ? 'highest' : 'lowest'} priority`;
+                const cls = `priority-bump priority-bump-${dir}${enabled ? '' : ' priority-bump-disabled'}`;
+                return `<button class="${cls}" ${attr} data-dir="${dir}"${enabled ? '' : ' disabled'} title="${escapeAttr(title)}" onclick="${guard}bumpPriority(this.dataset.taskId, this.dataset.priority, this.dataset.dir)">${glyph}</button>`;
+            };
+            return `<span class="badge badge-priority" title="Priority">${arrow('up', idx > 0 ? PRIORITY_LADDER[idx - 1] : undefined, 'Raise priority')}<span class="priority-current">${priorityToEmoji(priority)}</span>${arrow('down', idx < PRIORITY_LADDER.length - 1 ? PRIORITY_LADDER[idx + 1] : undefined, 'Lower priority')}</span>`;
         }
 
         // bumpPriority moves a pending task one step up or down the
@@ -2126,30 +2133,19 @@
                     }
                 }
 
-                // Update priority badge in header (add, remove, or keep)
-                // Priority badge only shown for PENDING tasks
+                // Update priority chip in header (replace or remove).
+                // Priority chip only shown for PENDING tasks
                 const headerRow = document.querySelector('.task-detail-header > div:last-child');
                 if (headerRow) {
                     const existingPriority = headerRow.querySelector('.badge-priority');
                     const showPriority = task.status === 'PENDING' && task.priority;
-                    // The bump controls live or die with the badge, and
-                    // must reflect the current priority (issue #266).
-                    headerRow.querySelectorAll('.priority-bump').forEach(b => b.remove());
+                    // The chip carries the bump arrows and their disabled
+                    // states, so it is replaced wholesale — patching
+                    // textContent alone would leave stale arrows after a
+                    // priority change (issues #266, #295).
+                    if (existingPriority) existingPriority.remove();
                     if (showPriority) {
-                        let badge = existingPriority;
-                        if (badge) {
-                            badge.textContent = `🔜${priorityToEmoji(task.priority)}`;
-                            badge.title = `Priority`;
-                        } else {
-                            badge = document.createElement('span');
-                            badge.className = 'badge badge-priority';
-                            badge.title = 'Priority';
-                            badge.textContent = `🔜${priorityToEmoji(task.priority)}`;
-                            headerRow.insertBefore(badge, headerRow.firstChild);
-                        }
-                        badge.insertAdjacentHTML('afterend', priorityBumpButtonsHTML(task.id, task.priority, false));
-                    } else if (existingPriority) {
-                        existingPriority.remove();
+                        headerRow.insertAdjacentHTML('afterbegin', priorityChipHTML(task.id, task.priority, false));
                     }
                 }
 
@@ -2439,7 +2435,7 @@
                         <div class="task-detail-meta">${task.assigned_to ? 'Guest: ' + guestLabel(task.assigned_to) : 'Unassigned'} · <span class="meta-log-count">${logs.length} log entries</span>${spinnerHTML(logs.length, isTaskRunning(task))}</div>
                     </div>
                     <div style="display:flex;gap:0.5rem;align-items:center;">
-                        ${task.status === 'PENDING' && task.priority ? `<span class="badge badge-priority" title="Priority">🔜${priorityToEmoji(task.priority)}</span>${priorityBumpButtonsHTML(task.id, task.priority, false)}` : ''}
+                        ${task.status === 'PENDING' && task.priority ? priorityChipHTML(task.id, task.priority, false) : ''}
                         <button class="btn btn-sm btn-ghost task-detail-fullscreen-btn" onclick="toggleLogsFullscreen()" aria-pressed="false" title="View these logs in full screen">&#x26F6; Full screen</button>
                         <button class="btn btn-sm btn-ghost download-task-btn" data-task-id="${escapeAttr(task.id)}" onclick="downloadTaskLog(this.dataset.taskId)" title="Download the whole trace as JSONL">⬇ Download</button>
                         <button class="btn btn-sm btn-ghost" data-task-id="${escapeAttr(task.id)}" onclick="rerunTask(this.dataset.taskId)">🔄 Re-run</button>

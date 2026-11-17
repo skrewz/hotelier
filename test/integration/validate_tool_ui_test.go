@@ -3120,8 +3120,9 @@ const { chromium } = require('playwright');
   if (!pendingTaskVisible) fail('Pending task should be visible in task list');
   console.log('PASS: Pending task visible in list');
 
-  // Verify the priority badge is present on the pending task in the list
-  // The badge has class "badge-priority" and shows 🔜{emoji}
+  // Verify the priority chip is present on the pending task in the list.
+  // Issue #295: the chip has class "badge-priority" and shows the current
+  // priority emoji between the ⬆️/⬇️ arrows — no 🔜 prefix.
   const priorityBadgeInList = await page.evaluate((pid) => {
     const items = document.querySelectorAll('.task-item');
     for (const item of items) {
@@ -3132,8 +3133,10 @@ const { chromium } = require('playwright');
     }
     return { found: false };
   }, pendingTaskId);
-  if (!priorityBadgeInList.found) fail('Priority badge should be visible on pending task in list');
-  console.log('PASS: Priority badge visible on pending task in list:', priorityBadgeInList.text);
+  if (!priorityBadgeInList.found) fail('Priority chip should be visible on pending task in list');
+  if (priorityBadgeInList.text.includes('🔜')) fail('Priority chip should no longer use the 🔜 prefix, got: ' + priorityBadgeInList.text);
+  if (!priorityBadgeInList.text.includes('🦧')) fail('Priority chip should show the current priority emoji, got: ' + priorityBadgeInList.text);
+  console.log('PASS: Priority chip visible on pending task in list:', priorityBadgeInList.text);
 
   // Verify the priority badge is NOT present on non-pending tasks
   const noBadgeOnRunningTask = await page.evaluate((tid) => {
@@ -3149,22 +3152,26 @@ const { chromium } = require('playwright');
   if (!noBadgeOnRunningTask) fail('Priority badge should NOT be on non-pending tasks');
   console.log('PASS: Priority badge not present on running task');
 
-  // Issue #266: orangutan is the lowest rung of the ladder, so the pending
-  // row offers exactly one bump control — the up arrow towards teacher.
+  // Issue #295: both arrows always render inside the chip. Orangutan is the
+  // lowest rung of the ladder, so its down arrow is inert — disabled and
+  // dimmed to 30%% opacity — while the up arrow stays fully visible.
   const bumpButtonsInList = await page.evaluate((pid) => {
     const items = document.querySelectorAll('.task-item');
     for (const item of items) {
       if (item.textContent.includes(pid)) {
         const btns = [...item.querySelectorAll('.priority-bump')];
-        return { count: btns.length, dirs: btns.map(b => b.dataset.dir).join(','), priority: btns[0] ? btns[0].dataset.priority : null };
+        const opacity = {};
+        for (const b of btns) opacity[b.dataset.dir] = getComputedStyle(b).opacity;
+        return { count: btns.length, dirs: btns.map(b => b.dataset.dir).join(','), priority: btns[0] ? btns[0].dataset.priority : null, opacity };
       }
     }
-    return { count: -1, dirs: '', priority: null };
+    return { count: -1, dirs: '', priority: null, opacity: null };
   }, pendingTaskId);
-  if (bumpButtonsInList.count !== 1) fail('Pending orangutan row should show exactly one bump button, got ' + bumpButtonsInList.count);
-  if (bumpButtonsInList.dirs !== 'up') fail('Pending orangutan row should show only the up bump button, got: ' + bumpButtonsInList.dirs);
-  if (bumpButtonsInList.priority !== 'orangutan') fail('Bump button should carry the current priority, got: ' + bumpButtonsInList.priority);
-  console.log('PASS: Pending orangutan row shows only the up bump button');
+  if (bumpButtonsInList.count !== 2) fail('Pending task chip should show both arrows, got ' + bumpButtonsInList.count);
+  if (bumpButtonsInList.dirs !== 'up,down') fail('Pending task chip should render the up arrow before the down arrow, got: ' + bumpButtonsInList.dirs);
+  if (bumpButtonsInList.priority !== 'orangutan') fail('Bump arrows should carry the current priority, got: ' + bumpButtonsInList.priority);
+  if (bumpButtonsInList.opacity.up !== '1' || bumpButtonsInList.opacity.down !== '0.3') fail('Pending orangutan chip should show the up arrow at full opacity and the down arrow at 30%%, got: ' + JSON.stringify(bumpButtonsInList.opacity));
+  console.log('PASS: Pending orangutan row chip shows both arrows with the down arrow dimmed');
 
   // Bump controls belong to pending tasks only.
   const noBumpOnRunningTask = await page.evaluate((tid) => {
@@ -3178,6 +3185,11 @@ const { chromium } = require('playwright');
   }, taskId);
   if (!noBumpOnRunningTask) fail('Bump buttons should NOT be on non-pending tasks');
   console.log('PASS: Bump buttons not present on running task');
+
+  // Issue #295: visual check of the priority chip in the overview list —
+  // an element screenshot of the pending row keeps the chip legible.
+  await page.locator('.task-item').filter({ hasText: pendingTaskId })
+    .screenshot({ path: require('path').join(screenshotDir, '12a-priority-chip-overview.png') });
 
   // Click into the pending task to see detail view
   await page.evaluate((pid) => {
@@ -3202,24 +3214,28 @@ const { chromium } = require('playwright');
   if (!priorityBadgeInDetail.found) fail('Priority badge should be present in task detail header for pending task');
   console.log('PASS: Priority badge in detail header:', priorityBadgeInDetail.text);
 
-  // Verify the priority badge is rendered with the expected format (🔜{emoji})
-  if (!priorityBadgeInDetail.text.startsWith('🔜')) {
-    fail('Priority badge should start with 🔜 prefix, got: ' + priorityBadgeInDetail.text);
+  // Issue #295: the detail chip shows the current emoji between the arrows
+  // and drops the 🔜 prefix.
+  if (priorityBadgeInDetail.text.includes('🔜')) {
+    fail('Priority chip should no longer use the 🔜 prefix, got: ' + priorityBadgeInDetail.text);
   }
-  console.log('PASS: Priority badge has correct format');
+  console.log('PASS: Priority chip has correct format');
 
   await takeScreenshot('12-priority-badge');
 
-  // Issue #266: bump the pending task along the ladder from the detail
+  // Issue #266/#295: bump the pending task along the ladder from the detail
   // header. orangutan -> teacher -> firefighter -> back down again,
-  // asserting at each rung that the badge and the button set match the
-  // ladder rule (top rung: down only; middle: both; bottom: up only).
+  // asserting at each rung that the chip shows both arrows and that the
+  // unavailable direction is dimmed (top rung: up dimmed; middle: both
+  // full; bottom: down dimmed).
   const detailBumpButtons = () => page.evaluate(() => {
     const header = document.querySelector('.task-detail-header');
-    if (!header) return { count: -1, dirs: '', priority: null, badge: '' };
+    if (!header) return { count: -1, dirs: '', priority: null, badge: '', opacity: null };
     const badge = header.querySelector('.badge-priority');
     const btns = [...header.querySelectorAll('.priority-bump')];
-    return { count: btns.length, dirs: btns.map(b => b.dataset.dir).sort().join(','), priority: btns[0] ? btns[0].dataset.priority : null, badge: badge ? badge.textContent.trim() : '' };
+    const opacity = {};
+    for (const b of btns) opacity[b.dataset.dir] = getComputedStyle(b).opacity;
+    return { count: btns.length, dirs: btns.map(b => b.dataset.dir).sort().join(','), priority: btns[0] ? btns[0].dataset.priority : null, badge: badge ? badge.textContent.trim() : '', opacity };
   });
   const waitBadge = (emoji) => page.waitForFunction((e) => {
     const badge = document.querySelector('.task-detail-header .badge-priority');
@@ -3227,36 +3243,39 @@ const { chromium } = require('playwright');
   }, emoji, { timeout: 8000 });
 
   const detailBump0 = await detailBumpButtons();
-  if (detailBump0.count !== 1 || detailBump0.dirs !== 'up') fail('Detail view of an orangutan task should show only the up bump button, got: ' + JSON.stringify(detailBump0));
+  if (detailBump0.count !== 2 || detailBump0.dirs !== 'down,up') fail('Detail view of an orangutan task should show both arrows in the chip, got: ' + JSON.stringify(detailBump0));
+  if (detailBump0.opacity.up !== '1' || detailBump0.opacity.down !== '0.3') fail('Detail orangutan chip should dim the unavailable down arrow to 30%%, got: ' + JSON.stringify(detailBump0.opacity));
 
   // Up: orangutan -> teacher (both buttons appear)
   await page.evaluate(() => document.querySelector('.task-detail-header .priority-bump-up').click());
   await waitBadge('🧑‍🏫'); // teacher
   const detailBump1 = await detailBumpButtons();
-  if (detailBump1.count !== 2 || detailBump1.dirs !== 'down,up') fail('Detail view of a teacher task should show both bump buttons, got: ' + JSON.stringify(detailBump1));
-  if (detailBump1.priority !== 'teacher') fail('Detail bump buttons should carry priority teacher, got: ' + detailBump1.priority);
-  console.log('PASS: Bumping up moved orangutan -> teacher and shows both buttons');
+  if (detailBump1.count !== 2 || detailBump1.dirs !== 'down,up') fail('Detail view of a teacher task should show both arrows enabled, got: ' + JSON.stringify(detailBump1));
+  if (detailBump1.priority !== 'teacher') fail('Detail chip arrows should carry priority teacher, got: ' + detailBump1.priority);
+  if (detailBump1.opacity.up !== '1' || detailBump1.opacity.down !== '1') fail('Detail teacher chip should show both arrows at full opacity, got: ' + JSON.stringify(detailBump1.opacity));
+  console.log('PASS: Bumping up moved orangutan -> teacher and enables both arrows');
 
   // Up: teacher -> firefighter (only the down button remains)
   await page.evaluate(() => document.querySelector('.task-detail-header .priority-bump-up').click());
   await waitBadge('🧑‍🚒'); // firefighter
   const detailBump2 = await detailBumpButtons();
-  if (detailBump2.count !== 1 || detailBump2.dirs !== 'down') fail('Detail view of a firefighter task should show only the down bump button, got: ' + JSON.stringify(detailBump2));
-  console.log('PASS: Bumping up moved teacher -> firefighter and shows only the down button');
+  if (detailBump2.count !== 2 || detailBump2.dirs !== 'down,up') fail('Detail view of a firefighter task should still show both arrows, got: ' + JSON.stringify(detailBump2));
+  if (detailBump2.opacity.up !== '0.3' || detailBump2.opacity.down !== '1') fail('Detail firefighter chip should dim the unavailable up arrow to 30%%, got: ' + JSON.stringify(detailBump2.opacity));
+  console.log('PASS: Bumping up moved teacher -> firefighter and dims the up arrow');
 
   // Down: firefighter -> teacher (both buttons return)
   await page.evaluate(() => document.querySelector('.task-detail-header .priority-bump-down').click());
   await waitBadge('🧑‍🏫'); // teacher
   const detailBump3 = await detailBumpButtons();
-  if (detailBump3.count !== 2 || detailBump3.dirs !== 'down,up') fail('Bumping down should restore both bump buttons, got: ' + JSON.stringify(detailBump3));
-  console.log('PASS: Bumping down moved firefighter -> teacher and restores both buttons');
+  if (detailBump3.count !== 2 || detailBump3.opacity.up !== '1' || detailBump3.opacity.down !== '1') fail('Bumping down to teacher should restore both arrows to full opacity, got: ' + JSON.stringify(detailBump3));
+  console.log('PASS: Bumping down moved firefighter -> teacher and restores both arrows');
 
   // Down: teacher -> orangutan (only the up button remains)
   await page.evaluate(() => document.querySelector('.task-detail-header .priority-bump-down').click());
   await waitBadge('🦧'); // orangutan
   const detailBump4 = await detailBumpButtons();
-  if (detailBump4.count !== 1 || detailBump4.dirs !== 'up') fail('Bumping down to orangutan should leave only the up button, got: ' + JSON.stringify(detailBump4));
-  console.log('PASS: Bumping down returned to orangutan with only the up button');
+  if (detailBump4.count !== 2 || detailBump4.opacity.up !== '1' || detailBump4.opacity.down !== '0.3') fail('Bumping down to orangutan should dim the down arrow again, got: ' + JSON.stringify(detailBump4));
+  console.log('PASS: Bumping down returned to orangutan with the down arrow dimmed');
 
   await takeScreenshot('12b-priority-bumped');
 
