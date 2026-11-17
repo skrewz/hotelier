@@ -76,6 +76,9 @@ max_concurrent_tasks: 0
 | `schedule_timezone` | IANA zone name the schedule's `at` times are interpreted in, so boundaries follow the wall clock across DST. The server binary embeds the tz database (`time/tzdata`), so a zone name resolves even in the scratch container image, which ships no `/usr/share/zoneinfo`. | `"UTC"` |
 | `log_retention_days` | How many days of task logs the prune sweep keeps. Date directories older than today minus this many days are removed at startup and on the cleanup tick; the current day and any in-window day are left completely alone, and `queue_dir` is never touched. Following the `max_guests` convention, `0` disables pruning. | `14` |
 | `keepalive_ping_interval`, `keepalive_pong_timeout` | WebSocket keepalive (issue #220), the mirror of the guest's pair: the host pings **every** connection — guests and browser dashboard tabs alike, which answer pings on their own — and drops one that sends neither data nor a pong within `keepalive_ping_interval + keepalive_pong_timeout`. This is how a link that died without a FIN or RST reaching either side (a proxy dropping an idle upstream) gets noticed server-side. `0` selects the default. Keep the window below any reverse-proxy idle timeout, and make sure a proxy in front of the host relays WebSocket control frames in both directions: if pings or pongs are swallowed on the way, a healthy link looks dead and is dropped once per window, and a dead one looks alive. | `10` / `30` |
+| `forge_url` | The forge's absolute origin, the upstream for `GET /avatar/<login>` (issue #275). Empty configures the proxy off: the route answers `503`, distinct from a `404` for an identity the forge does not know. | — |
+| `avatar_cache_dir` | Directory holding one normalised PNG tile per login for the avatar proxy (issue #275). The cache key is the login; the email-hash in the forge's avatar URL is never a stored key. A render is **stored until the file is removed**: nothing here evicts, revalidates or refetches, so an identity that changes its avatar keeps the old tile on this server until a human deletes `<login>.png` — revalidation and the rest of the cache policy are issue #276. Required with `forge_url`; on its own it enables nothing. | — |
+| `forge_client_cert`, `forge_client_key` | Paths of the mTLS client pair hotelier presents to the forge's ingress when fetching avatars (issue #275). The forge is mTLS-only at the ingress, so without these the fetch is a miss. Both unset means no client certificate; one without the other is a configuration error that disables the proxy with a startup log line. | — |
 
 **The HTTP API performs no authentication and there is no TLS.** A server
 bound to `0.0.0.0` serves the dashboard, the guest registry and the task logs
@@ -338,6 +341,7 @@ curl -X POST http://localhost:8080/api/tasks \
 | `GET` | `/api/guests/:id` | Get guest details |
 | `POST` | `/api/concurrency` | Set the live concurrency cap; JSON body `{"cap": N}` (whole number, `0` pauses new work; any negative number or `"unlimited"` lifts the cap; a string says the same as the number or word it spells); requires `Content-Type: application/json` (a CSRF guard) and nothing else — like every route here it is unauthenticated, the network edge deciding who reaches it; honoured until the next schedule boundary; returns the concurrency picture |
 | `GET` | `/api/health` | Health check |
+| `GET` | `/avatar/<login>` | Avatar proxy (issue #275): resolves a forge login to a normalised 64×64 PNG tile via two upstream requests (`/api/v1/users/<login>`, then one GET of `avatar_url`); `400` for a name that is not a login, `404` for an identity the forge does not know, `502` for any other miss, `503` when `forge_url` is unset. A miss stores nothing, and one the forge was asked about — answered badly, or never answered within the client's timeout — is remembered for a minute, so a page render or a probe of unknown logins costs one round trip per identity rather than one per request (a request whose own connection closed keeps its miss to itself, rather than handing it to the next viewer); the cause of a miss that reached the forge is written to the server log, never to the response |
 | `GET` | `/metrics` | Prometheus scrape endpoint: live server state as gauges, plus task-transition counters and histograms |
 | `WS` | `/ws` | WebSocket (JSON-RPC) |
 
@@ -545,6 +549,7 @@ podman run -d --name hotelier \
 | `/etc/hotelier` | Config files (read-only recommended) — mount a host directory containing `server.yaml` |
 | `/var/log/hotelier` | Task log persistence — set `log_dir` in config to enable; mount a host directory |
 | `/var/lib/hotelier/queue` | Queue persistence — set `queue_dir` in config to enable; mount a host directory |
+| `/var/lib/hotelier/avatars` | Avatar tiles — set `avatar_cache_dir` (with `forge_url`) in config to enable; mount a host directory |
 
 Example with read-only config:
 

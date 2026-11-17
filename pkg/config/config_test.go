@@ -4,6 +4,7 @@ import (
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	crand "crypto/rand"
+	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/pem"
@@ -528,4 +529,56 @@ func generateSelfSignedCert(t *testing.T) (certPEM, keyPEM string) {
 	}
 
 	return certBuf.String(), keyBuf.String()
+}
+
+// The forge hop and the guest hop present a long-lived service identity, so
+// the pairing rule and the protocol floor live in one function. These cases
+// are the mirror of the guest's: no pair configures nothing, half a pair is a
+// configuration error rather than a silent no-certificate connection, and a
+// pair that cannot be read says so.
+func TestServerConfig_TLSConfig(t *testing.T) {
+	t.Run("no pair", func(t *testing.T) {
+		tlsCfg, err := (&ServerConfig{}).TLSConfig()
+		if err != nil || tlsCfg != nil {
+			t.Fatalf("TLSConfig() = (%v, %v), want (nil, nil)", tlsCfg, err)
+		}
+	})
+
+	t.Run("half a pair", func(t *testing.T) {
+		for _, cfg := range []ServerConfig{
+			{ForgeClientCert: "forge.crt"},
+			{ForgeClientKey: "forge.key"},
+		} {
+			if _, err := cfg.TLSConfig(); err == nil {
+				t.Errorf("TLSConfig() with %q set alone succeeded, want an error", cfg.ForgeClientCert+cfg.ForgeClientKey)
+			}
+		}
+	})
+
+	t.Run("unreadable pair", func(t *testing.T) {
+		cfg := ServerConfig{ForgeClientCert: "/nope/forge.crt", ForgeClientKey: "/nope/forge.key"}
+		if _, err := cfg.TLSConfig(); err == nil {
+			t.Fatal("TLSConfig() with unreadable files succeeded, want an error")
+		}
+	})
+
+	t.Run("states the protocol floor", func(t *testing.T) {
+		dir := t.TempDir()
+		certPEM, keyPEM := generateSelfSignedCert(t)
+		certPath, keyPath := filepath.Join(dir, "forge.crt"), filepath.Join(dir, "forge.key")
+		if err := os.WriteFile(certPath, []byte(certPEM), 0o600); err != nil {
+			t.Fatalf("write cert: %v", err)
+		}
+		if err := os.WriteFile(keyPath, []byte(keyPEM), 0o600); err != nil {
+			t.Fatalf("write key: %v", err)
+		}
+
+		tlsCfg, err := (&ServerConfig{ForgeClientCert: certPath, ForgeClientKey: keyPath}).TLSConfig()
+		if err != nil {
+			t.Fatalf("TLSConfig: %v", err)
+		}
+		if tlsCfg.MinVersion != tls.VersionTLS12 {
+			t.Errorf("MinVersion = %d, want TLS 1.2 stated rather than defaulted", tlsCfg.MinVersion)
+		}
+	})
 }
