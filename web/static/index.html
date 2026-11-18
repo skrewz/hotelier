@@ -1884,7 +1884,10 @@
         // escapeAttr escapes a value for interpolation into a double-quoted
         // HTML attribute. escapeHtml is not enough for that context: it
         // serialises via innerHTML, which leaves quotes untouched, so a value
-        // containing a quote would break out of the attribute.
+        // containing a quote would break out of the attribute. Where markup
+        // is assembled as a string, attributes take escapeAttr and text
+        // takes escapeHtml; assigning to a DOM property (textContent, title)
+        // parses no HTML, so the raw value is the right input there.
         function escapeAttr(value) {
             const entities = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' };
             return String(value ?? '').replace(/[&<>"']/g, (c) => entities[c]);
@@ -2117,9 +2120,7 @@
                 }
 
                 // Update persona badge in header (add, remove, or keep): the
-                // name, in one neutral style (issue #277). Both sinks here are
-                // DOM properties rather than markup, so the name goes in raw —
-                // escaping it would only put entities in the tooltip.
+                // name, in one neutral style (issue #277).
                 const detailIdEl = document.querySelector('.task-detail-id');
                 if (detailIdEl) {
                     const existingPersona = detailIdEl.querySelector('.persona-badge');
@@ -2178,8 +2179,6 @@
             if (!task) return;
 
             const badgeClass = `badge-${task.status.toLowerCase()}`;
-            // The detail header is built by string assembly, so the name needs
-            // escapeAttr for the attribute and escapeHtml for the text.
             const personaBadge = task.persona ? `<span class="persona-badge" title="Persona: ${escapeAttr(task.persona)}">${escapeHtml(task.persona)}</span>` : '';
             const promptMarkdown = renderMarkdown(task.prompt);
             // Extract first line of prompt for collapsed preview
