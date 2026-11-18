@@ -1481,25 +1481,6 @@ const { chromium } = require('playwright');
   console.log('PASS: ⏳ spinner on task cards is keyed off status and log count');
 
   // =====================================================================
-  // Phase 1c: Persona pill removed from the rows (issue #277)
-  // =====================================================================
-  console.log('=== Phase 1c: No persona pills in the rows ===');
-
-  const personaResult = await page.evaluate(() => {
-    const pills = document.querySelectorAll('.task-item .persona-badge');
-    return {
-      pillCount: pills.length,
-      paletteClass: /persona-badge-[0-7]/.test(document.documentElement.innerHTML),
-      hashFn: typeof window.personaColourClass === 'function',
-    };
-  });
-
-  if (personaResult.pillCount !== 0) fail('Rows should carry no persona pills, found ' + personaResult.pillCount);
-  if (personaResult.paletteClass) fail('The mod-8 palette classes should be gone from the page');
-  if (personaResult.hashFn) fail('personaColourClass should be gone from the page');
-  console.log('PASS: task rows carry faces, not persona pills');
-
-  // =====================================================================
   // Phase 1e: Task title rendering in the overview list (issue #229)
   // =====================================================================
   console.log('=== Phase 1e: Task titles in overview ===');

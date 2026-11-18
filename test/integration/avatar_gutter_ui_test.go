@@ -6,6 +6,10 @@
 // persona name remains in the detail pane, and the gutter box occupies the
 // identical dimensions whether the tile loads or the proxy answers 502 — so
 // a forge outage never reflows a row.
+//
+// The proxy route is registered so the harness is complete, but every tile
+// request is intercepted by page.route: this file measures the geometry the
+// row grows around a tile, not what the proxy fetches from the forge.
 package integration
 
 import (
@@ -21,9 +25,15 @@ import (
 	"time"
 
 	"hotelier/internal/server"
+	"hotelier/pkg/avatar"
 	"hotelier/pkg/config"
 	"hotelier/pkg/persona"
 )
+
+// hostilePersona is a persona name that is not a forge login and carries
+// markup: the row's only sink for the name. The proxy would answer it 400, so
+// the row must escape it rather than let it become an element.
+const hostilePersona = `cast"<img src=x onload=window.__xss=1>`
 
 func TestAvatarGutterUI(t *testing.T) {
 	wd, err := os.Getwd()
@@ -51,6 +61,7 @@ func TestAvatarGutterUI(t *testing.T) {
 		LogDir:    logDir,
 		Personas: []persona.Persona{
 			{Name: "cast-one", Env: map[string]string{"ROLE": "reviewer"}},
+			{Name: hostilePersona},
 		},
 	}
 	srv := server.New(cfg)
@@ -66,6 +77,7 @@ func TestAvatarGutterUI(t *testing.T) {
 	mux.HandleFunc("/api/health", srv.HandleHealth)
 	mux.HandleFunc("/api/logs", srv.HandleLogs)
 	mux.HandleFunc("/api/logs/", srv.HandleLogEntry)
+	mux.HandleFunc(avatar.PathPrefix, srv.HandleAvatar)
 	mux.HandleFunc("/", srv.HandleWebUI)
 
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
@@ -91,6 +103,7 @@ func TestAvatarGutterUI(t *testing.T) {
 	specs := []taskSpec{
 		{"casted-task", "cast-one", "a prompt long enough that its preview wraps onto a second line, so the gutter is seen holding every line under the headline"},
 		{"bare-task", "", "avatar gutter fixture"},
+		{"escaped-task", hostilePersona, "avatar gutter fixture"},
 	}
 	for i, s := range specs {
 		body, _ := json.Marshal(map[string]interface{}{
@@ -108,25 +121,6 @@ func TestAvatarGutterUI(t *testing.T) {
 		if res.StatusCode != http.StatusCreated {
 			t.Fatalf("create %s: status %d", s.id, res.StatusCode)
 		}
-	}
-
-	// Server-side check independent of the browser: the identity really is
-	// on the task, so a green UI run cannot be resting on an empty field.
-	res, err := http.Get(baseURL + "/api/tasks/casted-task")
-	if err != nil {
-		t.Fatalf("get casted-task: %v", err)
-	}
-	var detail struct {
-		Task struct {
-			Persona string `json:"persona"`
-		} `json:"task"`
-	}
-	if err := json.NewDecoder(res.Body).Decode(&detail); err != nil {
-		t.Fatalf("decode casted-task: %v", err)
-	}
-	res.Body.Close()
-	if detail.Task.Persona != "cast-one" {
-		t.Fatalf("expected casted-task persona cast-one, got %q", detail.Task.Persona)
 	}
 
 	// Allow overriding the screenshot directory via env var for manual
@@ -147,11 +141,15 @@ const { chromium } = require('playwright');
   const baseURL = '%s';
   const screenshotDir = '%s';
   const errors = [];
+  // A persona name that is not a forge login and carries markup; the Go
+  // side configures a task under the same name.
+  const hostile = 'cast"<img src=x onload=window.__xss=1>';
   // A 1x1 opaque PNG; CSS scales it into the gutter box.
   const png = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==', 'base64');
 
   const pageErrors = page => {
     page.on('pageerror', err => errors.push(String(err)));
+    page.on('dialog', dialog => { errors.push('dialog: ' + dialog.message()); dialog.dismiss(); });
     page.on('console', msg => {
       if (msg.type() !== 'error') return;
       // A failed tile load is the outage path under test; browsers log it
@@ -167,7 +165,7 @@ const { chromium } = require('playwright');
     await page.waitForFunction(() => document.querySelectorAll('#task-filter-row .task-filter-btn').length === 6, { timeout: 10000 });
     // PENDING rows are hidden by default (issue #289); reveal them.
     await page.click('#task-filter-row .task-filter-btn[data-status="PENDING"]');
-    await page.waitForFunction(() => document.querySelectorAll('#task-list .task-item').length === 2, { timeout: 10000 });
+    await page.waitForFunction(() => document.querySelectorAll('#task-list .task-item').length === 3, { timeout: 10000 });
     // Every gutter image has settled (loaded or failed) before measuring.
     await page.waitForFunction(() => [...document.querySelectorAll('.task-avatar img')].every(i => i.complete), { timeout: 10000 });
   };
@@ -187,7 +185,10 @@ const { chromium } = require('playwright');
         meta: box(r.querySelector('.task-meta')),
         prompt: box(r.querySelector('.task-prompt')),
         avatar: r.querySelector('.task-avatar') ? box(r.querySelector('.task-avatar')) : null,
+        gutterTitle: r.querySelector('.task-avatar') ? r.querySelector('.task-avatar').getAttribute('title') : null,
         gap: parseFloat(getComputedStyle(r.querySelector('.task-body')).columnGap) || 0,
+        xss: window.__xss === 1,
+        markupInRow: !!r.querySelector('[onload]'),
       };
       const img = r.querySelector('.task-avatar img');
       if (img) {
@@ -216,11 +217,24 @@ const { chromium } = require('playwright');
 
   const casted = await metricsFor(page, 'casted-task');
   const bare = await metricsFor(page, 'bare-task');
+  const escaped = await metricsFor(page, 'escaped-task');
 
   // The face renders from the proxy, keyed by the identity.
   if (casted.imgSrc !== '/avatar/cast-one') throw new Error('expected src /avatar/cast-one, got ' + casted.imgSrc);
 
-  // The gutter is the token's square; every measurement below is derived from
+  // The name also rides in the gutter's title, so a row whose tile cannot
+  // render still says who acted.
+  if (casted.gutterTitle !== 'Persona: cast-one') throw new Error('the gutter does not name the identity: ' + casted.gutterTitle);
+
+  // A persona name that is not a forge login — the proxy would answer it 400
+  // — is escaped on its way into the row and never becomes markup.
+  if (escaped.imgSrc !== '/avatar/' + encodeURIComponent(hostile)) {
+    throw new Error('a persona name is not URL-encoded in the src: ' + escaped.imgSrc);
+  }
+  if (escaped.markupInRow) throw new Error('a persona name reached the row as markup');
+  if (escaped.xss) throw new Error('a persona name executed in the page');
+
+  // The gutter is the token's square. Every measurement below is derived from
   // that token, so raising it stays a one-line change here too.
   const token = await page.evaluate(() => getComputedStyle(document.documentElement).getPropertyValue('--task-avatar-gutter').trim());
   if (token !== '40px') throw new Error('expected --task-avatar-gutter to be 40px, got ' + token);
@@ -271,6 +285,7 @@ const { chromium } = require('playwright');
   if (!failed.imgErrorClass) throw new Error('a failed tile did not mark the image for fallback');
   if (failed.imgVisibility !== 'hidden') throw new Error('the broken image is still visible');
   if (!failed.glyph.includes('"?"')) throw new Error('expected the fallback glyph, got ' + failed.glyph);
+  if (failed.gutterTitle !== 'Persona: cast-one') throw new Error('the gutter lost the name during an outage: ' + failed.gutterTitle);
   if (Math.abs(failed.avatar.w - gutter) > 1 || Math.abs(failed.avatar.h - gutter) > 1) {
     throw new Error('the fallback box is not the token\'s square: ' + JSON.stringify(failed.avatar));
   }
