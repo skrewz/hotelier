@@ -614,11 +614,12 @@ func TestValidateToolUI(t *testing.T) {
 	}
 	t.Logf("Pending task created: %s", pendingTaskID)
 
-	// Step 4e: Create a second task with a different persona to test colour distribution.
+	// Step 4e: Create a second task with a different identity, so a row with
+	// an avatar gutter (issue #277) appears alongside the others.
 	colouredTaskID := fmt.Sprintf("ui-test-coloured-task-%d", time.Now().UnixNano())
 	colouredTask := &queue.Task{
 		ID:      colouredTaskID,
-		Prompt:  "A task with a distinct persona for colour testing",
+		Prompt:  "A task with a distinct persona",
 		Tags:    []string{"business-default"},
 		Persona: "test-blue",
 	}
@@ -1480,31 +1481,23 @@ const { chromium } = require('playwright');
   console.log('PASS: ⏳ spinner on task cards is keyed off status and log count');
 
   // =====================================================================
-  // Phase 1c: Persona badge colours
+  // Phase 1c: Persona pill removed from the rows (issue #277)
   // =====================================================================
-  console.log('=== Phase 1c: Persona badge colours ===');
+  console.log('=== Phase 1c: No persona pills in the rows ===');
 
   const personaResult = await page.evaluate(() => {
-    const items = document.querySelectorAll('.task-item');
-    const results = [];
-    for (const item of items) {
-      const badge = item.querySelector('.persona-badge');
-      if (!badge) continue;
-      results.push({
-        id: item.textContent.substring(0, 40),
-        className: badge.className,
-        text: badge.textContent.trim(),
-        hasColourClass: /persona-badge-[0-7]/.test(badge.className),
-      });
-    }
-    return results;
+    const pills = document.querySelectorAll('.task-item .persona-badge');
+    return {
+      pillCount: pills.length,
+      paletteClass: /persona-badge-[0-7]/.test(document.documentElement.innerHTML),
+      hashFn: typeof window.personaColourClass === 'function',
+    };
   });
 
-  if (personaResult.length === 0) fail('No persona badges found in task list');
-  for (const p of personaResult) {
-    if (!p.hasColourClass) fail('Persona badge should have a colour class, got: ' + p.className);
-    console.log('PASS: Persona badge colour class for', p.id, ':', p.className);
-  }
+  if (personaResult.pillCount !== 0) fail('Rows should carry no persona pills, found ' + personaResult.pillCount);
+  if (personaResult.paletteClass) fail('The mod-8 palette classes should be gone from the page');
+  if (personaResult.hashFn) fail('personaColourClass should be gone from the page');
+  console.log('PASS: task rows carry faces, not persona pills');
 
   // =====================================================================
   // Phase 1e: Task title rendering in the overview list (issue #229)
