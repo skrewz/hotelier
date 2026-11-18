@@ -3,8 +3,10 @@ package avatar
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"crypto/tls"
 	"encoding/binary"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -19,6 +21,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -123,6 +126,13 @@ type forgeStub struct {
 	imageStatus int
 	apiStatus   int
 	redirectTo  string
+	// The image hop's real headers (issue #276): a private cache hint and
+	// Last-Modified, and no ETag at all. imageETag is only set by the test
+	// that plants one, to prove the proxy never forwards it.
+	imageETag         string
+	imageLastModified string
+	honorIfModSince   bool   // answer a matching conditional image request 304
+	ifModSince        string // If-Modified-Since carried by the latest image request
 }
 
 func newForgeStub(t *testing.T) *forgeStub {
@@ -156,9 +166,23 @@ func newForgeStub(t *testing.T) *forgeStub {
 		f.imageHits.Add(1)
 		f.mu.Lock()
 		redirectTo, status, ctype, body := f.redirectTo, f.imageStatus, f.imageType, f.imageBody
+		etag, lastModified := f.imageETag, f.imageLastModified
+		f.ifModSince = r.Header.Get("If-Modified-Since")
+		conditional := f.honorIfModSince && f.ifModSince != "" && f.ifModSince == lastModified
 		f.mu.Unlock()
+		if etag != "" {
+			w.Header().Set("ETag", etag)
+		}
+		if lastModified != "" {
+			w.Header().Set("Last-Modified", lastModified)
+		}
+		w.Header().Set("Cache-Control", "private, max-age=21600")
 		if redirectTo != "" {
 			http.Redirect(w, r, redirectTo, http.StatusFound)
+			return
+		}
+		if conditional {
+			w.WriteHeader(http.StatusNotModified)
 			return
 		}
 		w.Header().Set("Content-Type", ctype)
@@ -461,9 +485,10 @@ func TestServeRejectsUnusableLogins(t *testing.T) {
 	}
 }
 
-// A login the forge does not know is absence, not unreachability: 404, and
-// nothing stored. (The question-mark glyph is issue #276's follow-up.)
-func TestServeUnknownIdentityIs404AndStoresNothing(t *testing.T) {
+// A login the forge does not know is absence, not unreachability: a 200
+// carrying the question-mark glyph, cacheable like any other answer, and
+// nothing stored (issue #276).
+func TestServeUnknownIdentityServesCachedGlyph(t *testing.T) {
 	f := newForgeStub(t)
 	orig := f.srv.Config.Handler
 	f.srv.Config.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -476,10 +501,34 @@ func TestServeUnknownIdentityIs404AndStoresNothing(t *testing.T) {
 	})
 	p, dir := newProxy(t, f)
 
-	rec := get(p, "ghost")
+	first := get(p, "ghost")
 
-	if rec.Code != http.StatusNotFound {
-		t.Fatalf("status = %d, want 404", rec.Code)
+	if first.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 with the glyph", first.Code)
+	}
+	img, _, err := image.Decode(bytes.NewReader(first.Body.Bytes()))
+	if err != nil {
+		t.Fatalf("absence was not answered with a decodable image: %v", err)
+	}
+	if b := img.Bounds(); b.Dx() != DefaultTileSize || b.Dy() != DefaultTileSize {
+		t.Errorf("glyph = %dx%d, want %dx%d", b.Dx(), b.Dy(), DefaultTileSize, DefaultTileSize)
+	}
+	if got := first.Header().Get("Cache-Control"); got != cacheControlValue {
+		t.Errorf("Cache-Control = %q, want the proxy's policy %q", got, cacheControlValue)
+	}
+	if got := first.Header().Get("ETag"); got != etagFor(first.Body.Bytes()) {
+		t.Errorf("ETag = %q, want the glyph's content hash", got)
+	}
+
+	// Cached like any answer: the next viewer is served the same glyph from
+	// the memory of the absence rather than a fresh pair of forge requests.
+	second := get(p, "ghost")
+	if second.Code != http.StatusOK || !bytes.Equal(second.Body.Bytes(), first.Body.Bytes()) {
+		t.Errorf("second request: status = %d, body equal = %v, want the same glyph",
+			second.Code, bytes.Equal(second.Body.Bytes(), first.Body.Bytes()))
+	}
+	if got := f.apiHits.Load(); got != 1 {
+		t.Errorf("API hits = %d, want 1: the remembered absence costs no round trip", got)
 	}
 	if files := storeFiles(t, dir); len(files) != 0 {
 		t.Errorf("store must be empty for an unknown identity, got %v", files)
@@ -755,8 +804,12 @@ func TestServeRemembersUnknownIdentityBetweenRequests(t *testing.T) {
 	first := get(p, "ghost")
 	second := get(p, "ghost")
 
-	if first.Code != http.StatusNotFound || second.Code != http.StatusNotFound {
-		t.Fatalf("statuses = %d and %d, want 404 both times", first.Code, second.Code)
+	if first.Code != http.StatusOK || second.Code != http.StatusOK {
+		t.Fatalf("statuses = %d and %d, want 200 both times: the glyph is a cacheable answer",
+			first.Code, second.Code)
+	}
+	if !bytes.Equal(first.Body.Bytes(), second.Body.Bytes()) {
+		t.Error("the remembered absence changed glyph between requests")
 	}
 	if got := f.apiHits.Load(); got != 1 {
 		t.Errorf("API hits = %d, want 1: a remembered miss costs no round trip", got)
@@ -1071,13 +1124,18 @@ func TestServeFetchesAgainOnceAMissExpires(t *testing.T) {
 	})
 	p, _ := newProxy(t, f)
 
-	if code := get(p, "alice").Code; code != http.StatusNotFound {
-		t.Fatalf("status = %d, want 404", code)
+	absent := get(p, "alice")
+	if absent.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 with the glyph", absent.Code)
 	}
 	expireMisses(p)
 	known.Store(true)
-	if code := get(p, "alice").Code; code != http.StatusOK {
-		t.Fatalf("status after the window = %d, want 200", code)
+	present := get(p, "alice")
+	if present.Code != http.StatusOK {
+		t.Fatalf("status after the window = %d, want 200", present.Code)
+	}
+	if bytes.Equal(present.Body.Bytes(), absent.Body.Bytes()) {
+		t.Error("the identity got its lookup back but is still served the glyph")
 	}
 	if got := f.apiHits.Load(); got != 2 {
 		t.Errorf("API hits = %d, want 2 (the miss was not permanent)", got)
@@ -1176,6 +1234,556 @@ func TestNewRejectsUnusableForgeURL(t *testing.T) {
 	for _, u := range []string{"", "not a url", "ftp://forge.example.com"} {
 		if _, err := New(Config{ForgeURL: u, CacheDir: t.TempDir()}); err == nil {
 			t.Errorf("New(%q) succeeded, want an error", u)
+		}
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Cache policy and minted validators (issue #276).
+// ---------------------------------------------------------------------------
+
+// etagFor is the validator the proxy must mint: a strong content hash of the
+// exact bytes it serves. Upstream validators are never forwarded, so what the
+// proxy emits can never equal one.
+func etagFor(data []byte) string {
+	sum := sha256.Sum256(data)
+	return `"` + hex.EncodeToString(sum[:]) + `"`
+}
+
+// ageEntry moves a stored render past max-age, standing in for a day of
+// dashboard renders without the test waiting on a wall clock.
+func ageEntry(t *testing.T, dir, login string, age time.Duration) {
+	t.Helper()
+	path := filepath.Join(dir, login+".png")
+	when := time.Now().Add(-age)
+	if err := os.Chtimes(path, when, when); err != nil {
+		t.Fatalf("age stored render: %v", err)
+	}
+}
+
+// waitFor polls a condition the proxy drives from a background goroutine, so
+// no test waits on a guessed delay.
+func waitFor(t *testing.T, what string, done func() bool) {
+	t.Helper()
+	deadline := time.After(5 * time.Second)
+	for !done() {
+		select {
+		case <-deadline:
+			t.Fatalf("timed out waiting for %s", what)
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
+}
+
+// The proxy's own cache policy, exactly: one day fresh, a week servable with
+// background refresh, a month on error — and must-revalidate nowhere. The
+// validator it presents is minted from the served bytes: the upstream sends
+// Last-Modified, a private cache hint, and (in the planted case) an ETag, and
+// none of it may appear in the proxy's answer.
+func TestServeSendsCachePolicyAndMintedETag(t *testing.T) {
+	f := newForgeStub(t)
+	f.mu.Lock()
+	f.imageLastModified = time.Date(2026, time.November, 9, 12, 0, 0, 0, time.UTC).Format(http.TimeFormat)
+	f.imageETag = `"upstream-validator"`
+	f.mu.Unlock()
+	p, _ := newProxy(t, f)
+
+	rec := get(p, "alice")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d (body %q)", rec.Code, rec.Body.String())
+	}
+
+	if got := rec.Header().Get("Cache-Control"); got != cacheControlValue {
+		t.Errorf("Cache-Control = %q, want %q", got, cacheControlValue)
+	}
+	etag := rec.Header().Get("ETag")
+	if want := etagFor(rec.Body.Bytes()); etag != want {
+		t.Errorf("ETag = %s, want the content hash %s", etag, want)
+	}
+	if etag == `"upstream-validator"` {
+		t.Error("the upstream's ETag was served in place of a minted validator")
+	}
+	if lm := rec.Header().Get("Last-Modified"); lm != "" {
+		t.Errorf("Last-Modified = %q, want none: the upstream validator is only carried on the proxy's own conditional requests", lm)
+	}
+}
+
+// A minted validator that nothing honours is decoration: a viewer that
+// already holds these bytes gets a 304 and no body.
+func TestServeAnswersMatchingIfNoneMatchWith304(t *testing.T) {
+	f := newForgeStub(t)
+	p, dir := newProxy(t, f)
+
+	first := get(p, "alice")
+	etag := first.Header().Get("ETag")
+	if etag == "" {
+		t.Fatal("the first response carried no ETag to revalidate with")
+	}
+	hits := f.totalHits()
+
+	// An hour, still inside max-age: nothing revalidates behind the request,
+	// so what the assertion sees below is this answer and nothing else. A
+	// conditional answer still has to say how old the bytes are (RFC 9110
+	// §5.1) — the ETag alone says which face is held, not since when.
+	ageEntry(t, dir, "alice", time.Hour)
+
+	req := httptest.NewRequest(http.MethodGet, PathPrefix+"alice", nil)
+	req.Header.Set("If-None-Match", etag)
+	rec := httptest.NewRecorder()
+	p.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusNotModified {
+		t.Fatalf("status = %d, want 304", rec.Code)
+	}
+	if rec.Body.Len() != 0 {
+		t.Errorf("304 carried a %d-byte body, want none", rec.Body.Len())
+	}
+	if got := rec.Header().Get("ETag"); got != etag {
+		t.Errorf("304 ETag = %q, want it to stand as it was", etag)
+	}
+	if got, err := strconv.Atoi(rec.Header().Get("Age")); err != nil || got < 3540 || got > 3660 {
+		t.Errorf("304 Age = %q, want about 3600: these bytes are an hour old", rec.Header().Get("Age"))
+	}
+	if got := f.totalHits(); got != hits {
+		t.Errorf("forge hits grew to %d on a 304, want %d", got, hits)
+	}
+}
+
+// stale-while-revalidate, the server's own half: past max-age the stored
+// render answers at once and a background revalidation refreshes it. The
+// stale answer must not wait on the forge, and one stale entry must trigger
+// exactly one refresh.
+func TestStaleRenderServesImmediatelyAndRevalidatesInBackground(t *testing.T) {
+	f := newForgeStub(t)
+	p, dir := newProxy(t, f)
+
+	first := get(p, "alice")
+	if first.Code != http.StatusOK {
+		t.Fatalf("warm-up: status = %d", first.Code)
+	}
+
+	// The identity's face changes on the forge, and the entry passes max-age.
+	f.mu.Lock()
+	f.imageBody = encodePNG(t, 300, 300)
+	f.mu.Unlock()
+	ageEntry(t, dir, "alice", maxAge+time.Hour)
+
+	stale := get(p, "alice")
+	if stale.Code != http.StatusOK || !bytes.Equal(stale.Body.Bytes(), first.Body.Bytes()) {
+		t.Fatal("the stale request did not serve the stored render at once")
+	}
+
+	awaitAPIHits(t, f, 2)
+	waitFor(t, "the revalidated render to land", func() bool {
+		stored, err := os.ReadFile(filepath.Join(dir, "alice.png"))
+		return err == nil && !bytes.Equal(stored, first.Body.Bytes())
+	})
+
+	refreshed := get(p, "alice")
+	if bytes.Equal(refreshed.Body.Bytes(), first.Body.Bytes()) {
+		t.Error("the background revalidation never reached the render")
+	}
+	if got := f.apiHits.Load(); got != 2 {
+		t.Errorf("API hits = %d, want 2: one stale entry triggers one refresh", got)
+	}
+}
+
+func TestServeStampsTheAgeOfAStaleRender(t *testing.T) {
+	f := newForgeStub(t)
+	p, dir := newProxy(t, f)
+
+	fresh := get(p, "alice")
+	if fresh.Code != http.StatusOK {
+		t.Fatalf("warm-up: status = %d", fresh.Code)
+	}
+	if got := fresh.Header().Get("Age"); got != "" {
+		t.Errorf("Age = %q on a render the forge just handed over, want none", got)
+	}
+
+	age := maxAge + time.Hour
+	ageEntry(t, dir, "alice", age)
+	stale := get(p, "alice")
+	if stale.Code != http.StatusOK {
+		t.Fatalf("stale: status = %d", stale.Code)
+	}
+	got, err := strconv.Atoi(stale.Header().Get("Age"))
+	if err != nil {
+		t.Fatalf("Age = %q, want the seconds these bytes have been the entry", stale.Header().Get("Age"))
+	}
+	if want := int(age.Seconds()); got < want-60 || got > want+60 {
+		t.Errorf("Age = %d, want about %d", got, want)
+	}
+
+	// The same request asked the forge once, as any stale answer does.
+	awaitAPIHits(t, f, 2)
+	waitFor(t, "the revalidation to settle", func() bool {
+		info, err := os.Stat(filepath.Join(dir, "alice.png"))
+		return err == nil && time.Since(info.ModTime()) < time.Hour
+	})
+}
+
+// A render whose mtime lies ahead of the clock — an NTP correction that stepped
+// the clock back after boot, a store copied off a host that was running fast —
+// must not read as brand new. A negative age clears every window the store
+// checks at once: no Age, no revalidation, no outer bound, and no eviction path
+// either, until real time catches up with a timestamp the store did not pick.
+// So the clock is clamped to just past max-age: the render still answers this
+// request, and the forge is asked behind it.
+func TestFutureDatedRenderIsServedButNeverAsAFreshOne(t *testing.T) {
+	f := newForgeStub(t)
+	p, dir := newProxy(t, f)
+
+	first := get(p, "alice")
+	if first.Code != http.StatusOK {
+		t.Fatalf("warm-up: status = %d", first.Code)
+	}
+	ageEntry(t, dir, "alice", -time.Hour) // the mtime is an hour ahead of the clock
+
+	rec := get(p, "alice")
+	if rec.Code != http.StatusOK || !bytes.Equal(rec.Body.Bytes(), first.Body.Bytes()) {
+		t.Fatalf("status = %d, want the render to keep answering while the clock is odd", rec.Code)
+	}
+	if got := rec.Header().Get("Age"); got == "" {
+		t.Error("Age = none, want an answer that does not claim these bytes are freshly minted")
+	}
+	awaitAPIHits(t, f, 2)
+}
+
+// The store obeys the staleness windows the response advertises. RFC 9110 §4.2.4
+// lets a cache use a stale response while revalidating and on error, and no
+// further, so past max-age plus stale-if-error the request takes the forge path
+// instead of the file's — a bodyless 502 with the forge down, which is where
+// stale-if-error belongs: honoured by the caches downstream of here, keeping the
+// faces they already hold rather than this one. Both directions of that fall-
+// through are pinned: what the store refuses, and where the request then lands.
+
+func TestServeRefusesAStaleRenderBeyondThePolicyWindows(t *testing.T) {
+	t.Run("past the windows, the forge path is taken", func(t *testing.T) {
+		f := newForgeStub(t)
+		p, dir := newProxy(t, f)
+
+		first := get(p, "alice")
+		if first.Code != http.StatusOK {
+			t.Fatalf("warm-up: status = %d", first.Code)
+		}
+		ageEntry(t, dir, "alice", maxStaleAge+time.Hour)
+		f.srv.Close() // the forge went down while this entry aged past the policy
+
+		rec := get(p, "alice")
+		if rec.Code != http.StatusBadGateway {
+			t.Fatalf("status = %d, want 502: a render past the windows this proxy advertises still answered from the store", rec.Code)
+		}
+		if bytes.HasPrefix(rec.Body.Bytes(), []byte{0x89, 'P', 'N', 'G'}) {
+			t.Error("the body was the stale tile, want the caller's own miss line")
+		}
+	})
+
+	// The half the README and config/server.example.yaml promise: refusing an
+	// over-aged render is a fall-through to the forge, not a dead end. An entry
+	// that simply aged out while the forge stayed healthy comes back current —
+	// nothing revalidates an entry the store has refused, so a build that
+	// answered 502 here instead would leave an aged-out avatar 502 forever.
+	t.Run("past the windows, a healthy forge answers it", func(t *testing.T) {
+		f := newForgeStub(t)
+		p, dir := newProxy(t, f)
+
+		first := get(p, "alice")
+		if first.Code != http.StatusOK {
+			t.Fatalf("warm-up: status = %d", first.Code)
+		}
+		f.mu.Lock()
+		f.imageBody = encodePNG(t, 300, 300) // the face changed while this entry aged out
+		f.mu.Unlock()
+		ageEntry(t, dir, "alice", maxStaleAge+time.Hour)
+
+		rec := get(p, "alice")
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status = %d (body %q), want 200 from the forge path", rec.Code, rec.Body.String())
+		}
+		if bytes.Equal(rec.Body.Bytes(), first.Body.Bytes()) {
+			t.Error("the over-aged render was answered from the store instead of the forge")
+		}
+		if got := rec.Header().Get("Age"); got != "" {
+			t.Errorf("Age = %q on bytes that came off the forge path, want none", got)
+		}
+		if stored, err := os.ReadFile(filepath.Join(dir, "alice.png")); err != nil || !bytes.Equal(stored, rec.Body.Bytes()) {
+			t.Errorf("the entry was not rewritten: stored=%v err=%v", stored != nil, err)
+		}
+		if got := f.apiHits.Load(); got != 2 {
+			t.Errorf("API hits = %d, want 2: one refused render is one trip to the forge", got)
+		}
+	})
+}
+
+// A forge that fails fast must not turn every request for a stale entry into one
+// forge hop: the memory of a recent miss gates this background path as it gates
+// the foreground one, so a degraded window costs one round trip per identity per
+// window. The flights map cannot do that — it deduplicates only fetches still in
+// progress, and an instant error defeats it.
+
+func TestStaleRevalidationIsRateBoundedByARememberedMiss(t *testing.T) {
+	f := newForgeStub(t)
+	p, dir := newProxy(t, f)
+
+	first := get(p, "alice")
+	if first.Code != http.StatusOK {
+		t.Fatalf("warm-up: status = %d", first.Code)
+	}
+	ageEntry(t, dir, "alice", maxAge+time.Hour)
+	f.mu.Lock()
+	f.apiStatus = http.StatusBadRequest // the ingress answers at once, in error
+	f.mu.Unlock()
+
+	stale := get(p, "alice")
+	if stale.Code != http.StatusOK || !bytes.Equal(stale.Body.Bytes(), first.Body.Bytes()) {
+		t.Fatal("the stale request did not serve the stored render at once")
+	}
+	awaitAPIHits(t, f, 2)
+	waitFor(t, "the failed revalidation to be remembered", func() bool {
+		p.mu.Lock()
+		defer p.mu.Unlock()
+		m, ok := p.neg["alice"]
+		return ok && time.Now().Before(m.expires)
+	})
+
+	for i := range 4 {
+		rec := get(p, "alice")
+		if rec.Code != http.StatusOK || !bytes.Equal(rec.Body.Bytes(), first.Body.Bytes()) {
+			t.Fatalf("request %d during the degraded window: status = %d, want the stored tile", i, rec.Code)
+		}
+		// Quiescence, not a sleep: without draining, these four requests land
+		// inside one round trip and the flights map deduplicates three of them,
+		// so the tally would hold even with no gate on this path at all.
+		awaitQuiescence(t, p)
+	}
+	if got := f.apiHits.Load(); got != 2 {
+		t.Errorf("API hits = %d, want 2: a stale entry in a forge-degraded window must cost one round trip per window, not one per inbound request", got)
+	}
+
+	// And the gate opens when the window closes: once the remembered miss has
+	// expired, the next request pays for a round trip again.
+	expireMisses(p)
+	if rec := get(p, "alice"); rec.Code != http.StatusOK {
+		t.Fatalf("after the window closed: status = %d, want the stored tile", rec.Code)
+	}
+	awaitAPIHits(t, f, 3)
+}
+
+// awaitQuiescence waits for the proxy's background work to drain, so a request
+// is answered while no fetch is in flight and the assertion that follows is a
+// statement about rate rather than about overlap.
+func awaitQuiescence(t *testing.T, p *Proxy) {
+	t.Helper()
+	waitFor(t, "background revalidation to quiesce", func() bool {
+		p.mu.Lock()
+		defer p.mu.Unlock()
+		return len(p.flights) == 0
+	})
+}
+
+// The sidecar only sharpens the next revalidation's If-Modified-Since, so a
+// render already renamed into place must not be reported as a miss because the
+// sidecar could not follow it — the asymmetry forget already applies to it. The
+// render is what gets served; the sidecar is provenance.
+
+// The outage half of stale-if-error: an unreachable forge may not overwrite a
+// stored face. The request is answered from the store, the cache stays as it
+// was, and the next viewer is answered from it too.
+func TestUnreachableRevalidationKeepsTheStoredTileServing(t *testing.T) {
+	f := newForgeStub(t)
+	p, dir := newProxy(t, f)
+
+	first := get(p, "alice")
+	if first.Code != http.StatusOK {
+		t.Fatalf("warm-up: status = %d", first.Code)
+	}
+	ageEntry(t, dir, "alice", maxAge+time.Hour)
+	f.srv.Close() // the forge goes down after the render was stored
+
+	for i := range 2 {
+		rec := get(p, "alice")
+		if rec.Code != http.StatusOK || !bytes.Equal(rec.Body.Bytes(), first.Body.Bytes()) {
+			t.Fatalf("request %d during the outage: status = %d, want the stored tile", i, rec.Code)
+		}
+	}
+	if names := storeFiles(t, dir); len(names) != 1 || names[0] != "alice.png" {
+		t.Errorf("store = %v, want the outage to leave the cache untouched", names)
+	}
+}
+
+// The upstream Last-Modified is forwarded in exactly one place: If-Modified-
+// Since on the proxy's own revalidation. A 304 verdict winds the entry's
+// clock without rewriting the tile, so a render that has not changed does not
+// re-ask once a day for a copy it already holds.
+func TestRevalidationCarriesTheStoredLastModified(t *testing.T) {
+	f := newForgeStub(t)
+	lastModified := time.Date(2026, time.November, 9, 12, 0, 0, 0, time.UTC).Format(http.TimeFormat)
+	f.mu.Lock()
+	f.imageLastModified = lastModified
+	f.honorIfModSince = true
+	f.mu.Unlock()
+	p, dir := newProxy(t, f)
+
+	first := get(p, "alice")
+	if first.Code != http.StatusOK {
+		t.Fatalf("warm-up: status = %d", first.Code)
+	}
+	f.mu.Lock()
+	if got := f.ifModSince; got != "" {
+		t.Fatalf("the cold fetch carried If-Modified-Since %q, want a plain GET", got)
+	}
+	f.mu.Unlock()
+
+	ageEntry(t, dir, "alice", maxAge+time.Hour)
+	stale := get(p, "alice")
+	if stale.Code != http.StatusOK || !bytes.Equal(stale.Body.Bytes(), first.Body.Bytes()) {
+		t.Fatal("the stale request did not serve the stored render at once")
+	}
+
+	awaitAPIHits(t, f, 2)
+	waitFor(t, "the revalidating image request to carry If-Modified-Since", func() bool {
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		return f.ifModSince == lastModified
+	})
+
+	// The 304 refreshes the entry's clock and touches nothing else.
+	waitFor(t, "the revalidation to settle", func() bool {
+		info, err := os.Stat(filepath.Join(dir, "alice.png"))
+		return err == nil && time.Since(info.ModTime()) < time.Hour
+	})
+	if got := get(p, "alice"); !bytes.Equal(got.Body.Bytes(), first.Body.Bytes()) {
+		t.Error("the unchanged render was rewritten instead of kept")
+	}
+	if got := f.apiHits.Load(); got != 2 {
+		t.Errorf("API hits = %d, want 2: a 304 ends the revalidation, it does not restart it daily", got)
+	}
+	names := storeFiles(t, dir)
+	if len(names) != 2 || names[1] != "alice.png" {
+		t.Errorf("store = %v, want the render beside its one sidecar", names)
+	}
+}
+
+// A definitive 404 during revalidation says the face is gone for good — a
+// deleted account must converge on the glyph rather than serve an old face
+// through stale-if-error forever. An error keeps the face (see the outage
+// test above); absence drops it.
+func TestRevalidationDropsTheRenderOfADeletedIdentity(t *testing.T) {
+	f := newForgeStub(t)
+	p, dir := newProxy(t, f)
+
+	first := get(p, "alice")
+	if first.Code != http.StatusOK {
+		t.Fatalf("warm-up: status = %d", first.Code)
+	}
+
+	orig := f.srv.Config.Handler
+	f.srv.Config.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasPrefix(r.URL.Path, "/api/v1/users/") {
+			f.apiHits.Add(1)
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		orig.ServeHTTP(w, r)
+	})
+
+	ageEntry(t, dir, "alice", maxAge+time.Hour)
+	stale := get(p, "alice")
+	if stale.Code != http.StatusOK || !bytes.Equal(stale.Body.Bytes(), first.Body.Bytes()) {
+		t.Fatal("the stale request did not serve the stored render at once")
+	}
+
+	awaitAPIHits(t, f, 2)
+	waitFor(t, "the deleted identity's render to leave the store", func() bool {
+		return len(storeFiles(t, dir)) == 0
+	})
+
+	glyph := get(p, "alice")
+	if glyph.Code != http.StatusOK || bytes.Equal(glyph.Body.Bytes(), first.Body.Bytes()) {
+		t.Errorf("the deleted identity is still served %d with its old face, want the glyph", glyph.Code)
+	}
+}
+
+func TestServeServesTheRenderWhenOnlyTheSidecarWriteFails(t *testing.T) {
+	f := newForgeStub(t)
+	f.mu.Lock()
+	f.imageLastModified = time.Date(2026, time.November, 9, 12, 0, 0, 0, time.UTC).Format(http.TimeFormat)
+	f.mu.Unlock()
+	dir := t.TempDir()
+	if err := os.Mkdir(filepath.Join(dir, "alice.last-modified"), 0o755); err != nil {
+		t.Fatalf("block the sidecar's place: %v", err)
+	}
+	var logMu sync.Mutex
+	var lines []string
+	p, err := New(Config{
+		ForgeURL: f.srv.URL,
+		CacheDir: dir,
+		Logf: func(format string, args ...any) {
+			logMu.Lock()
+			defer logMu.Unlock()
+			lines = append(lines, fmt.Sprintf(format, args...))
+		},
+	})
+	if err != nil {
+		t.Fatalf("avatar.New: %v", err)
+	}
+
+	rec := get(p, "alice")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d (body %q), want 200 from the render that did land", rec.Code, rec.Body.String())
+	}
+	if got := rec.Header().Get("ETag"); got != etagFor(rec.Body.Bytes()) {
+		t.Errorf("ETag = %q, want the content hash of the served render", got)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "alice.png")); err != nil {
+		t.Errorf("stored render missing: %v", err)
+	}
+	logMu.Lock()
+	logged := strings.Join(lines, "\n")
+	logMu.Unlock()
+	if !strings.Contains(logged, "alice") || !strings.Contains(logged, "last-modified") {
+		t.Errorf("log = %q, want the render's identity and the sidecar that could not be written", logged)
+	}
+}
+
+// "must-revalidate appears nowhere in emitted headers" — checked against every
+// shape of answer the route makes, not just the tile.
+func TestNoEmittedHeaderCarriesMustRevalidate(t *testing.T) {
+	f := newForgeStub(t)
+	p, _ := newProxy(t, f)
+	unreachable, err := New(Config{ForgeURL: "http://127.0.0.1:1", CacheDir: t.TempDir()})
+	if err != nil {
+		t.Fatalf("avatar.New: %v", err)
+	}
+
+	wrongMethod := httptest.NewRecorder()
+	p.ServeHTTP(wrongMethod, httptest.NewRequest(http.MethodPost, PathPrefix+"alice", nil))
+	badLogin := httptest.NewRecorder()
+	p.ServeHTTP(badLogin, httptest.NewRequest(http.MethodGet, PathPrefix+"not%20a%20login", nil))
+
+	answers := map[string]*httptest.ResponseRecorder{
+		"invalid login":     badLogin,
+		"wrong method":      wrongMethod,
+		"unreachable forge": get(unreachable, "alice"),
+		"tile":              get(p, "alice"),
+	}
+	tile := answers["tile"]
+	conditional := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, PathPrefix+"alice", nil)
+	req.Header.Set("If-None-Match", tile.Header().Get("ETag"))
+	p.ServeHTTP(conditional, req)
+	answers["304"] = conditional
+
+	for name, rec := range answers {
+		for header, values := range rec.Header() {
+			for _, v := range values {
+				if strings.Contains(v, "must-revalidate") {
+					t.Errorf("%s: header %s = %q carries must-revalidate", name, header, v)
+				}
+			}
+		}
+		if !strings.Contains(strings.ToLower(name), "304") && rec.Body.Len() == 0 {
+			t.Errorf("%s: empty body, want the sweep to have exercised a real answer", name)
 		}
 	}
 }

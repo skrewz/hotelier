@@ -91,11 +91,18 @@ log_retention_days: 14
 # browser may fetch it directly; hotelier fetches on the browser's behalf:
 # one call to /api/v1/users/<login>, one GET of the avatar_url it names.
 # The fetch resizes once and stores the small render keyed by login, so the
-# email-hash in the avatar URL is never a stored key. That render stays until
-# the file is removed; revalidation is issue #276.
+# email-hash in the avatar URL is never a stored key. That render is fresh
+# for a day; afterwards the stored tile keeps answering, stamped with Age,
+# while a background revalidation refreshes it, asking the forge
+# conditionally via the Last-Modified kept beside the tile (issue #276). The
+# store keeps to the windows it advertises: a render older than max-age plus
+# stale-if-error goes back to the forge rather than answering from disk. An
+# identity the forge no longer knows loses its render and converges on the
+# question-mark glyph.
 #
 # Leaving forge_url empty configures the proxy off: the route answers 503,
-# which stays distinct from a 404 for an identity the forge does not know.
+# which stays distinct from the cached glyph an identity the forge does not
+# know is answered with.
 #
 # forge_client_cert/forge_client_key are the mTLS pair the forge's ingress
 # demands. Both empty means no client certificate (every fetch is then a

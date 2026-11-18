@@ -2083,7 +2083,8 @@ func capLabel(cap int) interface{} {
 // HandleAvatar serves GET /avatar/<login> through the avatar proxy
 // (issue #275). With the proxy configured off—no forge_url, or a refused
 // configuration—the route says so with a 503, keeping "not configured"
-// distinct from "no such identity" (a 404 the browser will cache).
+// distinct from every answer the proxy itself gives, up to the cached
+// question-mark glyph for an identity the forge does not know (issue #276).
 func (s *Server) HandleAvatar(w http.ResponseWriter, r *http.Request) {
 	if s.avatar == nil {
 		http.Error(w, "avatar proxy not configured", http.StatusServiceUnavailable)
