@@ -61,8 +61,10 @@ log_retention_days: 14
 #
 # A persona's name is also the identity the dashboard keys a task row's
 # avatar gutter on (GET /avatar/<login>), so name each persona after the
-# forge login it acts as: a name the forge does not know renders as the
-# question-mark tile rather than a face.
+# forge login it acts as. Where the tile is a question mark rather than a
+# face, the cause is either no forge_url configured at all — the common
+# case in a stock install, where every identity is answered 503 — or a
+# name the forge does not know.
 #
 # Environment variable values can contain <workpath> as a placeholder
 # for the task's working directory.
