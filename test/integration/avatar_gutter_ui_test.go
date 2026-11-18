@@ -83,15 +83,19 @@ func TestAvatarGutterUI(t *testing.T) {
 	type taskSpec struct {
 		id      string
 		persona string
+		prompt  string
 	}
+
+	// The guttered row's prompt is long enough that its preview wraps, so the
+	// screenshot shows the lines after the first clearing the face too.
 	specs := []taskSpec{
-		{"casted-task", "cast-one"},
-		{"bare-task", ""},
+		{"casted-task", "cast-one", "a prompt long enough that its preview wraps onto a second line, so the gutter is seen holding every line under the headline"},
+		{"bare-task", "", "avatar gutter fixture"},
 	}
 	for i, s := range specs {
 		body, _ := json.Marshal(map[string]interface{}{
 			"id":         s.id,
-			"prompt":     "avatar gutter fixture",
+			"prompt":     s.prompt,
 			"repo_ref":   "https://example.com/org/example-repo.git",
 			"persona":    s.persona,
 			"created_at": time.Now().Add(time.Duration(i) * time.Second),
@@ -177,22 +181,13 @@ const { chromium } = require('playwright');
     const row = await rowFor(page, id);
     return row.evaluate(r => {
       const box = el => { const b = el.getBoundingClientRect(); return { x: b.x, y: b.y, w: b.width, h: b.height }; };
-      // A block box spans the full width even beside a float; to see the
-      // indent, measure where the first text actually starts.
-      const textX = el => {
-        const node = [...el.childNodes].find(n => n.nodeType === 3 && n.textContent.trim());
-        if (!node) return el.getBoundingClientRect().x;
-        const range = document.createRange();
-        range.setStart(node, 0); range.setEnd(node, 1);
-        return range.getBoundingClientRect().x;
-      };
       const out = {
         row: box(r),
         headline: box(r.querySelector('.task-id')),
-        headlineTextX: textX(r.querySelector('.task-id')),
-        metaTextX: textX(r.querySelector('.task-meta')),
         meta: box(r.querySelector('.task-meta')),
+        prompt: box(r.querySelector('.task-prompt')),
         avatar: r.querySelector('.task-avatar') ? box(r.querySelector('.task-avatar')) : null,
+        gap: parseFloat(getComputedStyle(r.querySelector('.task-body')).columnGap) || 0,
       };
       const img = r.querySelector('.task-avatar img');
       if (img) {
@@ -225,22 +220,31 @@ const { chromium } = require('playwright');
   // The face renders from the proxy, keyed by the identity.
   if (casted.imgSrc !== '/avatar/cast-one') throw new Error('expected src /avatar/cast-one, got ' + casted.imgSrc);
 
-  // The gutter is the token's square: 40 CSS px on the loaded edge.
+  // The gutter is the token's square; every measurement below is derived from
+  // that token, so raising it stays a one-line change here too.
   const token = await page.evaluate(() => getComputedStyle(document.documentElement).getPropertyValue('--task-avatar-gutter').trim());
   if (token !== '40px') throw new Error('expected --task-avatar-gutter to be 40px, got ' + token);
-  if (!casted.avatar || Math.abs(casted.avatar.w - 40) > 1 || Math.abs(casted.avatar.h - 40) > 1) {
-    throw new Error('expected a 40x40 gutter box, got ' + JSON.stringify(casted.avatar));
+  const gutter = parseFloat(token);
+  if (!casted.avatar || Math.abs(casted.avatar.w - gutter) > 1 || Math.abs(casted.avatar.h - gutter) > 1) {
+    throw new Error('expected a gutter box the size of the token, got ' + JSON.stringify(casted.avatar));
   }
 
   // The headline has not moved: its left edge matches the row that has no
-  // gutter at all. Everything below it is indented by exactly the gutter.
+  // gutter at all. Everything under it — the meta line and the prompt preview
+  // alike — starts one gutter plus its gap right of the headline. The lines
+  // are a column beside the gutter rather than text wrapped around a float, so
+  // where the box starts is where every line of it starts, however far it
+  // wraps.
   if (Math.abs(casted.headline.x - bare.headline.x) > 0.5) {
     throw new Error('headline moved: ' + casted.headline.x + ' vs ' + bare.headline.x);
   }
-  if (Math.abs((casted.headlineTextX + 40) - casted.metaTextX) > 1) {
-    throw new Error('expected the meta line indented by the gutter: ' + casted.metaTextX + ' vs headline ' + casted.headlineTextX);
+  const indent = gutter + casted.gap;
+  for (const [line, box] of [['meta', casted.meta], ['prompt', casted.prompt]]) {
+    if (Math.abs((casted.headline.x + indent) - box.x) > 1) {
+      throw new Error('the ' + line + ' line is not indented by the gutter: ' + box.x + ' vs ' + (casted.headline.x + indent));
+    }
   }
-  if (Math.abs(bare.headlineTextX - bare.metaTextX) > 0.5) throw new Error('the gutterless row shifted');
+  if (Math.abs(bare.headline.x - bare.meta.x) > 0.5) throw new Error('the gutterless row shifted');
   if (bare.avatar !== null) throw new Error('a task with no identity grew a gutter');
   await page.screenshot({ path: screenshotDir + '/01-task-list-gutters.png', fullPage: true });
 
@@ -267,8 +271,8 @@ const { chromium } = require('playwright');
   if (!failed.imgErrorClass) throw new Error('a failed tile did not mark the image for fallback');
   if (failed.imgVisibility !== 'hidden') throw new Error('the broken image is still visible');
   if (!failed.glyph.includes('"?"')) throw new Error('expected the fallback glyph, got ' + failed.glyph);
-  if (Math.abs(failed.avatar.w - 40) > 1 || Math.abs(failed.avatar.h - 40) > 1) {
-    throw new Error('the fallback box is not 40x40: ' + JSON.stringify(failed.avatar));
+  if (Math.abs(failed.avatar.w - gutter) > 1 || Math.abs(failed.avatar.h - gutter) > 1) {
+    throw new Error('the fallback box is not the token\'s square: ' + JSON.stringify(failed.avatar));
   }
   if (Math.abs(failed.row.h - rowHeightWithTiles) > 1) {
     throw new Error('the row reflowed on an outage: ' + failed.row.h + ' vs ' + rowHeightWithTiles);

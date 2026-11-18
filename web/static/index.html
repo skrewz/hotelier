@@ -47,20 +47,18 @@
         .task-item.cancelled { border-left-color: #94a3b8; }
         .task-btn-row { position: absolute; top: 0.5rem; right: 0.5rem; display: flex; gap: 0.25rem; align-items: center; }
         .task-id { font-weight: 600; font-size: 0.875rem; }
-        /* The face of the identity that acted on a task, shown as a gutter
-           beside the lines under the row headline (issue #277). The headline
-           keeps its position and left edge; the float indents everything
-           below it. The size is a value chosen in this member, not a number
-           invented in the CSS: 56 px would be unmistakable but taller than a
-           row's own text, 40 px keeps most of the recognisability at about
-           half the vertical cost (ideation #73). Raise this one number if
-           you disagree. Every state of the box — real photo, generated
-           identicon, proxy-served absence glyph, failed load — occupies the
-           identical dimensions, so no row reflows when the forge blinks. */
+        /* The face of the identity that acted on a task (issue #277), in a
+           gutter beside the lines under the row headline. The size is a value
+           chosen in this member, not a number invented in the CSS — raise
+           this one number if you disagree. Every state of the box occupies
+           the identical dimensions, so no row reflows when the forge blinks. */
         :root { --task-avatar-gutter: 40px; }
-        .task-avatar { float: left; position: relative; width: var(--task-avatar-gutter); height: var(--task-avatar-gutter); background: #334155; border-radius: 0.25rem; overflow: hidden; }
-        /* The fallback glyph sits behind the image: an opaque tile hides it
-           while it loads, a failed load hides the image and reveals it. */
+        /* Two columns: the gutter, then everything under the headline, so no
+           line of the row runs back under the face. The glyph behind the
+           image shows through only when the tile cannot load. */
+        .task-body { display: flex; align-items: flex-start; gap: 0.5rem; }
+        .task-lines { flex: 1; min-width: 0; }
+        .task-avatar { flex: 0 0 var(--task-avatar-gutter); height: var(--task-avatar-gutter); position: relative; background: #334155; border-radius: 0.25rem; overflow: hidden; }
         .task-avatar::before { content: "?"; position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; color: #64748b; font-weight: 600; font-size: 1rem; }
         .task-avatar img { position: relative; display: block; width: 100%; height: 100%; object-fit: cover; }
         .task-avatar img.avatar-error { visibility: hidden; }
@@ -430,7 +428,7 @@
             /* Keep long task IDs/meta from forcing a min-width wider than the screen */
             .task-id, .task-meta { word-break: break-word; }
             /* Action buttons move below the task text instead of overlapping it */
-            .task-btn-row { position: static; clear: both; justify-content: flex-end; margin-top: 0.5rem; }
+            .task-btn-row { position: static; justify-content: flex-end; margin-top: 0.5rem; }
             .task-detail-header { flex-wrap: wrap; gap: 0.25rem 1rem; }
             /* Corner button that expands an open task's logs to the whole screen
                (issue #205) — revealed only where the layout is stacked. */
@@ -1258,9 +1256,11 @@
                 const avatar = t.persona ? `<span class="task-avatar"><img src="/avatar/${encodeURIComponent(t.persona)}" alt="${escapeAttr(t.persona)}" onerror="this.classList.add('avatar-error')"></span>` : '';
                 return `<div class="task-item ${itemClass}${isActive}" onclick="selectTask('${t.id}')">
                     <div class="task-id">${taskTitleHTML(t)}${t.id} <span class="badge ${badgeClass}">${t.status}</span>${priorityLabel}</div>
-                    ${avatar}<div class="task-meta">${t.assigned_to ? '→ ' + guestLabel(t.assigned_to) : 'unassigned'} · ${new Date(t.created_at).toLocaleString()}${logCount}</div>
+                    <div class="task-body">${avatar}<div class="task-lines">
+                    <div class="task-meta">${t.assigned_to ? '→ ' + guestLabel(t.assigned_to) : 'unassigned'} · ${new Date(t.created_at).toLocaleString()}${logCount}</div>
                     <div class="task-prompt">${escapeHtml(t.prompt.substring(0, 120))}${t.prompt.length > 120 ? '...' : ''}</div>
                     ${errorHtml}
+                    </div></div>
                     ${btnRow}
                 </div>`;
             }).join('');
