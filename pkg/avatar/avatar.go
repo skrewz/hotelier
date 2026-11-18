@@ -177,8 +177,8 @@ type flight struct {
 	abandoned bool
 }
 
-// miss is a remembered absence: the status the identity earned, and when the
-// memory expires and the forge is asked again.
+// miss is a remembered failure to answer: the status the request earned, forge
+// or store at fault, and when the memory expires and the forge is asked again.
 type miss struct {
 	status  int
 	expires time.Time
@@ -589,6 +589,13 @@ func (p *Proxy) fetch(ctx context.Context, login, ifModifiedSince string) ([]byt
 		// The render on disk is current: wind its clock and hand it back.
 		// Nothing is rewritten — a revalidation that changes nothing must not
 		// spin the store.
+		//
+		// Failing to wind it is a miss. That is the one decision store applies
+		// to the sidecar, seen from the other side: provenance that failed to
+		// land beside bytes the caller can be handed is a log line, and here no
+		// bytes can be handed over — the entry keeps the age it has, so every
+		// later request would find it stale and ask the forge again, with only
+		// the remembered miss to bound the asking.
 		if err := os.Chtimes(p.entry(login), time.Now(), time.Now()); err != nil {
 			return fail(http.StatusBadGateway, "winding the entry for %q: %w", login, err)
 		}
