@@ -92,10 +92,13 @@ log_retention_days: 14
 # one call to /api/v1/users/<login>, one GET of the avatar_url it names.
 # The fetch resizes once and stores the small render keyed by login, so the
 # email-hash in the avatar URL is never a stored key. That render is fresh
-# for a day; afterwards the stored tile keeps answering while a background
-# revalidation refreshes it, asking the forge conditionally via the
-# Last-Modified kept beside the tile (issue #276). An identity the forge no
-# longer knows loses its render and converges on the question-mark glyph.
+# for a day; afterwards the stored tile keeps answering, stamped with Age,
+# while a background revalidation refreshes it, asking the forge
+# conditionally via the Last-Modified kept beside the tile (issue #276). The
+# store keeps to the windows it advertises: a render older than max-age plus
+# stale-if-error goes back to the forge rather than answering from disk. An
+# identity the forge no longer knows loses its render and converges on the
+# question-mark glyph.
 #
 # Leaving forge_url empty configures the proxy off: the route answers 503,
 # which stays distinct from the cached glyph an identity the forge does not

@@ -21,6 +21,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -1378,6 +1379,114 @@ func TestStaleRenderServesImmediatelyAndRevalidatesInBackground(t *testing.T) {
 	}
 }
 
+func TestServeStampsTheAgeOfAStaleRender(t *testing.T) {
+	f := newForgeStub(t)
+	p, dir := newProxy(t, f)
+
+	fresh := get(p, "alice")
+	if fresh.Code != http.StatusOK {
+		t.Fatalf("warm-up: status = %d", fresh.Code)
+	}
+	if got := fresh.Header().Get("Age"); got != "" {
+		t.Errorf("Age = %q on a render the forge just handed over, want none", got)
+	}
+
+	age := maxAge + time.Hour
+	ageEntry(t, dir, "alice", age)
+	stale := get(p, "alice")
+	if stale.Code != http.StatusOK {
+		t.Fatalf("stale: status = %d", stale.Code)
+	}
+	got, err := strconv.Atoi(stale.Header().Get("Age"))
+	if err != nil {
+		t.Fatalf("Age = %q, want the seconds these bytes have been the entry", stale.Header().Get("Age"))
+	}
+	if want := int(age.Seconds()); got < want-60 || got > want+60 {
+		t.Errorf("Age = %d, want about %d", got, want)
+	}
+
+	// The same request asked the forge once, as any stale answer does.
+	awaitAPIHits(t, f, 2)
+	waitFor(t, "the revalidation to settle", func() bool {
+		info, err := os.Stat(filepath.Join(dir, "alice.png"))
+		return err == nil && time.Since(info.ModTime()) < time.Hour
+	})
+}
+
+// The store obeys the staleness windows the response advertises. RFC 9110 §4.2.4
+// lets a cache use a stale response while revalidating and on error, and no
+// further, so past max-age plus stale-if-error the request takes the forge path
+// instead of the file's — a bodyless 502 with the forge down, which is where
+// stale-if-error belongs: honoured by the caches downstream of here, keeping the
+// faces they already hold rather than this one.
+
+func TestServeRefusesAStaleRenderBeyondThePolicyWindows(t *testing.T) {
+	f := newForgeStub(t)
+	p, dir := newProxy(t, f)
+
+	first := get(p, "alice")
+	if first.Code != http.StatusOK {
+		t.Fatalf("warm-up: status = %d", first.Code)
+	}
+	ageEntry(t, dir, "alice", maxStaleAge+time.Hour)
+	f.srv.Close() // the forge went down while this entry aged past the policy
+
+	rec := get(p, "alice")
+	if rec.Code != http.StatusBadGateway {
+		t.Fatalf("status = %d, want 502: a render past the windows this proxy advertises still answered from the store", rec.Code)
+	}
+	if bytes.HasPrefix(rec.Body.Bytes(), []byte{0x89, 'P', 'N', 'G'}) {
+		t.Error("the body was the stale tile, want the caller's own miss line")
+	}
+}
+
+// A forge that fails fast must not turn every request for a stale entry into one
+// forge hop: the memory of a recent miss gates this background path as it gates
+// the foreground one, so a degraded window costs one round trip per identity per
+// window. The flights map cannot do that — it deduplicates only fetches still in
+// progress, and an instant error defeats it.
+
+func TestStaleRevalidationIsRateBoundedByARememberedMiss(t *testing.T) {
+	f := newForgeStub(t)
+	p, dir := newProxy(t, f)
+
+	first := get(p, "alice")
+	if first.Code != http.StatusOK {
+		t.Fatalf("warm-up: status = %d", first.Code)
+	}
+	ageEntry(t, dir, "alice", maxAge+time.Hour)
+	f.mu.Lock()
+	f.apiStatus = http.StatusBadRequest // the ingress answers at once, in error
+	f.mu.Unlock()
+
+	stale := get(p, "alice")
+	if stale.Code != http.StatusOK || !bytes.Equal(stale.Body.Bytes(), first.Body.Bytes()) {
+		t.Fatal("the stale request did not serve the stored render at once")
+	}
+	awaitAPIHits(t, f, 2)
+	waitFor(t, "the failed revalidation to be remembered", func() bool {
+		p.mu.Lock()
+		defer p.mu.Unlock()
+		m, ok := p.neg["alice"]
+		return ok && time.Now().Before(m.expires)
+	})
+
+	for i := range 4 {
+		rec := get(p, "alice")
+		if rec.Code != http.StatusOK || !bytes.Equal(rec.Body.Bytes(), first.Body.Bytes()) {
+			t.Fatalf("request %d during the degraded window: status = %d, want the stored tile", i, rec.Code)
+		}
+	}
+	if got := f.apiHits.Load(); got != 2 {
+		t.Errorf("API hits = %d, want 2: a stale entry in a forge-degraded window must cost one round trip per window, not one per inbound request", got)
+	}
+}
+
+// The sidecar only sharpens the next revalidation's If-Modified-Since, so a
+// render already renamed into place must not be reported as a miss because the
+// sidecar could not follow it — the asymmetry forget already applies to it. The
+// render is what gets served; the sidecar is provenance.
+
 // The outage half of stale-if-error: an unreachable forge may not overwrite a
 // stored face. The request is answered from the store, the cache stays as it
 // was, and the next viewer is answered from it too.
@@ -1493,6 +1602,48 @@ func TestRevalidationDropsTheRenderOfADeletedIdentity(t *testing.T) {
 	glyph := get(p, "alice")
 	if glyph.Code != http.StatusOK || bytes.Equal(glyph.Body.Bytes(), first.Body.Bytes()) {
 		t.Errorf("the deleted identity is still served %d with its old face, want the glyph", glyph.Code)
+	}
+}
+
+func TestServeServesTheRenderWhenOnlyTheSidecarWriteFails(t *testing.T) {
+	f := newForgeStub(t)
+	f.mu.Lock()
+	f.imageLastModified = time.Date(2026, time.November, 9, 12, 0, 0, 0, time.UTC).Format(http.TimeFormat)
+	f.mu.Unlock()
+	dir := t.TempDir()
+	if err := os.Mkdir(filepath.Join(dir, "alice.last-modified"), 0o755); err != nil {
+		t.Fatalf("block the sidecar's place: %v", err)
+	}
+	var logMu sync.Mutex
+	var lines []string
+	p, err := New(Config{
+		ForgeURL: f.srv.URL,
+		CacheDir: dir,
+		Logf: func(format string, args ...any) {
+			logMu.Lock()
+			defer logMu.Unlock()
+			lines = append(lines, fmt.Sprintf(format, args...))
+		},
+	})
+	if err != nil {
+		t.Fatalf("avatar.New: %v", err)
+	}
+
+	rec := get(p, "alice")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d (body %q), want 200 from the render that did land", rec.Code, rec.Body.String())
+	}
+	if got := rec.Header().Get("ETag"); got != etagFor(rec.Body.Bytes()) {
+		t.Errorf("ETag = %q, want the content hash of the served render", got)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "alice.png")); err != nil {
+		t.Errorf("stored render missing: %v", err)
+	}
+	logMu.Lock()
+	logged := strings.Join(lines, "\n")
+	logMu.Unlock()
+	if !strings.Contains(logged, "alice") || !strings.Contains(logged, "last-modified") {
+		t.Errorf("log = %q, want the render's identity and the sidecar that could not be written", logged)
 	}
 }
 

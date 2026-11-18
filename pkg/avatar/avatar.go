@@ -21,7 +21,12 @@
 // Cache-Control: max-age=86400, stale-while-revalidate=604800,
 // stale-if-error=2592000 — one day fresh, a week servable with background
 // refresh, a month on error — and must-revalidate appears nowhere hotelier
-// emits. The proxy mints its own strong content-hashed ETag because it must
+// emits. The store obeys the windows it advertises: a render serves for at
+// most max-age plus stale-if-error, and an answer served past max-age carries
+// Age so no downstream cache reads an old face as freshly minted. Past that
+// outer window the request goes the forge's way rather than the file's, since
+// RFC 9110 §4.2.4 gives a cache no licence for bytes staler than the policy
+// allows. The proxy mints its own strong content-hashed ETag because it must
 // (RFC 9110 §8.3.2 forbids reusing a strong validator across differing
 // representations; the proxy serves a re-encoded PNG where the forge served
 // the source image): no upstream validator is ever forwarded, and the
@@ -53,6 +58,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -82,6 +88,18 @@ const (
 // served at once and revalidated in the background (the server's own half of
 // stale-while-revalidate).
 const maxAge = maxAgeSeconds * time.Second
+
+// maxStaleAge is the oldest a stored render may be and still be served: the
+// freshness window plus the widest staleness the policy advertises. The
+// stale-if-error window is the larger of the two staleness windows, and it
+// subsumes stale-while-revalidate here because every stale answer the store
+// gives is served alongside a revalidation attempt, rate-bounded by the memory
+// of recent misses (see Proxy.revalidate). RFC 9110 §4.2.4 lets a cache use a
+// stale response while revalidating and on error, and no further: past this
+// age the store has no licence for its own bytes, so the request takes the
+// forge path — a fresh render, or a bodyless 502 that lets the caches
+// downstream apply stale-if-error themselves.
+const maxStaleAge = (maxAgeSeconds + staleIfErrorSeconds) * time.Second
 
 var cacheControlValue = fmt.Sprintf("max-age=%d, stale-while-revalidate=%d, stale-if-error=%d",
 	maxAgeSeconds, staleWhileRevalidateSeconds, staleIfErrorSeconds)
@@ -237,14 +255,14 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if data, err := os.ReadFile(p.entry(login)); err == nil {
-		writeTile(w, r, data)
+	if data, age, ok := p.stored(login); ok && age <= maxStaleAge {
+		writeTile(w, r, data, age)
 		// stale-while-revalidate, the server's own half: past max-age the
 		// stored render answers as it stands and a background revalidation
 		// refreshes it for whoever arrives next. A failed refresh changes
 		// nothing here — the render on disk is untouched until a better one
 		// arrives, which is stale-if-error honoured at home (issue #276).
-		if p.stale(login) {
+		if age > maxAge {
 			p.revalidate(login)
 		}
 		return
@@ -259,13 +277,16 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	switch status {
 	case http.StatusOK:
-		writeTile(w, r, data)
+		// Bytes from the forge path are as fresh as this response: fetched
+		// now, or read from the entry a fetch wrote moments ago, so there is
+		// no age to stamp.
+		writeTile(w, r, data, 0)
 	case http.StatusNotFound:
 		// Absence, not unreachability: the question-mark glyph answered as a
 		// 200, cacheable like any other answer, so a deleted or unknown login
 		// settles into the same one-day rhythm as a face instead of sending
 		// every viewer back through the forge (issue #276).
-		writeTile(w, r, questionGlyph())
+		writeTile(w, r, questionGlyph(), 0)
 	default:
 		// A miss is a miss: the caller's own short line with no substitution
 		// body, so stale-if-error keeps the face a viewer already has rather
@@ -280,12 +301,21 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 // forwards no upstream validator, what it mints can never equal one; a
 // validator that differs between the proxy's re-encoding and the forge's
 // source is exactly what RFC 9110 §8.3.2 demands.
-func writeTile(w http.ResponseWriter, r *http.Request, data []byte) {
+// age is how long the bytes have been this store's entry: zero for a render
+// the forge just handed over, the file's mtime age for one read back off disk.
+// An answer with any age at all says so with Age (RFC 9110 §5.1), because
+// net/http stamps Date to this moment and a reader given no Age would take a
+// weeks-old face for one refreshed seconds ago and advertise a fresh max-age of
+// its own.
+func writeTile(w http.ResponseWriter, r *http.Request, data []byte, age time.Duration) {
 	etag := mintETag(data)
 	h := w.Header()
 	h.Set("Content-Type", "image/png")
 	h.Set("Cache-Control", cacheControlValue)
 	h.Set("ETag", etag)
+	if age > 0 {
+		h.Set("Age", strconv.Itoa(int(age.Seconds())))
+	}
 	if noneMatch(r, etag) {
 		w.WriteHeader(http.StatusNotModified)
 		return
@@ -331,7 +361,7 @@ func (p *Proxy) resolve(ctx context.Context, login string) ([]byte, int, error) 
 		// the store is what keeps a queued caller from paying for a round trip
 		// the fetch it waited on has already made.
 		p.mu.Lock()
-		if data, err := os.ReadFile(p.entry(login)); err == nil {
+		if data, age, ok := p.stored(login); ok && age <= maxStaleAge {
 			p.mu.Unlock()
 			return data, http.StatusOK, nil
 		}
@@ -370,17 +400,23 @@ func (p *Proxy) resolve(ctx context.Context, login string) ([]byte, int, error) 
 	}
 }
 
-// stale reports whether a stored render is past max-age. The render file's
-// own mtime is the clock: store writes it temp-and-rename, so its mtime is
-// the moment these bytes became the entry. A file that cannot be stated
-// counts as stale — the render still answers, and a revalidation repairs the
-// entry behind it.
-func (p *Proxy) stale(login string) bool {
-	info, err := os.Stat(p.entry(login))
+// stored reads a login's render and says how long those bytes have been the
+// entry. The render file's own mtime is the clock: store writes it
+// temp-and-rename, so its mtime is the moment these bytes became the entry. A
+// render that cannot be read is no answer at all (ok is false); one replaced
+// between the stat and the read answers with the older age it looked to have,
+// which only asks the forge sooner.
+func (p *Proxy) stored(login string) (data []byte, age time.Duration, ok bool) {
+	path := p.entry(login)
+	info, err := os.Stat(path)
 	if err != nil {
-		return true
+		return nil, 0, false
 	}
-	return time.Since(info.ModTime()) > maxAge
+	data, err = os.ReadFile(path)
+	if err != nil {
+		return nil, 0, false
+	}
+	return data, time.Since(info.ModTime()), true
 }
 
 // revalidate starts the background refresh a stale entry deserves, deduped
@@ -393,6 +429,17 @@ func (p *Proxy) stale(login string) bool {
 // the stored render, and an outage here changes nothing on disk.
 func (p *Proxy) revalidate(login string) {
 	p.mu.Lock()
+	// The memory of a recent miss gates this path as it gates resolve. A
+	// remembered failure is no verdict on this entry's freshness, but it is a
+	// reason not to pay for another round trip yet: without it an entry past
+	// max-age turns one inbound request into one forge hop for as long as the
+	// forge keeps failing fast — the amplification negativeTTL exists to bound,
+	// since the flights map only deduplicates fetches that are in progress
+	// (issue #276).
+	if m, remembered := p.neg[login]; remembered && time.Now().Before(m.expires) {
+		p.mu.Unlock()
+		return
+	}
 	if _, busy := p.flights[login]; busy {
 		p.mu.Unlock()
 		return
@@ -657,21 +704,25 @@ func (p *Proxy) forget(login string) {
 
 // store writes the render temp-and-rename, so a reader either sees the old
 // entry or the new one, never a partial file, then records what the forge
-// said about the image's age beside it. A failed rename is a miss, not
-// corruption: the temp file is removed and the error returned, and the entry
-// keeps whatever it provably held before.
+// said about the image's age beside it. A failed rename of the render is a
+// miss, not corruption: the temp file is removed and the error returned, and
+// the entry keeps whatever it provably held before. The sidecar is held to a
+// lower standard, as forget holds it: it only sharpens the next
+// revalidation's If-Modified-Since, so losing it while the render is already
+// in place is worth a log line rather than a miss for bytes the next viewer
+// will be served anyway.
 func (p *Proxy) store(login string, render []byte, lastModified string) error {
 	if err := p.writeRenamed(p.entry(login), login+".tmp-*", render); err != nil {
 		return err
 	}
 	if lastModified == "" {
 		if err := os.Remove(p.lastModifiedFile(login)); err != nil && !errors.Is(err, os.ErrNotExist) {
-			return fmt.Errorf("forgetting the upstream last-modified for %q: %w", login, err)
+			p.logf("avatar: forgetting the upstream last-modified for %q: %v", login, err)
 		}
 		return nil
 	}
 	if err := p.writeRenamed(p.lastModifiedFile(login), login+".lm-*", []byte(lastModified)); err != nil {
-		return fmt.Errorf("storing the upstream last-modified for %q: %w", login, err)
+		p.logf("avatar: storing the upstream last-modified for %q: %v", login, err)
 	}
 	return nil
 }
