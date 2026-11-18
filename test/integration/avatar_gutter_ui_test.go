@@ -149,8 +149,6 @@ const { chromium } = require('playwright');
   const baseURL = '%s';
   const screenshotDir = '%s';
   const errors = [];
-  // The name the Go side configured a task under, interpolated once as a
-  // JSON string literal so the two sides cannot drift apart.
   const hostile = %s;
   // A 1x1 opaque PNG; CSS scales it into the gutter box.
   const png = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==', 'base64');
@@ -178,18 +176,13 @@ const { chromium } = require('playwright');
     await page.waitForFunction(() => [...document.querySelectorAll('.task-avatar img')].every(i => i.complete), { timeout: 10000 });
   };
 
-  const rowFor = async (page, id) => page.evaluateHandle((tid) => {
-    return [...document.querySelectorAll('#task-list .task-item')]
-      .find(r => r.querySelector('.task-id').textContent.includes(tid));
-  }, id);
-
-  // Rows are rebuilt wholesale by the poll, so a handle can be detached by the
-  // time it is clicked; look the row up and click it in the same turn.
-  const clickRowFor = (page, id) => page.evaluate((tid) => {
-    const row = [...document.querySelectorAll('#task-list .task-item')]
-      .find(r => r.querySelector('.task-id').textContent.includes(tid));
-    row.click();
-  }, id);
+  // The one owner of the row markup's selector. It is held as source so both
+  // call sites can interpolate it into a single fresh lookup: measuring takes
+  // a handle from it, and clicking looks the row up and clicks it in the same
+  // turn, so the poll's wholesale rebuild can never detach a row mid-click.
+  const findRow = '(tid) => [...document.querySelectorAll(\'#task-list .task-item\')].find(r => r.querySelector(\'.task-id\').textContent.includes(tid))';
+  const rowFor = (page, id) => page.evaluateHandle('(' + findRow + ')(' + JSON.stringify(id) + ')');
+  const clickRowFor = (page, id) => page.evaluate('(' + findRow + ')(' + JSON.stringify(id) + ').click()');
 
   const metricsFor = async (page, id) => {
     const row = await rowFor(page, id);
@@ -280,8 +273,7 @@ const { chromium } = require('playwright');
 
   // The row is recognition; the selection is reading: the detail pane still
   // carries the persona name, without the glyph that stood in for a face.
-  const castedRow = await rowFor(page, 'casted-task');
-  await castedRow.click();
+  await clickRowFor(page, 'casted-task');
   await page.waitForSelector('.task-detail-id .persona-badge', { timeout: 10000 });
   const detailPersona = await page.$eval('.task-detail-id .persona-badge', e => e.textContent.trim());
   if (detailPersona !== 'cast-one') throw new Error('expected the detail pane to show the name cast-one, got ' + detailPersona);
@@ -289,15 +281,14 @@ const { chromium } = require('playwright');
 
   // The row is not the name's only sink: the detail header is a second one,
   // built by string assembly into an attribute, so a name carrying a quote
-  // must not break out of it.
+  // must not break out of it. The previously selected task's badge is still
+  // on the page when the click resolves, so wait on the name rather than the
+  // selector: only the detail fetch landing renders it verbatim, and a wait
+  // that times out here means the name arrived escaped or never at all.
   await clickRowFor(page, 'escaped-task');
-  await page.waitForSelector('.task-detail-id .persona-badge', { timeout: 10000 });
-  const detailSink = await page.evaluate(() => {
-    const badge = document.querySelector('.task-detail-id .persona-badge');
-    return { text: badge.textContent, markup: !!document.querySelector('.task-detail-id [onload], .task-detail-id img') };
-  });
-  if (detailSink.markup) throw new Error('a persona name reached the detail pane as markup');
-  if (detailSink.text !== hostile) throw new Error('the detail pane does not show the name verbatim: ' + detailSink.text);
+  await page.waitForFunction((name) => document.querySelector('.task-detail-id .persona-badge')?.textContent === name, hostile, { timeout: 10000 });
+  const detailMarkup = await page.evaluate(() => !!document.querySelector('.task-detail-id [onload], .task-detail-id img'));
+  if (detailMarkup) throw new Error('a persona name reached the detail pane as markup');
 
   // A running task's header is patched in place by the poll rather than
   // rebuilt, and that branch is the one a live task lives in. There the name
