@@ -1413,6 +1413,33 @@ func TestServeStampsTheAgeOfAStaleRender(t *testing.T) {
 	})
 }
 
+// A render whose mtime lies ahead of the clock — an NTP correction that stepped
+// the clock back after boot, a store copied off a host that was running fast —
+// must not read as brand new. A negative age clears every window the store
+// checks at once: no Age, no revalidation, no outer bound, and no eviction path
+// either, until real time catches up with a timestamp the store did not pick.
+// So the clock is clamped to just past max-age: the render still answers this
+// request, and the forge is asked behind it.
+func TestFutureDatedRenderIsServedButNeverAsAFreshOne(t *testing.T) {
+	f := newForgeStub(t)
+	p, dir := newProxy(t, f)
+
+	first := get(p, "alice")
+	if first.Code != http.StatusOK {
+		t.Fatalf("warm-up: status = %d", first.Code)
+	}
+	ageEntry(t, dir, "alice", -time.Hour) // the mtime is an hour ahead of the clock
+
+	rec := get(p, "alice")
+	if rec.Code != http.StatusOK || !bytes.Equal(rec.Body.Bytes(), first.Body.Bytes()) {
+		t.Fatalf("status = %d, want the render to keep answering while the clock is odd", rec.Code)
+	}
+	if got := rec.Header().Get("Age"); got == "" {
+		t.Error("Age = none, want an answer that does not claim these bytes are freshly minted")
+	}
+	awaitAPIHits(t, f, 2)
+}
+
 // The store obeys the staleness windows the response advertises. RFC 9110 §4.2.4
 // lets a cache use a stale response while revalidating and on error, and no
 // further, so past max-age plus stale-if-error the request takes the forge path

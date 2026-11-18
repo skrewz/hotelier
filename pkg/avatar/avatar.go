@@ -406,6 +406,13 @@ func (p *Proxy) resolve(ctx context.Context, login string) ([]byte, int, error) 
 // render that cannot be read is no answer at all (ok is false); one replaced
 // between the stat and the read answers with the older age it looked to have,
 // which only asks the forge sooner.
+//
+// This clock has one direction it can lie in: a file cannot be older than the
+// store, but the wall clock can be behind it — an NTP correction stepping the
+// clock back after boot, a store copied off a host that was running fast. A
+// negative age would clear every window below at once, so an age below zero is
+// read as just past max-age: the render answers as it always has, and the
+// stale path runs behind it rather than never running.
 func (p *Proxy) stored(login string) (data []byte, age time.Duration, ok bool) {
 	path := p.entry(login)
 	info, err := os.Stat(path)
@@ -416,7 +423,11 @@ func (p *Proxy) stored(login string) (data []byte, age time.Duration, ok bool) {
 	if err != nil {
 		return nil, 0, false
 	}
-	return data, time.Since(info.ModTime()), true
+	age = time.Since(info.ModTime())
+	if age < 0 {
+		age = maxAge + time.Second
+	}
+	return data, age, true
 }
 
 // revalidate starts the background refresh a stale entry deserves, deduped
