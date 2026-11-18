@@ -2117,7 +2117,9 @@
                 }
 
                 // Update persona badge in header (add, remove, or keep): the
-                // name, in one neutral style (issue #277).
+                // name, in one neutral style (issue #277). Both sinks here are
+                // DOM properties rather than markup, so the name goes in raw —
+                // escaping it would only put entities in the tooltip.
                 const detailIdEl = document.querySelector('.task-detail-id');
                 if (detailIdEl) {
                     const existingPersona = detailIdEl.querySelector('.persona-badge');
@@ -2125,11 +2127,11 @@
                         if (existingPersona) {
                             existingPersona.className = 'persona-badge';
                             existingPersona.textContent = task.persona;
-                            existingPersona.title = `Persona: ${escapeHtml(task.persona)}`;
+                            existingPersona.title = `Persona: ${task.persona}`;
                         } else {
                             const span = document.createElement('span');
                             span.className = 'persona-badge';
-                            span.title = `Persona: ${escapeHtml(task.persona)}`;
+                            span.title = `Persona: ${task.persona}`;
                             span.textContent = task.persona;
                             detailIdEl.appendChild(span);
                         }
@@ -2176,7 +2178,9 @@
             if (!task) return;
 
             const badgeClass = `badge-${task.status.toLowerCase()}`;
-            const personaBadge = task.persona ? `<span class="persona-badge" title="Persona: ${escapeHtml(task.persona)}">${escapeHtml(task.persona)}</span>` : '';
+            // The detail header is built by string assembly, so the name needs
+            // escapeAttr for the attribute and escapeHtml for the text.
+            const personaBadge = task.persona ? `<span class="persona-badge" title="Persona: ${escapeAttr(task.persona)}">${escapeHtml(task.persona)}</span>` : '';
             const promptMarkdown = renderMarkdown(task.prompt);
             // Extract first line of prompt for collapsed preview
             const promptPreview = getFirstLine(task.prompt, PROMPT_PREVIEW_MAX_LEN);

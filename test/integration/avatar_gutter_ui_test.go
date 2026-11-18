@@ -31,8 +31,10 @@ import (
 )
 
 // hostilePersona is a persona name that is not a forge login and carries
-// markup: the row's only sink for the name. The proxy would answer it 400, so
-// the row must escape it rather than let it become an element.
+// markup. The proxy would answer it 400, so every place the dashboard prints
+// a name must escape it rather than let it become an element. The script below
+// interpolates this one constant, so the row and the detail pane are both
+// checked against the exact string the server was configured with.
 const hostilePersona = `cast"<img src=x onload=window.__xss=1>`
 
 func TestAvatarGutterUI(t *testing.T) {
@@ -134,6 +136,12 @@ func TestAvatarGutterUI(t *testing.T) {
 	if err := os.MkdirAll(screenshotDir, 0o755); err != nil {
 		t.Fatalf("create screenshot dir: %v", err)
 	}
+	// The script interpolates the persona name as a JSON string literal, so
+	// the name the browser asserts against is this one byte for byte.
+	hostilePersonaJS, err := json.Marshal(hostilePersona)
+	if err != nil {
+		t.Fatalf("encode hostile persona: %v", err)
+	}
 	script := fmt.Sprintf(`
 const { chromium } = require('playwright');
 (async () => {
@@ -141,9 +149,9 @@ const { chromium } = require('playwright');
   const baseURL = '%s';
   const screenshotDir = '%s';
   const errors = [];
-  // A persona name that is not a forge login and carries markup; the Go
-  // side configures a task under the same name.
-  const hostile = 'cast"<img src=x onload=window.__xss=1>';
+  // The name the Go side configured a task under, interpolated once as a
+  // JSON string literal so the two sides cannot drift apart.
+  const hostile = %s;
   // A 1x1 opaque PNG; CSS scales it into the gutter box.
   const png = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==', 'base64');
 
@@ -173,6 +181,14 @@ const { chromium } = require('playwright');
   const rowFor = async (page, id) => page.evaluateHandle((tid) => {
     return [...document.querySelectorAll('#task-list .task-item')]
       .find(r => r.querySelector('.task-id').textContent.includes(tid));
+  }, id);
+
+  // Rows are rebuilt wholesale by the poll, so a handle can be detached by the
+  // time it is clicked; look the row up and click it in the same turn.
+  const clickRowFor = (page, id) => page.evaluate((tid) => {
+    const row = [...document.querySelectorAll('#task-list .task-item')]
+      .find(r => r.querySelector('.task-id').textContent.includes(tid));
+    row.click();
   }, id);
 
   const metricsFor = async (page, id) => {
@@ -270,6 +286,27 @@ const { chromium } = require('playwright');
   const detailPersona = await page.$eval('.task-detail-id .persona-badge', e => e.textContent.trim());
   if (detailPersona !== 'cast-one') throw new Error('expected the detail pane to show the name cast-one, got ' + detailPersona);
   await page.screenshot({ path: screenshotDir + '/02-detail-persona-name.png', fullPage: true });
+
+  // The row is not the name's only sink: the detail header is a second one,
+  // built by string assembly into an attribute, so a name carrying a quote
+  // must not break out of it.
+  await clickRowFor(page, 'escaped-task');
+  await page.waitForSelector('.task-detail-id .persona-badge', { timeout: 10000 });
+  const detailSink = await page.evaluate(() => {
+    const badge = document.querySelector('.task-detail-id .persona-badge');
+    return { text: badge.textContent, markup: !!document.querySelector('.task-detail-id [onload], .task-detail-id img') };
+  });
+  if (detailSink.markup) throw new Error('a persona name reached the detail pane as markup');
+  if (detailSink.text !== hostile) throw new Error('the detail pane does not show the name verbatim: ' + detailSink.text);
+
+  // A running task's header is patched in place by the poll rather than
+  // rebuilt, and that branch is the one a live task lives in. There the name
+  // reaches the DOM as a text node and a property, where escaping would show
+  // in the tooltip as entities rather than defending anything.
+  await page.evaluate(() => patchTaskDetailMeta('escaped-task'));
+  const patched = await page.$eval('.task-detail-id .persona-badge', e => ({ text: e.textContent, title: e.getAttribute('title') }));
+  if (patched.text !== hostile) throw new Error('the patched badge lost the name: ' + patched.text);
+  if (patched.title !== 'Persona: ' + hostile) throw new Error('the patched badge escapes its tooltip: ' + patched.title);
   const rowHeightWithTiles = casted.row.h;
   await page.close();
 
@@ -300,7 +337,7 @@ const { chromium } = require('playwright');
   await browser.close();
   console.log('OK: face-as-gutter validated (screenshots in %s)');
 })().catch(err => { console.error(err); process.exit(1); });
-`, baseURL, screenshotDir, screenshotDir)
+`, baseURL, screenshotDir, string(hostilePersonaJS), screenshotDir)
 
 	tmpScript := t.TempDir() + "/avatar_gutter_ui.js"
 	if err := os.WriteFile(tmpScript, []byte(script), 0o644); err != nil {
