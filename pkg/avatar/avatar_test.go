@@ -1312,7 +1312,7 @@ func TestServeSendsCachePolicyAndMintedETag(t *testing.T) {
 // already holds these bytes gets a 304 and no body.
 func TestServeAnswersMatchingIfNoneMatchWith304(t *testing.T) {
 	f := newForgeStub(t)
-	p, _ := newProxy(t, f)
+	p, dir := newProxy(t, f)
 
 	first := get(p, "alice")
 	etag := first.Header().Get("ETag")
@@ -1320,6 +1320,12 @@ func TestServeAnswersMatchingIfNoneMatchWith304(t *testing.T) {
 		t.Fatal("the first response carried no ETag to revalidate with")
 	}
 	hits := f.totalHits()
+
+	// An hour, still inside max-age: nothing revalidates behind the request,
+	// so what the assertion sees below is this answer and nothing else. A
+	// conditional answer still has to say how old the bytes are (RFC 9110
+	// §5.1) — the ETag alone says which face is held, not since when.
+	ageEntry(t, dir, "alice", time.Hour)
 
 	req := httptest.NewRequest(http.MethodGet, PathPrefix+"alice", nil)
 	req.Header.Set("If-None-Match", etag)
@@ -1334,6 +1340,9 @@ func TestServeAnswersMatchingIfNoneMatchWith304(t *testing.T) {
 	}
 	if got := rec.Header().Get("ETag"); got != etag {
 		t.Errorf("304 ETag = %q, want it to stand as it was", etag)
+	}
+	if got, err := strconv.Atoi(rec.Header().Get("Age")); err != nil || got < 3540 || got > 3660 {
+		t.Errorf("304 Age = %q, want about 3600: these bytes are an hour old", rec.Header().Get("Age"))
 	}
 	if got := f.totalHits(); got != hits {
 		t.Errorf("forge hits grew to %d on a 304, want %d", got, hits)
@@ -1445,26 +1454,65 @@ func TestFutureDatedRenderIsServedButNeverAsAFreshOne(t *testing.T) {
 // further, so past max-age plus stale-if-error the request takes the forge path
 // instead of the file's — a bodyless 502 with the forge down, which is where
 // stale-if-error belongs: honoured by the caches downstream of here, keeping the
-// faces they already hold rather than this one.
+// faces they already hold rather than this one. Both directions of that fall-
+// through are pinned: what the store refuses, and where the request then lands.
 
 func TestServeRefusesAStaleRenderBeyondThePolicyWindows(t *testing.T) {
-	f := newForgeStub(t)
-	p, dir := newProxy(t, f)
+	t.Run("past the windows, the forge path is taken", func(t *testing.T) {
+		f := newForgeStub(t)
+		p, dir := newProxy(t, f)
 
-	first := get(p, "alice")
-	if first.Code != http.StatusOK {
-		t.Fatalf("warm-up: status = %d", first.Code)
-	}
-	ageEntry(t, dir, "alice", maxStaleAge+time.Hour)
-	f.srv.Close() // the forge went down while this entry aged past the policy
+		first := get(p, "alice")
+		if first.Code != http.StatusOK {
+			t.Fatalf("warm-up: status = %d", first.Code)
+		}
+		ageEntry(t, dir, "alice", maxStaleAge+time.Hour)
+		f.srv.Close() // the forge went down while this entry aged past the policy
 
-	rec := get(p, "alice")
-	if rec.Code != http.StatusBadGateway {
-		t.Fatalf("status = %d, want 502: a render past the windows this proxy advertises still answered from the store", rec.Code)
-	}
-	if bytes.HasPrefix(rec.Body.Bytes(), []byte{0x89, 'P', 'N', 'G'}) {
-		t.Error("the body was the stale tile, want the caller's own miss line")
-	}
+		rec := get(p, "alice")
+		if rec.Code != http.StatusBadGateway {
+			t.Fatalf("status = %d, want 502: a render past the windows this proxy advertises still answered from the store", rec.Code)
+		}
+		if bytes.HasPrefix(rec.Body.Bytes(), []byte{0x89, 'P', 'N', 'G'}) {
+			t.Error("the body was the stale tile, want the caller's own miss line")
+		}
+	})
+
+	// The half the README and config/server.example.yaml promise: refusing an
+	// over-aged render is a fall-through to the forge, not a dead end. An entry
+	// that simply aged out while the forge stayed healthy comes back current —
+	// nothing revalidates an entry the store has refused, so a build that
+	// answered 502 here instead would leave an aged-out avatar 502 forever.
+	t.Run("past the windows, a healthy forge answers it", func(t *testing.T) {
+		f := newForgeStub(t)
+		p, dir := newProxy(t, f)
+
+		first := get(p, "alice")
+		if first.Code != http.StatusOK {
+			t.Fatalf("warm-up: status = %d", first.Code)
+		}
+		f.mu.Lock()
+		f.imageBody = encodePNG(t, 300, 300) // the face changed while this entry aged out
+		f.mu.Unlock()
+		ageEntry(t, dir, "alice", maxStaleAge+time.Hour)
+
+		rec := get(p, "alice")
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status = %d (body %q), want 200 from the forge path", rec.Code, rec.Body.String())
+		}
+		if bytes.Equal(rec.Body.Bytes(), first.Body.Bytes()) {
+			t.Error("the over-aged render was answered from the store instead of the forge")
+		}
+		if got := rec.Header().Get("Age"); got != "" {
+			t.Errorf("Age = %q on bytes that came off the forge path, want none", got)
+		}
+		if stored, err := os.ReadFile(filepath.Join(dir, "alice.png")); err != nil || !bytes.Equal(stored, rec.Body.Bytes()) {
+			t.Errorf("the entry was not rewritten: stored=%v err=%v", stored != nil, err)
+		}
+		if got := f.apiHits.Load(); got != 2 {
+			t.Errorf("API hits = %d, want 2: one refused render is one trip to the forge", got)
+		}
+	})
 }
 
 // A forge that fails fast must not turn every request for a stale entry into one
@@ -1503,10 +1551,34 @@ func TestStaleRevalidationIsRateBoundedByARememberedMiss(t *testing.T) {
 		if rec.Code != http.StatusOK || !bytes.Equal(rec.Body.Bytes(), first.Body.Bytes()) {
 			t.Fatalf("request %d during the degraded window: status = %d, want the stored tile", i, rec.Code)
 		}
+		// Quiescence, not a sleep: without draining, these four requests land
+		// inside one round trip and the flights map deduplicates three of them,
+		// so the tally would hold even with no gate on this path at all.
+		awaitQuiescence(t, p)
 	}
 	if got := f.apiHits.Load(); got != 2 {
 		t.Errorf("API hits = %d, want 2: a stale entry in a forge-degraded window must cost one round trip per window, not one per inbound request", got)
 	}
+
+	// And the gate opens when the window closes: once the remembered miss has
+	// expired, the next request pays for a round trip again.
+	expireMisses(p)
+	if rec := get(p, "alice"); rec.Code != http.StatusOK {
+		t.Fatalf("after the window closed: status = %d, want the stored tile", rec.Code)
+	}
+	awaitAPIHits(t, f, 3)
+}
+
+// awaitQuiescence waits for the proxy's background work to drain, so a request
+// is answered while no fetch is in flight and the assertion that follows is a
+// statement about rate rather than about overlap.
+func awaitQuiescence(t *testing.T, p *Proxy) {
+	t.Helper()
+	waitFor(t, "background revalidation to quiesce", func() bool {
+		p.mu.Lock()
+		defer p.mu.Unlock()
+		return len(p.flights) == 0
+	})
 }
 
 // The sidecar only sharpens the next revalidation's If-Modified-Since, so a
