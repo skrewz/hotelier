@@ -2,7 +2,9 @@ package guest
 
 import (
 	"fmt"
+	"log"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -37,6 +39,25 @@ func emitLine(event string) string { return "emit(" + event + ")" }
 // emitting any event — the situation the watchdog must tell apart depending
 // on whether a tool call is in flight.
 func silent(seconds float64) string { return fmt.Sprintf("time.sleep(%g)", seconds) }
+
+// syncWriter serialises writes to a test's log buffer: the handler's logger
+// is written from the watchdog and the event loop alike.
+type syncWriter struct {
+	mu  sync.Mutex
+	buf strings.Builder
+}
+
+func (w *syncWriter) Write(p []byte) (int, error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.buf.Write(p)
+}
+
+func (w *syncWriter) String() string {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.buf.String()
+}
 
 const (
 	toolStart = `{"type": "tool_execution_start", "toolCallId": "%s", "toolName": "bash", "args": {"command": "make -j"}}`
@@ -197,6 +218,35 @@ func TestIdleWatchdog_CeilingAbortsCallThatNeverReturns(t *testing.T) {
 	}
 	if !strings.Contains(result.Error, "agent idle for") || !strings.Contains(result.Error, "in flight") {
 		t.Fatalf("expected an idle abort naming the call in flight, got %q", result.Error)
+	}
+}
+
+// TestIdleWatchdog_DisarmEpisodeLoggedOnce pins the once-per-episode disarm
+// log: one call open across many ticks must produce exactly one "watchdog
+// disarmed" line — not one per tick, which is what the notedDisarm flag
+// exists to prevent — and one more once the window has re-armed and a second
+// call disarms it again.
+func TestIdleWatchdog_DisarmEpisodeLoggedOnce(t *testing.T) {
+	var logged syncWriter
+	result, _ := runFakePiScript(t, "idle-disarm-log", []string{
+		emitLine(`{"type": "agent_start"}`),
+		emitLine(fmt.Sprintf(toolStart, "call-1")),
+		silent(idleTestQuiet),
+		emitLine(fmt.Sprintf(toolEnd, "call-1")),
+		emitLine(fmt.Sprintf(toolStart, "call-2")),
+		silent(idleTestQuiet),
+		emitLine(fmt.Sprintf(toolEnd, "call-2")),
+		emitLine(`{"type": "agent_settled"}`),
+	}, func(h *PIHandler) {
+		withFastIdleWatchdog(h)
+		h.log = log.New(&logged, "", 0)
+	})
+
+	if !result.Success {
+		t.Fatalf("expected task to survive two silent tool calls, got error=%q output=%q", result.Error, result.Output)
+	}
+	if n := strings.Count(logged.String(), "idle watchdog disarmed"); n != 2 {
+		t.Fatalf("expected the disarm line exactly once per episode (2 episodes), got %d:\n%s", n, logged.String())
 	}
 }
 
