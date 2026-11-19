@@ -197,12 +197,14 @@ func NewJail(logger *log.Logger) *Jail {
 }
 
 // Setup discovers the host facts, builds the plan, creates the skeleton
-// and writes the spec. The jail root is a sibling of the task directory
-// (<taskDir>.jail), so the task-directory sweep covers it. homeCopies is
-// the configured set of home paths to copy (relative to homeDir); nil or
-// empty selects the built-in default set (issue #201). mapGuestRange
-// selects the range-mapped mode for nested container runtimes such as
-// rootless podman (issue #236); false keeps today's single-UID mapping.
+// and writes the spec. A failed Setup removes the partial jail root the
+// skeleton step created, so the caller has nothing to clean up. The jail
+// root is a sibling of the task directory (<taskDir>.jail), so the
+// task-directory sweep covers it. homeCopies is the configured set of home
+// paths to copy (relative to homeDir); nil or empty selects the built-in
+// default set (issue #201). mapGuestRange selects the range-mapped mode for
+// nested container runtimes such as rootless podman (issue #236); false
+// keeps today's single-UID mapping.
 func (j *Jail) Setup(taskDir, homeDir, piPath string, homeCopies []string, mapGuestRange bool) error {
 	facts, err := Discover(taskDir, homeDir, piPath, homeCopies)
 	if err != nil {
@@ -216,8 +218,8 @@ func (j *Jail) Setup(taskDir, homeDir, piPath string, homeCopies []string, mapGu
 		return err
 	}
 	if err := CreateSkeleton(plan); err != nil {
-		// Remove the partial skeleton so a failed setup leaves no
-		// debris behind (the handler also defers Cleanup).
+		// Remove the partial skeleton so a failed setup leaves no debris
+		// behind; a removal that fails is journalled (issue #301).
 		j.cleanupPartial(plan.JailRoot)
 		return err
 	}
