@@ -10,19 +10,19 @@ import (
 )
 
 // RemoveAllForce removes a directory tree like os.RemoveAll, but survives
-// read-only directories. os.RemoveAll needs write permission on every
-// directory whose entries it unlinks, so it aborts on trees that are
-// read-only by design — the Go module cache (0555 dirs, 0444 files) being
-// the case that filled guest disks in issue #301: jail roots hold copies of
-// the guest's home trees with those modes preserved, so once-per-task the
-// cleanup failed and the whole tree survived.
+// read-only directories — unlinking an entry needs write permission on the
+// directory it sits in, so os.RemoveAll aborts on trees that are read-only by
+// design (the Go module cache: 0555 dirs, 0444 files), the leftovers of
+// issue #301.
 //
-// It first tries os.RemoveAll. If that fails with a permission error, it
-// restores the owner read and write bits on every directory in the tree
-// (best-effort: entries the caller does not own are skipped) and retries
-// once. Errors that cannot be fixed this way — a read-only filesystem, or
-// directories owned by a uid outside the caller's reach — are returned. A
-// missing path is not an error, matching os.RemoveAll.
+// It first tries os.RemoveAll; on a permission error it restores the owner
+// read and write bits on every directory in the tree (best-effort: entries
+// the caller does not own are skipped) and retries once. A missing path is
+// not an error, matching os.RemoveAll. Errors chmod cannot fix — a read-only
+// filesystem, directories owned by a uid outside the caller's reach — are
+// returned. Only owner bits are added, and the walk does not follow
+// symlinks. When the retry still fails the directories it made owner-writable
+// stay that way, so a tree left behind is no longer read-only by design.
 func RemoveAllForce(path string) error {
 	err := os.RemoveAll(path)
 	if err == nil || !errors.Is(err, fs.ErrPermission) {

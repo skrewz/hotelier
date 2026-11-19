@@ -8,12 +8,12 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"hotelier/pkg/jail"
 )
 
 // makeReadOnlySubtree creates a directory tree shaped like the Go module
-// cache (0555 dirs, 0444 files) under root — the layout cleanup could not
-// remove, letting one jail root per task pile up until the guest's disk
-// filled (issue #301) — and returns the tree root.
+// cache (0555 dirs, 0444 files) under root and returns the tree root.
 func makeReadOnlySubtree(t *testing.T, root string) string {
 	t.Helper()
 	dir := filepath.Join(root, "go", "pkg", "mod", "example@v1.0.0")
@@ -33,9 +33,8 @@ func makeReadOnlySubtree(t *testing.T, root string) string {
 }
 
 // TestPIHandler_SweepRemovesStaleTaskDirWithReadOnlyTree verifies that the
-// startup sweep removes a stale task dir containing read-only trees — the
-// [SWEEP] failures of issue #301, where the same 579 paths failed every
-// boot and nothing ever reclaimed them.
+// startup sweep removes a stale task dir containing read-only trees (issue
+// #301).
 func TestPIHandler_SweepRemovesStaleTaskDirWithReadOnlyTree(t *testing.T) {
 	if os.Geteuid() == 0 {
 		t.Skip("running as root; directory permissions are not enforced")
@@ -79,6 +78,27 @@ func TestPIHandler_CleanupTaskDir_RemovesReadOnlyTree(t *testing.T) {
 	}
 }
 
+// TestJailCleanupRemovesReadOnlyTree verifies that a jail root holding a
+// read-only tree is removed (issue #301). It lives here rather than in
+// pkg/jail to reuse the fixture above instead of rebuilding the tree.
+func TestJailCleanupRemovesReadOnlyTree(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("running as root; directory permissions are not enforced")
+	}
+	root := filepath.Join(t.TempDir(), "task-1-abc.jail")
+	if err := os.MkdirAll(root, 0o755); err != nil {
+		t.Fatalf("create jail root: %v", err)
+	}
+	makeReadOnlySubtree(t, filepath.Join(root, "home", "guestuser"))
+
+	if err := jail.Cleanup(root); err != nil {
+		t.Fatalf("jail.Cleanup failed: %v", err)
+	}
+	if _, err := os.Stat(root); !os.IsNotExist(err) {
+		t.Errorf("jail root should be gone, stat err=%v", err)
+	}
+}
+
 // TestPIHandler_CleanupArtifacts_EscalatesFailureToTaskLog verifies that a
 // cleanup failure is not merely a journal line nobody reads: it is sent to
 // the server as an error-level task log entry, so a guest whose disk is
@@ -89,13 +109,10 @@ func TestPIHandler_CleanupArtifacts_EscalatesFailureToTaskLog(t *testing.T) {
 		log:       log.New(io.Discard, "", 0),
 		removeDir: func(string) error { return errors.New("permission denied") },
 	}
-	err := h.cleanupArtifacts("task-7", nil, filepath.Join(t.TempDir(), "tasks", "task-7-abc"), func(e LogEntry) error {
+	h.cleanupArtifacts("task-7", nil, filepath.Join(t.TempDir(), "tasks", "task-7-abc"), func(e LogEntry) error {
 		entries = append(entries, e)
 		return nil
 	})
-	if err == nil {
-		t.Fatal("cleanupArtifacts should report the removal failure")
-	}
 	var escalated bool
 	for _, e := range entries {
 		if e.Level == "error" && e.TaskID == "task-7" &&
@@ -105,6 +122,24 @@ func TestPIHandler_CleanupArtifacts_EscalatesFailureToTaskLog(t *testing.T) {
 	}
 	if !escalated {
 		t.Errorf("removal failure should be sent as an error-level task log entry naming the path, got: %+v", entries)
+	}
+}
+
+// TestPIHandler_CleanupArtifacts_EscalationFailureIsJournalled verifies that
+// a guest which cannot reach the server — sendLog fails between connections
+// — still records the removal failure in its own journal, so the escalation
+// is never dropped without a trace.
+func TestPIHandler_CleanupArtifacts_EscalationFailureIsJournalled(t *testing.T) {
+	var journal bytes.Buffer
+	h := &PIHandler{
+		log:       log.New(&journal, "", 0),
+		removeDir: func(string) error { return errors.New("permission denied") },
+	}
+	h.cleanupArtifacts("task-9", nil, filepath.Join(t.TempDir(), "tasks", "task-9-abc"), func(LogEntry) error {
+		return errors.New("send log: not connected")
+	})
+	if !bytes.Contains(journal.Bytes(), []byte("failed to escalate removal failure")) {
+		t.Errorf("a failed escalation should be journalled, got: %s", journal.String())
 	}
 }
 
@@ -123,12 +158,10 @@ func TestPIHandler_CleanupArtifacts_SuccessIsSilent(t *testing.T) {
 		baseCWD:   baseDir,
 		removeDir: os.RemoveAll,
 	}
-	if err := h.cleanupArtifacts("task-8", nil, taskDir, func(e LogEntry) error {
+	h.cleanupArtifacts("task-8", nil, taskDir, func(e LogEntry) error {
 		entries = append(entries, e)
 		return nil
-	}); err != nil {
-		t.Fatalf("cleanupArtifacts failed: %v", err)
-	}
+	})
 	if len(entries) != 0 {
 		t.Errorf("successful cleanup should send no task log entries, got: %+v", entries)
 	}

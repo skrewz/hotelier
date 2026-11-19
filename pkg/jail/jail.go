@@ -244,9 +244,7 @@ func (j *Jail) Plan() Plan { return j.plan }
 // Cleanup removes the jail root. The namespace mounts die with the pi
 // process tree, so this is a forceful RemoveAll; if an orphaned process
 // still pins the mounts the removal fails with EBUSY and is reported. The
-// force matters: the home copies include trees that are read-only by
-// design (the Go module cache), which plain os.RemoveAll cannot remove
-// (issue #301).
+// force matters: the home copies include read-only trees (issue #301).
 func (j *Jail) Cleanup() error { return Cleanup(j.plan.JailRoot) }
 
 // Cleanup removes a jail root directory. A missing root is not an error.
