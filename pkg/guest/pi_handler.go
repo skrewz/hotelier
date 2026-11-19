@@ -50,7 +50,22 @@ type PIHandler struct {
 	// production. Tests that exercise non-jail code paths in environments
 	// without unprivileged user namespaces may set it to false directly.
 	jailEnabled bool
+	// idleTimeout and idleCheckInterval control the idle watchdog in
+	// ExecuteTask (issue #300). Zero selects the production defaults
+	// (defaultIdleTimeout / defaultIdleCheckInterval); tests shorten them
+	// so a silent period past the window costs about a second.
+	idleTimeout       time.Duration
+	idleCheckInterval time.Duration
 }
+
+const (
+	// defaultIdleTimeout is how long a task may emit no events with no
+	// tool call in flight before the watchdog aborts it. Raised from 3 to
+	// 10 minutes in 67ccaa9; still unreachable from configuration.
+	defaultIdleTimeout = 10 * time.Minute
+	// defaultIdleCheckInterval is how often the watchdog wakes to check.
+	defaultIdleCheckInterval = 30 * time.Second
+)
 
 // NewPIHandler creates a new PIHandler.
 func NewPIHandler(cwd string, provider, model, thinkingLevel string) *PIHandler {
@@ -399,6 +414,39 @@ func (h *PIHandler) ExecuteTask(ctx context.Context, task TaskAssignment, sendLo
 		return lastActivity
 	}
 
+	// Track tool/compaction calls in flight for the idle watchdog
+	// (issue #300). A running call can be entirely silent — pi only emits
+	// tool_execution_update when a tool reports a partial result, and
+	// compaction emits nothing between start and end — so event silence
+	// alone is not evidence of a wedged agent while any call is open.
+	// The count is deliberately a counter rather than a boolean: parallel
+	// calls finish in completion order and nested calls (parentToolCallId)
+	// emit their own lifecycle, so only returning to zero may re-arm the
+	// window. If an end event is lost — pi killed mid-call, or the
+	// subscription dropped on reconnect — the watchdog stays disarmed for
+	// the rest of the task, bounded by the task timeout rather than open-
+	// ended. The counter is scoped to this execution, so aborting or
+	// cancelling the task resets it.
+	var outstandingMu sync.Mutex
+	outstandingCalls := 0
+	incOutstanding := func() {
+		outstandingMu.Lock()
+		outstandingCalls++
+		outstandingMu.Unlock()
+	}
+	decOutstanding := func() {
+		outstandingMu.Lock()
+		if outstandingCalls > 0 {
+			outstandingCalls--
+		}
+		outstandingMu.Unlock()
+	}
+	countOutstanding := func() int {
+		outstandingMu.Lock()
+		defer outstandingMu.Unlock()
+		return outstandingCalls
+	}
+
 	// Track whether pi sent a settle event (agent_settled, or the legacy
 	// guest_end) before exiting. If not, the process crashed or was killed —
 	// an abnormal exit. Note: agent_end does NOT count — pi emits it with
@@ -463,6 +511,7 @@ func (h *PIHandler) ExecuteTask(ctx context.Context, task TaskAssignment, sendLo
 
 				switch event.Type {
 				case "tool_execution_start":
+					incOutstanding()
 					args := pi.ToolArgs(event)
 					entry := LogEntry{
 						TaskID:   task.TaskID,
@@ -499,6 +548,7 @@ func (h *PIHandler) ExecuteTask(ctx context.Context, task TaskAssignment, sendLo
 					}
 
 				case "tool_execution_end":
+					decOutstanding()
 					result := pi.ToolResult(event)
 					isErr := event.IsError
 					var line string
@@ -530,6 +580,7 @@ func (h *PIHandler) ExecuteTask(ctx context.Context, task TaskAssignment, sendLo
 				reason := pi.CompactionReason(event)
 				switch pi.CompactionType(event) {
 				case "start":
+					incOutstanding()
 					entry := LogEntry{
 						TaskID:           task.TaskID,
 						Line:             fmt.Sprintf("[COMPACTION_START] (reason: %s)", reason),
@@ -543,6 +594,7 @@ func (h *PIHandler) ExecuteTask(ctx context.Context, task TaskAssignment, sendLo
 					h.log.Printf("[COMPACTION] started (reason: %s)", reason)
 
 				case "end":
+					decOutstanding()
 					summary := pi.CompactionSummary(event)
 					tokensBefore, tokensAfter := pi.CompactionTokens(event)
 					errMsg := pi.CompactionErrorMessage(event)
@@ -581,7 +633,15 @@ func (h *PIHandler) ExecuteTask(ctx context.Context, task TaskAssignment, sendLo
 	// The context is driven by the guest's task timeout (configurable) or
 	// by a server-sent task.cancel RPC (via silence detection). No hardcoded
 	// timeout here — the server's silence detection replaces the old fixed limit.
-	idleCheck := time.NewTicker(30 * time.Second)
+	idleTimeout := h.idleTimeout
+	if idleTimeout <= 0 {
+		idleTimeout = defaultIdleTimeout
+	}
+	idleInterval := h.idleCheckInterval
+	if idleInterval <= 0 {
+		idleInterval = defaultIdleCheckInterval
+	}
+	idleCheck := time.NewTicker(idleInterval)
 	defer idleCheck.Stop()
 
 	for {
@@ -655,7 +715,15 @@ func (h *PIHandler) ExecuteTask(ctx context.Context, task TaskAssignment, sendLo
 			}, nil
 		case <-idleCheck.C:
 			idle := time.Since(getLastActivity())
-			if idle > 10*time.Minute {
+			if idle > idleTimeout {
+				if n := countOutstanding(); n > 0 {
+					// Something is running — silence is expected, not a
+					// wedged agent. Stay disarmed (issue #300); the window
+					// re-arms from the event that returns the count to
+					// zero, which refreshes lastActivity like any other.
+					h.log.Printf("[PI] task %s: %d call(s) in flight — idle watchdog disarmed (last event %s)", task.TaskID, n, idle.Round(time.Second))
+					continue
+				}
 				h.log.Printf("[PI] task %s idle for %s — agent may be stuck", task.TaskID, idle)
 				_ = h.client.Abort()
 
