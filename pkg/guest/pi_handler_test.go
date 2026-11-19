@@ -14,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"hotelier/pkg/fsutil"
 	"hotelier/pkg/jail"
 	"hotelier/pkg/persona"
 	"hotelier/pkg/pi"
@@ -402,9 +403,10 @@ func TestPIHandler_CleanupTaskDir_RemovesDirectory(t *testing.T) {
 	})
 
 	h := &PIHandler{
-		baseCWD: baseDir,
-		client:  client,
-		log:     log.New(io.Discard, "", 0),
+		baseCWD:   baseDir,
+		client:    client,
+		log:       log.New(io.Discard, "", 0),
+		removeDir: fsutil.RemoveAllForce,
 	}
 
 	// Create a task directory via prepareTaskDir
@@ -445,9 +447,10 @@ func TestPIHandler_CleanupTaskDir_Idempotent(t *testing.T) {
 	})
 
 	h := &PIHandler{
-		baseCWD: baseDir,
-		client:  client,
-		log:     log.New(io.Discard, "", 0),
+		baseCWD:   baseDir,
+		client:    client,
+		log:       log.New(io.Discard, "", 0),
+		removeDir: fsutil.RemoveAllForce,
 	}
 
 	// Cleanup a non-existent directory should not error.
@@ -472,9 +475,10 @@ func TestPIHandler_CleanupTaskDir_WithContents(t *testing.T) {
 	})
 
 	h := &PIHandler{
-		baseCWD: baseDir,
-		client:  client,
-		log:     log.New(io.Discard, "", 0),
+		baseCWD:   baseDir,
+		client:    client,
+		log:       log.New(io.Discard, "", 0),
+		removeDir: fsutil.RemoveAllForce,
 	}
 
 	// Create a task directory
@@ -933,9 +937,10 @@ func TestPIHandler_ExecuteTask_ClientNotRunningAttemptsRestart(t *testing.T) {
 	})
 
 	h := &PIHandler{
-		baseCWD: baseDir,
-		client:  client,
-		log:     logger,
+		baseCWD:   baseDir,
+		client:    client,
+		log:       logger,
+		removeDir: fsutil.RemoveAllForce,
 	}
 
 	task := TaskAssignment{
@@ -1552,9 +1557,10 @@ func TestPIHandler_PrepareTaskDir_UniquePaths(t *testing.T) {
 	})
 
 	h := &PIHandler{
-		baseCWD: baseDir,
-		client:  client,
-		log:     log.New(io.Discard, "", 0),
+		baseCWD:   baseDir,
+		client:    client,
+		log:       log.New(io.Discard, "", 0),
+		removeDir: fsutil.RemoveAllForce,
 	}
 
 	taskID := "task-unique-paths"

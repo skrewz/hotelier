@@ -48,6 +48,8 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+
+	"hotelier/pkg/fsutil"
 )
 
 // DropID is the uid/gid the command is mapped to inside the nested user
@@ -195,12 +197,14 @@ func NewJail(logger *log.Logger) *Jail {
 }
 
 // Setup discovers the host facts, builds the plan, creates the skeleton
-// and writes the spec. The jail root is a sibling of the task directory
-// (<taskDir>.jail), so the task-directory sweep covers it. homeCopies is
-// the configured set of home paths to copy (relative to homeDir); nil or
-// empty selects the built-in default set (issue #201). mapGuestRange
-// selects the range-mapped mode for nested container runtimes such as
-// rootless podman (issue #236); false keeps today's single-UID mapping.
+// and writes the spec. A failed Setup removes the partial jail root the
+// skeleton step created, so the caller has nothing to clean up. The jail
+// root is a sibling of the task directory (<taskDir>.jail), so the
+// task-directory sweep covers it. homeCopies is the configured set of home
+// paths to copy (relative to homeDir); nil or empty selects the built-in
+// default set (issue #201). mapGuestRange selects the range-mapped mode for
+// nested container runtimes such as rootless podman (issue #236); false
+// keeps today's single-UID mapping.
 func (j *Jail) Setup(taskDir, homeDir, piPath string, homeCopies []string, mapGuestRange bool) error {
 	facts, err := Discover(taskDir, homeDir, piPath, homeCopies)
 	if err != nil {
@@ -214,13 +218,13 @@ func (j *Jail) Setup(taskDir, homeDir, piPath string, homeCopies []string, mapGu
 		return err
 	}
 	if err := CreateSkeleton(plan); err != nil {
-		// Remove the partial skeleton so a failed setup leaves no
-		// debris behind (the handler also defers Cleanup).
-		_ = Cleanup(plan.JailRoot)
+		// Remove the partial skeleton so a failed setup leaves no debris
+		// behind; a removal that fails is journalled (issue #301).
+		j.cleanupPartial(plan.JailRoot)
 		return err
 	}
 	if err := WriteSpec(plan); err != nil {
-		_ = Cleanup(plan.JailRoot)
+		j.cleanupPartial(plan.JailRoot)
 		return err
 	}
 	j.plan = plan
@@ -240,8 +244,9 @@ func (j *Jail) SpecPath() string { return j.plan.SpecPath() }
 func (j *Jail) Plan() Plan { return j.plan }
 
 // Cleanup removes the jail root. The namespace mounts die with the pi
-// process tree, so this is a plain RemoveAll; if an orphaned process
-// still pins the mounts the removal fails with EBUSY and is reported.
+// process tree, so this is a forceful RemoveAll; if an orphaned process
+// still pins the mounts the removal fails with EBUSY and is reported. The
+// force matters: the home copies include read-only trees (issue #301).
 func (j *Jail) Cleanup() error { return Cleanup(j.plan.JailRoot) }
 
 // Cleanup removes a jail root directory. A missing root is not an error.
@@ -252,5 +257,16 @@ func Cleanup(root string) error {
 	if _, err := os.Stat(root); os.IsNotExist(err) {
 		return nil
 	}
-	return os.RemoveAll(root)
+	return fsutil.RemoveAllForce(root)
+}
+
+// cleanupPartial removes the jail root a failed setup step left behind. The
+// step's own error is the one worth returning, so a removal that fails here
+// is journalled instead: the next start's sweep force-removes the leftover
+// (issue #301), but the journal should still say it could not be removed at
+// the time.
+func (j *Jail) cleanupPartial(root string) {
+	if err := Cleanup(root); err != nil {
+		j.log.Printf("failed to remove partial jail root %s: %v", root, err)
+	}
 }
