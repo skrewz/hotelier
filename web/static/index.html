@@ -1241,9 +1241,9 @@
                     errorHtml = `<div class="task-prompt" style="color:#fca5a5;">⚠ ${escapeHtml(errorText)}</div>`;
                 }
                 const isCancellable = t.status !== 'COMPLETED' && t.status !== 'FAILED' && t.status !== 'CANCELLED';
-                const cancelBtn = isCancellable ? `<button class="btn btn-sm btn-danger" onclick="event.stopPropagation(); cancelTask('${t.id}')">✖</button>` : '';
+                const cancelBtn = isCancellable ? `<button class="btn btn-sm btn-danger" data-task-id="${escapeAttr(t.id)}" onclick="event.stopPropagation(); cancelTask(this.dataset.taskId)">✖</button>` : '';
                 const isRerunnable = t.status === 'FAILED' || t.status === 'CANCELLED';
-                const rerunBtn = isRerunnable ? `<button class="btn btn-sm btn-ghost" onclick="event.stopPropagation(); rerunTask('${t.id}')">🔄</button>` : '';
+                const rerunBtn = isRerunnable ? `<button class="btn btn-sm btn-ghost" data-task-id="${escapeAttr(t.id)}" onclick="event.stopPropagation(); rerunTask(this.dataset.taskId)">🔄</button>` : '';
                 const btnRow = (rerunBtn || cancelBtn) ? `<div class="task-btn-row">${rerunBtn}${cancelBtn}</div>` : '';
                 const logCount = t.log_count != null ? ` · ${t.log_count} log${t.log_count === 1 ? '' : 's'}${listSpinnerHTML(t)}` : '';
                 // Priority chip shown only for PENDING tasks (issues #266,
@@ -1255,8 +1255,8 @@
                 // name rides in the gutter's title because a tile that cannot
                 // load carries no identity of its own.
                 const avatar = t.persona ? `<span class="task-avatar" title="Persona: ${escapeAttr(t.persona)}"><img src="/avatar/${encodeURIComponent(t.persona)}" alt="${escapeAttr(t.persona)}" onerror="this.classList.add('avatar-error')"></span>` : '';
-                return `<div class="task-item ${itemClass}${isActive}" onclick="selectTask('${t.id}')">
-                    <div class="task-id">${taskTitleHTML(t)}${t.id} <span class="badge ${badgeClass}">${t.status}</span>${priorityLabel}</div>
+                return `<div class="task-item ${itemClass}${isActive}" data-task-id="${escapeAttr(t.id)}" onclick="selectTask(this.dataset.taskId)">
+                    <div class="task-id">${taskTitleHTML(t)}${escapeHtml(t.id)} <span class="badge ${badgeClass}">${t.status}</span>${priorityLabel}</div>
                     <div class="task-body">${avatar}<div class="task-lines">
                     <div class="task-meta">${t.assigned_to ? '→ ' + guestLabel(t.assigned_to) : 'unassigned'} · ${new Date(t.created_at).toLocaleString()}${logCount}</div>
                     <div class="task-prompt">${escapeHtml(t.prompt.substring(0, 120))}${t.prompt.length > 120 ? '...' : ''}</div>

@@ -1486,7 +1486,7 @@ const { chromium } = require('playwright');
   console.log('=== Phase 1e: Task titles in overview ===');
 
   const titleListResult = await page.evaluate((d) => {
-    const itemFor = (tid) => document.querySelector('.task-item[onclick*="' + tid + '"]');
+    const itemFor = (tid) => document.querySelector('.task-item[data-task-id="' + tid + '"]');
     const out = {};
     const urlItem = itemFor(d.titleUrlTaskId);
     if (urlItem) {
@@ -3659,7 +3659,7 @@ const { chromium } = require('playwright');
   await page.locator('.tab').filter({ hasText: 'Tasks' }).click();
   await page.waitForFunction(() => document.getElementById('tab-tasks').style.display === 'block', null, { timeout: 5000 });
   await page.evaluate((tid) => {
-    const item = document.querySelector('.task-item[onclick*="' + tid + '"]');
+    const item = document.querySelector('.task-item[data-task-id="' + tid + '"]');
     if (!item) throw new Error('title+URL task item not found');
     item.click();
   }, titleUrlTaskId);
@@ -3701,7 +3701,7 @@ const { chromium } = require('playwright');
   await page.locator('.tab').filter({ hasText: 'Tasks' }).click();
   await page.waitForFunction(() => document.getElementById('tab-tasks').style.display === 'block', null, { timeout: 5000 });
   await page.evaluate((tid) => {
-    const item = document.querySelector('.task-item[onclick*="' + tid + '"]');
+    const item = document.querySelector('.task-item[data-task-id="' + tid + '"]');
     if (!item) throw new Error('title-only task item not found');
     item.click();
   }, titleOnlyTaskId);
