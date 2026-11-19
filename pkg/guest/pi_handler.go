@@ -72,10 +72,10 @@ const (
 	// calls in flight. A call that never returns — one an untrusted prompt
 	// steered the agent into, or an end event that never arrived — would
 	// otherwise disarm the watchdog for the rest of the task, and a guest
-	// whose task_timeout is 0 (the guest default, meaning no task deadline)
-	// has nothing else to fall back on. Four hours sits well past any silent
-	// call worth keeping, and above the one-hour task_timeout most guests
-	// set, so it only ever fires where the watchdog is the last backstop.
+	// whose task_timeout is 0 (the guest default, which attaches no task
+	// deadline) has nothing else to fall back on. Four hours sits well past
+	// any silent call worth keeping; where a longer task deadline is
+	// configured, this ceiling fires first.
 	defaultIdleCeiling = 4 * time.Hour
 )
 
