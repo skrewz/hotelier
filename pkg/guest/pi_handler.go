@@ -465,20 +465,10 @@ func (h *PIHandler) ExecuteTask(ctx context.Context, task TaskAssignment, sendLo
 		sort.Strings(labels)
 		return len(labels), strings.Join(labels, ", ")
 	}
-	// toolCallKey identifies a call in the set. Pi always sends a
-	// toolCallId; for an event without one the tool name is the key, so
-	// anonymous calls do not all collapse into the same entry.
-	toolCallKey := func(id, name string) string {
-		if id == "" {
-			return name
-		}
-		return id
-	}
+	// Calls are keyed by toolCallId, which pi sends on every
+	// tool_execution_* event (see the event table in pi's docs/json.md).
 	// toolCallLabel names a call for the watchdog's log line.
 	toolCallLabel := func(id, name string) string {
-		if id == "" {
-			return name
-		}
 		return fmt.Sprintf("%s id: %s", name, id)
 	}
 
@@ -546,7 +536,7 @@ func (h *PIHandler) ExecuteTask(ctx context.Context, task TaskAssignment, sendLo
 
 				switch event.Type {
 				case "tool_execution_start":
-					markInFlight(toolCallKey(toolID, toolName), toolCallLabel(toolID, toolName))
+					markInFlight(toolID, toolCallLabel(toolID, toolName))
 					args := pi.ToolArgs(event)
 					entry := LogEntry{
 						TaskID:   task.TaskID,
@@ -583,7 +573,7 @@ func (h *PIHandler) ExecuteTask(ctx context.Context, task TaskAssignment, sendLo
 					}
 
 				case "tool_execution_end":
-					settleInFlight(toolCallKey(toolID, toolName))
+					settleInFlight(toolID)
 					result := pi.ToolResult(event)
 					isErr := event.IsError
 					var line string
