@@ -59,13 +59,20 @@ log_retention_days: 14
 # that are applied to a task's working directory. Tasks can specify a
 # persona when they are created via the scheduling API.
 #
+# A persona's name is also the identity the dashboard keys a task row's
+# avatar gutter on (GET /avatar/<login>), so name each persona after the
+# forge login it acts as. Where the tile is a question mark rather than a
+# face, the cause is either no forge_url configured at all — the common
+# case in a stock install, where every identity is answered 503 — or a
+# name the forge does not know.
+#
 # Environment variable values can contain <workpath> as a placeholder
 # for the task's working directory.
 #
 # File copies specify absolute source paths (on the guest machine) and
 # relative destination paths (within the task's working directory).
 #personas:
-#  - name: s-issue-implementer
+#  - name: s-autonomics-implementer
 #    env:
 #      FORGEJO_CLIENT_TLS: "s-autonomics-implementer"
 #      GIT_CONFIG_GLOBAL: "<workpath>/.forgejo-gitconfigs/s-autonomics-implementer"
@@ -75,7 +82,7 @@ log_retention_days: 14
 #        to: .tokens/s-autonomics-implementer
 #      - from: /home/guestuser/.forgejo-gitconfigs/s-autonomics-implementer
 #        to: .forgejo-gitconfigs/s-autonomics-implementer
-#  - name: s-issue-reviewer
+#  - name: s-autonomics-reviewer
 #    env:
 #      FORGEJO_CLIENT_TLS: "s-autonomics-reviewer"
 #      GIT_CONFIG_GLOBAL: "<workpath>/.forgejo-gitconfigs/s-autonomics-reviewer"

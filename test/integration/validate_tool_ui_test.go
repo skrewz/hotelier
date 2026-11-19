@@ -614,11 +614,12 @@ func TestValidateToolUI(t *testing.T) {
 	}
 	t.Logf("Pending task created: %s", pendingTaskID)
 
-	// Step 4e: Create a second task with a different persona to test colour distribution.
+	// Step 4e: Create a second task with a different identity, so a row with
+	// an avatar gutter (issue #277) appears alongside the others.
 	colouredTaskID := fmt.Sprintf("ui-test-coloured-task-%d", time.Now().UnixNano())
 	colouredTask := &queue.Task{
 		ID:      colouredTaskID,
-		Prompt:  "A task with a distinct persona for colour testing",
+		Prompt:  "A task with a distinct persona",
 		Tags:    []string{"business-default"},
 		Persona: "test-blue",
 	}
@@ -1480,39 +1481,12 @@ const { chromium } = require('playwright');
   console.log('PASS: ⏳ spinner on task cards is keyed off status and log count');
 
   // =====================================================================
-  // Phase 1c: Persona badge colours
-  // =====================================================================
-  console.log('=== Phase 1c: Persona badge colours ===');
-
-  const personaResult = await page.evaluate(() => {
-    const items = document.querySelectorAll('.task-item');
-    const results = [];
-    for (const item of items) {
-      const badge = item.querySelector('.persona-badge');
-      if (!badge) continue;
-      results.push({
-        id: item.textContent.substring(0, 40),
-        className: badge.className,
-        text: badge.textContent.trim(),
-        hasColourClass: /persona-badge-[0-7]/.test(badge.className),
-      });
-    }
-    return results;
-  });
-
-  if (personaResult.length === 0) fail('No persona badges found in task list');
-  for (const p of personaResult) {
-    if (!p.hasColourClass) fail('Persona badge should have a colour class, got: ' + p.className);
-    console.log('PASS: Persona badge colour class for', p.id, ':', p.className);
-  }
-
-  // =====================================================================
   // Phase 1e: Task title rendering in the overview list (issue #229)
   // =====================================================================
   console.log('=== Phase 1e: Task titles in overview ===');
 
   const titleListResult = await page.evaluate((d) => {
-    const itemFor = (tid) => document.querySelector('.task-item[onclick*="' + tid + '"]');
+    const itemFor = (tid) => document.querySelector('.task-item[data-task-id="' + tid + '"]');
     const out = {};
     const urlItem = itemFor(d.titleUrlTaskId);
     if (urlItem) {
@@ -3685,7 +3659,7 @@ const { chromium } = require('playwright');
   await page.locator('.tab').filter({ hasText: 'Tasks' }).click();
   await page.waitForFunction(() => document.getElementById('tab-tasks').style.display === 'block', null, { timeout: 5000 });
   await page.evaluate((tid) => {
-    const item = document.querySelector('.task-item[onclick*="' + tid + '"]');
+    const item = document.querySelector('.task-item[data-task-id="' + tid + '"]');
     if (!item) throw new Error('title+URL task item not found');
     item.click();
   }, titleUrlTaskId);
@@ -3727,7 +3701,7 @@ const { chromium } = require('playwright');
   await page.locator('.tab').filter({ hasText: 'Tasks' }).click();
   await page.waitForFunction(() => document.getElementById('tab-tasks').style.display === 'block', null, { timeout: 5000 });
   await page.evaluate((tid) => {
-    const item = document.querySelector('.task-item[onclick*="' + tid + '"]');
+    const item = document.querySelector('.task-item[data-task-id="' + tid + '"]');
     if (!item) throw new Error('title-only task item not found');
     item.click();
   }, titleOnlyTaskId);

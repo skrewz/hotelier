@@ -47,6 +47,21 @@
         .task-item.cancelled { border-left-color: #94a3b8; }
         .task-btn-row { position: absolute; top: 0.5rem; right: 0.5rem; display: flex; gap: 0.25rem; align-items: center; }
         .task-id { font-weight: 600; font-size: 0.875rem; }
+        /* The face of the identity that acted on a task (issue #277), in a
+           gutter beside the lines under the row headline. The size is a value
+           chosen in this member, not a number invented in the CSS — raise
+           this one number if you disagree. Every state of the box occupies
+           the identical dimensions, so no row reflows when the forge blinks. */
+        :root { --task-avatar-gutter: 40px; }
+        /* Two columns: the gutter, then everything under the headline, so no
+           line of the row runs back under the face. The glyph behind the
+           image shows through only when the tile cannot load. */
+        .task-body { display: flex; align-items: flex-start; gap: 0.5rem; }
+        .task-lines { flex: 1; min-width: 0; }
+        .task-avatar { flex: 0 0 var(--task-avatar-gutter); height: var(--task-avatar-gutter); position: relative; background: #334155; border-radius: 0.25rem; overflow: hidden; }
+        .task-avatar::before { content: "?"; position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; color: #64748b; font-weight: 600; font-size: 1rem; }
+        .task-avatar img { position: relative; display: block; width: 100%; height: 100%; object-fit: cover; }
+        .task-avatar img.avatar-error { visibility: hidden; }
         /* Task title shown ahead of the ID (issue #229). In the overview
            list it truncates with an ellipsis (the full title stays
            available via the element's title attribute); the drill-down
@@ -317,15 +332,10 @@
         .badge-priority { display: inline-flex; align-items: center; gap: 0.125rem; background: #1e293b; color: #fbbf24; margin-left: 0.25rem; }
         .badge-priority .priority-bump { background: none; border: none; padding: 0; font-size: inherit; line-height: 1; cursor: pointer; }
         .badge-priority .priority-bump.priority-bump-disabled { opacity: 0.3; cursor: default; }
-        .persona-badge { display: inline-block; padding: 0.125rem 0.375rem; border-radius: 0.25rem; font-size: 0.625rem; font-weight: 600; }
-        .persona-badge-0 { background: #1e1045; color: #c4b5fd; }
-        .persona-badge-1 { background: #1e3a5f; color: #93c5fd; }
-        .persona-badge-2 { background: #0f4c4a; color: #5eead4; }
-        .persona-badge-3 { background: #14532d; color: #86efac; }
-        .persona-badge-4 { background: #78350f; color: #fde68a; }
-        .persona-badge-5 { background: #7f1d1d; color: #fca5a5; }
-        .persona-badge-6 { background: #831843; color: #f9a8d4; }
-        .persona-badge-7 { background: #312e81; color: #a5b4fc; }
+        /* The persona name badge, shown in the task detail header (issue
+           #277): the row is recognition (a face), the selection is reading
+           (a name). */
+        .persona-badge { display: inline-block; padding: 0.125rem 0.375rem; border-radius: 0.25rem; font-size: 0.625rem; font-weight: 600; background: #334155; color: #cbd5e1; }
         .task-error { background: #1c0a0a; border: 1px solid #7f1d1d; border-radius: 0.375rem; padding: 0.75rem 1rem; margin-bottom: 1rem; font-size: 0.85rem; color: #fca5a5; line-height: 1.5; }
         .task-error-label { font-weight: 600; color: #ef4444; margin-bottom: 0.25rem; font-size: 0.75rem; text-transform: uppercase; letter-spacing: 0.05em; }
         .task-error-text { white-space: pre-wrap; word-break: break-word; }
@@ -1231,20 +1241,27 @@
                     errorHtml = `<div class="task-prompt" style="color:#fca5a5;">⚠ ${escapeHtml(errorText)}</div>`;
                 }
                 const isCancellable = t.status !== 'COMPLETED' && t.status !== 'FAILED' && t.status !== 'CANCELLED';
-                const cancelBtn = isCancellable ? `<button class="btn btn-sm btn-danger" onclick="event.stopPropagation(); cancelTask('${t.id}')">✖</button>` : '';
+                const cancelBtn = isCancellable ? `<button class="btn btn-sm btn-danger" data-task-id="${escapeAttr(t.id)}" onclick="event.stopPropagation(); cancelTask(this.dataset.taskId)">✖</button>` : '';
                 const isRerunnable = t.status === 'FAILED' || t.status === 'CANCELLED';
-                const rerunBtn = isRerunnable ? `<button class="btn btn-sm btn-ghost" onclick="event.stopPropagation(); rerunTask('${t.id}')">🔄</button>` : '';
+                const rerunBtn = isRerunnable ? `<button class="btn btn-sm btn-ghost" data-task-id="${escapeAttr(t.id)}" onclick="event.stopPropagation(); rerunTask(this.dataset.taskId)">🔄</button>` : '';
                 const btnRow = (rerunBtn || cancelBtn) ? `<div class="task-btn-row">${rerunBtn}${cancelBtn}</div>` : '';
                 const logCount = t.log_count != null ? ` · ${t.log_count} log${t.log_count === 1 ? '' : 's'}${listSpinnerHTML(t)}` : '';
                 // Priority chip shown only for PENDING tasks (issues #266,
                 // #295): current priority between the bump arrows.
                 const priorityLabel = t.status === 'PENDING' && t.priority ? priorityChipHTML(t.id, t.priority, true) : '';
-                const personaBadge = t.persona ? ` <span class="persona-badge ${personaColourClass(t.persona)}" title="Persona: ${escapeHtml(t.persona)}">🧑 ${escapeHtml(t.persona)}</span>` : '';
-                return `<div class="task-item ${itemClass}${isActive}" onclick="selectTask('${t.id}')">
-                    <div class="task-id">${taskTitleHTML(t)}${t.id} <span class="badge ${badgeClass}">${t.status}</span>${priorityLabel}${personaBadge}</div>
+                // The face of the identity that acted, from the avatar
+                // proxy, in the gutter beside everything under the headline
+                // (issue #277). A task with no identity grows no box, and the
+                // name rides in the gutter's title because a tile that cannot
+                // load carries no identity of its own.
+                const avatar = t.persona ? `<span class="task-avatar" title="Persona: ${escapeAttr(t.persona)}"><img src="/avatar/${encodeURIComponent(t.persona)}" alt="${escapeAttr(t.persona)}" onerror="this.classList.add('avatar-error')"></span>` : '';
+                return `<div class="task-item ${itemClass}${isActive}" data-task-id="${escapeAttr(t.id)}" onclick="selectTask(this.dataset.taskId)">
+                    <div class="task-id">${taskTitleHTML(t)}${escapeHtml(t.id)} <span class="badge ${badgeClass}">${t.status}</span>${priorityLabel}</div>
+                    <div class="task-body">${avatar}<div class="task-lines">
                     <div class="task-meta">${t.assigned_to ? '→ ' + guestLabel(t.assigned_to) : 'unassigned'} · ${new Date(t.created_at).toLocaleString()}${logCount}</div>
                     <div class="task-prompt">${escapeHtml(t.prompt.substring(0, 120))}${t.prompt.length > 120 ? '...' : ''}</div>
                     ${errorHtml}
+                    </div></div>
                     ${btnRow}
                 </div>`;
             }).join('');
@@ -1867,7 +1884,10 @@
         // escapeAttr escapes a value for interpolation into a double-quoted
         // HTML attribute. escapeHtml is not enough for that context: it
         // serialises via innerHTML, which leaves quotes untouched, so a value
-        // containing a quote would break out of the attribute.
+        // containing a quote would break out of the attribute. Where markup
+        // is assembled as a string, attributes take escapeAttr and text
+        // takes escapeHtml; assigning to a DOM property (textContent, title)
+        // parses no HTML, so the raw value is the right input there.
         function escapeAttr(value) {
             const entities = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' };
             return String(value ?? '').replace(/[&<>"']/g, (c) => entities[c]);
@@ -1960,18 +1980,6 @@
             }
         }
 
-        // personaColourClass returns a deterministic CSS class for the given
-        // persona name, mapping it to one of several distinguishable colours.
-        function personaColourClass(name) {
-            if (!name) return '';
-            let hash = 0;
-            for (let i = 0; i < name.length; i++) {
-                hash = ((hash << 5) - hash) + name.charCodeAt(i);
-                hash |= 0;
-            }
-            const palette = 8;
-            return 'persona-badge-' + ((hash % palette) + palette) % palette;
-        }
         // getFirstLine extracts the first line of text, optionally truncated to maxLen chars.
         function getFirstLine(text, maxLen) {
             if (!text) return '';
@@ -2111,21 +2119,21 @@
                     badgeEl.textContent = task.status;
                 }
 
-                // Update persona badge in header (add, remove, or keep)
+                // Update persona badge in header (add, remove, or keep): the
+                // name, in one neutral style (issue #277).
                 const detailIdEl = document.querySelector('.task-detail-id');
                 if (detailIdEl) {
                     const existingPersona = detailIdEl.querySelector('.persona-badge');
                     if (task.persona) {
-                        const colourCls = personaColourClass(task.persona);
                         if (existingPersona) {
-                            existingPersona.className = 'persona-badge ' + colourCls;
-                            existingPersona.textContent = `🧑 ${escapeHtml(task.persona)}`;
-                            existingPersona.title = `Persona: ${escapeHtml(task.persona)}`;
+                            existingPersona.className = 'persona-badge';
+                            existingPersona.textContent = task.persona;
+                            existingPersona.title = `Persona: ${task.persona}`;
                         } else {
                             const span = document.createElement('span');
-                            span.className = 'persona-badge ' + colourCls;
-                            span.title = `Persona: ${escapeHtml(task.persona)}`;
-                            span.textContent = `🧑 ${escapeHtml(task.persona)}`;
+                            span.className = 'persona-badge';
+                            span.title = `Persona: ${task.persona}`;
+                            span.textContent = task.persona;
                             detailIdEl.appendChild(span);
                         }
                     } else if (existingPersona) {
@@ -2171,7 +2179,7 @@
             if (!task) return;
 
             const badgeClass = `badge-${task.status.toLowerCase()}`;
-            const personaBadge = task.persona ? `<span class="persona-badge ${personaColourClass(task.persona)}" title="Persona: ${escapeHtml(task.persona)}">🧑 ${escapeHtml(task.persona)}</span>` : '';
+            const personaBadge = task.persona ? `<span class="persona-badge" title="Persona: ${escapeAttr(task.persona)}">${escapeHtml(task.persona)}</span>` : '';
             const promptMarkdown = renderMarkdown(task.prompt);
             // Extract first line of prompt for collapsed preview
             const promptPreview = getFirstLine(task.prompt, PROMPT_PREVIEW_MAX_LEN);

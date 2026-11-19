@@ -156,7 +156,7 @@ const { chromium } = require('playwright');
   // The dashboard hides PENDING tasks by default; show them first.
   await page.evaluate(() => toggleTaskFilter('PENDING'));
   await page.waitForFunction(() => document.querySelectorAll('#task-list .task-item').length === 1, { timeout: 10000 });
-  await page.evaluate(() => document.querySelector('.task-item[onclick*="close-target"]').click());
+  await page.evaluate(() => document.querySelector('.task-item[data-task-id*="close-target"]').click());
   await page.waitForSelector('.task-detail-header', { timeout: 10000 });
   await page.screenshot({ path: screenshotDir + '/01-detail-open.png', fullPage: true });
 
