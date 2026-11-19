@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"log"
 	"os"
@@ -13,6 +14,7 @@ import (
 	"sync"
 	"time"
 
+	"hotelier/pkg/fsutil"
 	"hotelier/pkg/jail"
 	"hotelier/pkg/logutil"
 	"hotelier/pkg/persona"
@@ -35,9 +37,10 @@ type PIHandler struct {
 	homeCopies []string
 	debugMu    sync.Mutex
 	mu         sync.Mutex
-	// removeDir removes a directory tree during the startup sweep
-	// (issue #180). Defaults to os.RemoveAll; overridable in tests to
-	// simulate removal failures.
+	// removeDir removes a directory tree during task cleanup and the
+	// startup sweep (issues #180, #301). Defaults to
+	// fsutil.RemoveAllForce; overridable in tests to simulate removal
+	// failures.
 	removeDir func(string) error
 	// jailEnabled controls whether each task runs inside a namespace jail
 	// (issue #51). It is always true when the handler is constructed via
@@ -103,7 +106,7 @@ func NewPIHandlerDebug(cwd string, provider, model, thinkingLevel string, debug 
 		log:         logger,
 		debug:       debug,
 		piExecPath:  piExecPath,
-		removeDir:   os.RemoveAll,
+		removeDir:   fsutil.RemoveAllForce,
 		jailEnabled: true,
 	}
 }
@@ -135,6 +138,16 @@ func (h *PIHandler) Start(ctx context.Context) error {
 	return nil
 }
 
+// removeTree removes a directory tree via the removeDir seam, falling back
+// to the production default when the seam is unset (handlers built
+// directly in tests rather than through NewPIHandlerDebug).
+func (h *PIHandler) removeTree(path string) error {
+	if h.removeDir != nil {
+		return h.removeDir(path)
+	}
+	return fsutil.RemoveAllForce(path)
+}
+
 // sweepStaleTaskDirs removes every entry under <baseCWD>/tasks/.
 // A freshly started guest has no in-flight tasks by definition, so any
 // directory found there is an orphan from a previous, dead execution —
@@ -159,7 +172,7 @@ func (h *PIHandler) sweepStaleTaskDirs() {
 	}
 	for _, entry := range entries {
 		path := filepath.Join(tasksDir, entry.Name())
-		if err := h.removeDir(path); err != nil {
+		if err := h.removeTree(path); err != nil {
 			h.log.Printf("[SWEEP] failed to remove stale task dir %s: %v", path, err)
 			continue
 		}
@@ -264,15 +277,8 @@ func (h *PIHandler) ExecuteTask(ctx context.Context, task TaskAssignment, sendLo
 	var workDir string
 	var jail *jail.Jail
 	defer func() {
-		if jail != nil {
-			if err := jail.Cleanup(); err != nil {
-				h.log.Printf("[CLEANUP] failed to remove jail: %v", err)
-			}
-		}
-		if workDir != "" {
-			if err := h.cleanupTaskDir(workDir); err != nil {
-				h.log.Printf("[CLEANUP] failed to remove task directory: %v", err)
-			}
+		if err := h.cleanupArtifacts(task.TaskID, jail, workDir, sendLog); err != nil {
+			h.log.Printf("[CLEANUP] %v", err)
 		}
 	}()
 
@@ -1056,14 +1062,48 @@ func backoffAndSleep(ctx context.Context, attempt int, logger *log.Logger) error
 
 // cleanupTaskDir removes the task directory and all its contents.
 // Guests clean up after themselves so stale directories don't accumulate.
-// This method is safe to call even if the directory does not exist.
+// Removal goes through the removeTree seam, which force-removes read-only
+// trees (issue #301). This method is safe to call even if the directory
+// does not exist.
 func (h *PIHandler) cleanupTaskDir(taskDir string) error {
 	h.log.Printf("[CLEANUP] removing task directory: %s", taskDir)
-	if err := os.RemoveAll(taskDir); err != nil {
+	if err := h.removeTree(taskDir); err != nil {
 		return fmt.Errorf("cleanup task dir %s: %w", taskDir, err)
 	}
 	h.log.Printf("[CLEANUP] task directory removed: %s", taskDir)
 	return nil
+}
+
+// cleanupArtifacts removes a finished task's jail root and task directory.
+// Success is silent by design (journal only); failure is escalated to the
+// task log at error level (issue #301): a leftover tree that survives
+// once-per-task cleanup fills the guest's disk while the server otherwise
+// still sees a healthy guest, so the server must see the failure too.
+// The returned error aggregates any removal failures; the caller logs it.
+func (h *PIHandler) cleanupArtifacts(taskID string, j *jail.Jail, workDir string, sendLog func(LogEntry) error) error {
+	var errs []error
+	report := func(what string, path string, err error) {
+		err = fmt.Errorf("failed to remove %s %s: %w", what, path, err)
+		errs = append(errs, err)
+		if sendLog != nil {
+			_ = sendLog(LogEntry{
+				TaskID: taskID,
+				Line:   fmt.Sprintf("[CLEANUP] %v — leftover data may be accumulating on this guest's disk", err),
+				Level:  "error",
+			})
+		}
+	}
+	if j != nil {
+		if err := j.Cleanup(); err != nil {
+			report("jail", j.Path(), err)
+		}
+	}
+	if workDir != "" {
+		if err := h.cleanupTaskDir(workDir); err != nil {
+			report("task directory", workDir, err)
+		}
+	}
+	return errors.Join(errs...)
 }
 
 // randomHexSuffix returns a random hex string of the given length.

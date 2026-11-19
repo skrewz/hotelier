@@ -48,6 +48,8 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+
+	"hotelier/pkg/fsutil"
 )
 
 // DropID is the uid/gid the command is mapped to inside the nested user
@@ -240,8 +242,11 @@ func (j *Jail) SpecPath() string { return j.plan.SpecPath() }
 func (j *Jail) Plan() Plan { return j.plan }
 
 // Cleanup removes the jail root. The namespace mounts die with the pi
-// process tree, so this is a plain RemoveAll; if an orphaned process
-// still pins the mounts the removal fails with EBUSY and is reported.
+// process tree, so this is a forceful RemoveAll; if an orphaned process
+// still pins the mounts the removal fails with EBUSY and is reported. The
+// force matters: the home copies include trees that are read-only by
+// design (the Go module cache), which plain os.RemoveAll cannot remove
+// (issue #301).
 func (j *Jail) Cleanup() error { return Cleanup(j.plan.JailRoot) }
 
 // Cleanup removes a jail root directory. A missing root is not an error.
@@ -252,5 +257,5 @@ func Cleanup(root string) error {
 	if _, err := os.Stat(root); os.IsNotExist(err) {
 		return nil
 	}
-	return os.RemoveAll(root)
+	return fsutil.RemoveAllForce(root)
 }
