@@ -1039,6 +1039,10 @@ func (h *PIHandler) setupJail(taskDir, taskID string, mapGuestRange bool, sendLo
 	}
 	_ = sendLog(LogEntry{TaskID: taskID, Line: "Setting up namespace jail", Level: "system"})
 	if err := j.Setup(taskDir, homeDir, piPath, h.homeCopies, mapGuestRange); err != nil {
+		// Belt and braces: Setup removes a partial skeleton itself and
+		// journals a removal it cannot fix, and the Jail's plan stays unset
+		// until Setup succeeds — so this Cleanup removes nothing today, and is
+		// here in case that stops being true.
 		_ = j.Cleanup()
 		return nil, fmt.Errorf("set up jail: %w", err)
 	}

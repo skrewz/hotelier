@@ -218,11 +218,11 @@ func (j *Jail) Setup(taskDir, homeDir, piPath string, homeCopies []string, mapGu
 	if err := CreateSkeleton(plan); err != nil {
 		// Remove the partial skeleton so a failed setup leaves no
 		// debris behind (the handler also defers Cleanup).
-		_ = Cleanup(plan.JailRoot)
+		j.cleanupPartial(plan.JailRoot)
 		return err
 	}
 	if err := WriteSpec(plan); err != nil {
-		_ = Cleanup(plan.JailRoot)
+		j.cleanupPartial(plan.JailRoot)
 		return err
 	}
 	j.plan = plan
@@ -256,4 +256,15 @@ func Cleanup(root string) error {
 		return nil
 	}
 	return fsutil.RemoveAllForce(root)
+}
+
+// cleanupPartial removes the jail root a failed setup step left behind. The
+// step's own error is the one worth returning, so a removal that fails here
+// is journalled instead: the next start's sweep force-removes the leftover
+// (issue #301), but the journal should still say it could not be removed at
+// the time.
+func (j *Jail) cleanupPartial(root string) {
+	if err := Cleanup(root); err != nil {
+		j.log.Printf("failed to remove partial jail root %s: %v", root, err)
+	}
 }
