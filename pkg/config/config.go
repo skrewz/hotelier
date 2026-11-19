@@ -156,7 +156,8 @@ type GuestConfig struct {
 	Name string `yaml:"name"`
 	// Tags are the capabilities this guest declares.
 	Tags []string `yaml:"tags"`
-	// TaskTimeout is the timeout for tasks in seconds (0 = use server default).
+	// TaskTimeout is the timeout for tasks in seconds. 0 attaches no
+	// deadline: nothing resolves this value from the server.
 	TaskTimeout int `yaml:"task_timeout"`
 	// HeartbeatInterval is how often to send heartbeats (seconds, 0 = use server default).
 	HeartbeatInterval int `yaml:"heartbeat_interval"`
@@ -220,7 +221,7 @@ func DefaultServerConfig() ServerConfig {
 // DefaultGuestConfig returns a GuestConfig with sensible defaults.
 func DefaultGuestConfig() GuestConfig {
 	return GuestConfig{
-		TaskTimeout:       0, // use server default
+		TaskTimeout:       0, // no deadline (the server's value is not inherited)
 		HeartbeatInterval: 0, // use server default
 		LogLevel:          "info",
 		ClientCert:        "",

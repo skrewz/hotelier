@@ -14,10 +14,32 @@ import (
 // runFakePiTask runs ExecuteTask against a fake `pi` subprocess that emits
 // the given JSON event lines (after 10 noise lines to clear the spawn-output
 // capture window) and returns the task result and collected log entries.
+// It fails the test if the task does not succeed.
 //
 // Note: eventLines are embedded verbatim into a Python script as dict
 // literals, so use Python literals (True/False/None), not JSON ones.
 func runFakePiTask(t *testing.T, eventLines []string) (*TaskResult, []LogEntry) {
+	t.Helper()
+	lines := make([]string, len(eventLines))
+	for i, line := range eventLines {
+		lines[i] = "emit(" + line + ")"
+	}
+	result, entries := runFakePiScript(t, "test-compaction", lines, nil)
+	if !result.Success {
+		t.Fatalf("expected task to succeed, got success=%v error=%q output=%q", result.Success, result.Error, result.Output)
+	}
+	return result, entries
+}
+
+// runFakePiScript runs ExecuteTask against a fake `pi` subprocess whose body
+// consists of the given raw Python script lines (after 10 noise lines to
+// clear the spawn-output capture window). Lines are written verbatim, so a
+// test can interleave time.sleep calls with emit(...) statements to simulate
+// quiet periods — the idle watchdog tests (issue #300) rely on this. tune,
+// when non-nil, adjusts the handler before the task runs (e.g. to shorten
+// the watchdog window from its production default). Unlike runFakePiTask,
+// success is not asserted here; the caller inspects the result.
+func runFakePiScript(t *testing.T, taskID string, scriptLines []string, tune func(*PIHandler)) (*TaskResult, []LogEntry) {
 	t.Helper()
 
 	if _, err := exec.LookPath("python3"); err != nil {
@@ -32,7 +54,7 @@ func runFakePiTask(t *testing.T, eventLines []string) (*TaskResult, []LogEntry) 
 
 	var script strings.Builder
 	script.WriteString(`#!/usr/bin/env python3
-import sys, json
+import sys, json, time
 
 def emit(obj):
     sys.stdout.write(json.dumps(obj) + "\n")
@@ -47,8 +69,8 @@ for _ in range(10):
     emit({"type": "queue_update", "queue": []})
 
 `)
-	for _, line := range eventLines {
-		script.WriteString("emit(" + line + ")\n")
+	for _, line := range scriptLines {
+		script.WriteString(line + "\n")
 	}
 
 	fakePi := filepath.Join(fakeBinDir, "pi")
@@ -67,13 +89,16 @@ for _ in range(10):
 	defer os.RemoveAll(baseDir)
 
 	h := NewPIHandler(baseDir, "", "", "")
-	h.jailEnabled = false // non-jail compaction flow; jail covered by dedicated tests
+	h.jailEnabled = false // non-jail flow; jail covered by dedicated tests
+	if tune != nil {
+		tune(h)
+	}
 
 	// The log callback is invoked from multiple goroutines (the event loop
 	// and the spawn-output path), so guard the shared slice.
 	var mu sync.Mutex
 	var entries []LogEntry
-	task := TaskAssignment{TaskID: "test-compaction", Prompt: "do the thing"}
+	task := TaskAssignment{TaskID: taskID, Prompt: "do the thing"}
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
 
@@ -88,9 +113,6 @@ for _ in range(10):
 	}
 	if result == nil {
 		t.Fatal("ExecuteTask returned nil result")
-	}
-	if !result.Success {
-		t.Fatalf("expected task to succeed, got success=%v error=%q output=%q", result.Success, result.Error, result.Output)
 	}
 	return result, entries
 }
