@@ -441,6 +441,8 @@ func (h *PIHandler) ExecuteTask(ctx context.Context, task TaskAssignment, sendLo
 	// until idleCeiling expires. The set is scoped to this execution, so
 	// aborting or cancelling the task resets it.
 	const compactionKey = "compaction"
+	// Calls are keyed by toolCallId, which pi sends on every
+	// tool_execution_* event (see the event table in pi's docs/json.md).
 	var inFlightMu sync.Mutex
 	inFlight := map[string]string{}
 	markInFlight := func(key, label string) {
@@ -464,12 +466,6 @@ func (h *PIHandler) ExecuteTask(ctx context.Context, task TaskAssignment, sendLo
 		}
 		sort.Strings(labels)
 		return len(labels), strings.Join(labels, ", ")
-	}
-	// Calls are keyed by toolCallId, which pi sends on every
-	// tool_execution_* event (see the event table in pi's docs/json.md).
-	// toolCallLabel names a call for the watchdog's log line.
-	toolCallLabel := func(id, name string) string {
-		return fmt.Sprintf("%s id: %s", name, id)
 	}
 
 	// Track whether pi sent a settle event (agent_settled, or the legacy
@@ -536,7 +532,7 @@ func (h *PIHandler) ExecuteTask(ctx context.Context, task TaskAssignment, sendLo
 
 				switch event.Type {
 				case "tool_execution_start":
-					markInFlight(toolID, toolCallLabel(toolID, toolName))
+					markInFlight(toolID, fmt.Sprintf("%s id: %s", toolName, toolID))
 					args := pi.ToolArgs(event)
 					entry := LogEntry{
 						TaskID:   task.TaskID,
