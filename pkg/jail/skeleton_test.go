@@ -1,10 +1,12 @@
 package jail
 
 import (
+	"bytes"
 	"io"
 	"log"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -263,6 +265,36 @@ func TestJail_Facade(t *testing.T) {
 func TestCleanup_Missing(t *testing.T) {
 	if err := Cleanup(t.TempDir() + "/nope"); err != nil {
 		t.Errorf("Cleanup of a missing root should not fail: %v", err)
+	}
+}
+
+// TestJailCleanupPartial_JournalsAnUnremovableRoot verifies that a partial
+// jail root the removal cannot fix is named in the journal. The tree's own
+// directories are writable; it is the tasks/ directory holding the root that
+// is read-only, and chmod cannot restore a directory outside the tree, so
+// RemoveAllForce fails and cleanupPartial has to say so (issue #301).
+func TestJailCleanupPartial_JournalsAnUnremovableRoot(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("running as root; directory permissions are not enforced")
+	}
+	tasks := t.TempDir()
+	root := filepath.Join(tasks, "task-1.jail")
+	if err := os.MkdirAll(filepath.Join(root, "home"), 0o755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "home", "f"), []byte("x"), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	if err := os.Chmod(tasks, 0o555); err != nil {
+		t.Fatalf("Chmod tasks dir: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(tasks, 0o755) })
+
+	var journal bytes.Buffer
+	NewJail(log.New(&journal, "", 0)).cleanupPartial(root)
+
+	if got := journal.String(); !strings.Contains(got, root) {
+		t.Errorf("journal should name the partial jail root %s that could not be removed, got %q", root, got)
 	}
 }
 
