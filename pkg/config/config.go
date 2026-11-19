@@ -157,8 +157,7 @@ type GuestConfig struct {
 	// Tags are the capabilities this guest declares.
 	Tags []string `yaml:"tags"`
 	// TaskTimeout is the timeout for tasks in seconds. 0 attaches no
-	// deadline: unlike the other zero-default fields, this one is not
-	// resolved from the server's value anywhere.
+	// deadline: nothing resolves this value from the server.
 	TaskTimeout int `yaml:"task_timeout"`
 	// HeartbeatInterval is how often to send heartbeats (seconds, 0 = use server default).
 	HeartbeatInterval int `yaml:"heartbeat_interval"`
