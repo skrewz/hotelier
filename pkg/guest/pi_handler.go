@@ -38,8 +38,11 @@ type PIHandler struct {
 	mu         sync.Mutex
 	// removeDir removes a directory tree: task cleanup, the startup sweep
 	// and the stale destination cloneRepo moves into (issues #180, #301).
-	// Defaults to fsutil.RemoveAllForce; overridable in tests to simulate
-	// removal failures.
+	// Set once at construction by NewPIHandlerDebug — every call site calls
+	// it unconditionally, so a handler built directly in a test must set it.
+	// Tests override it to simulate removal failures. It is read from task
+	// goroutines without a lock, so a fixture must assign it before any task
+	// starts and never while one runs.
 	removeDir func(string) error
 	// jailEnabled controls whether each task runs inside a namespace jail
 	// (issue #51). It is always true when the handler is constructed via
@@ -266,7 +269,13 @@ func (h *PIHandler) ExecuteTask(ctx context.Context, task TaskAssignment, sendLo
 	var workDir string
 	var jail *jail.Jail
 	defer func() {
-		h.cleanupArtifacts(task.TaskID, jail, workDir, sendLog)
+		var removeJail func() error
+		var jailPath string
+		if jail != nil {
+			removeJail = jail.Cleanup
+			jailPath = jail.Path()
+		}
+		h.cleanupArtifacts(task.TaskID, removeJail, jailPath, workDir, sendLog)
 	}()
 
 	workDir, err := h.prepareTaskDir(ctx, task.TaskID, task.RepoRef, sendLog, task.Persona)
@@ -795,12 +804,15 @@ func (h *PIHandler) cloneRepo(ctx context.Context, taskDir, repoRef string, send
 		dst := filepath.Join(taskDir, entry.Name())
 		entryInfo, _ := entry.Info()
 		h.log.Printf("[WORKDIR] moving %s (mode=%o) -> %s", entry.Name(), entryInfo.Mode().Perm(), dst)
-		// Handle the case where the destination already exists from a
-		// previous task execution that was interrupted (e.g. guest crash,
-		// OOM kill, signal) before cleanupTaskDir could run. The stale
-		// directory is safe to remove — persona files are re-applied
-		// after the clone in prepareTaskDir — and goes through the same
-		// forceful seam as the other cleanup paths (issue #301).
+		// A destination can only pre-exist because persona files are applied
+		// before the clone: ApplyFiles creates fc.To's parent directories, so
+		// a persona path naming a top-level entry in the repo leaves
+		// something here, and a directory would make the rename below fail
+		// with ENOTEMPTY. It is never a leftover from an earlier run —
+		// prepareTaskDir gives every task directory a random suffix, so this
+		// path is new to this execution — and persona files are re-applied
+		// after the clone anyway. Removal goes through the same seam as every
+		// other tree under a task directory (issue #301).
 		if _, err := os.Lstat(dst); err == nil {
 			if err := h.removeDir(dst); err != nil {
 				return fmt.Errorf("remove existing %s: %w", dst, err)
@@ -1070,7 +1082,12 @@ func (h *PIHandler) cleanupTaskDir(taskDir string) error {
 // while the server otherwise still sees a healthy guest, so the server must
 // see the failure too. A failure to escalate — the guest is between
 // connections — is itself journalled, so the trail survives either way.
-func (h *PIHandler) cleanupArtifacts(taskID string, j *jail.Jail, workDir string, sendLog func(LogEntry) error) {
+//
+// Jail removal arrives as a closure beside sendLog rather than as a
+// *jail.Jail: a Jail built without Setup has an empty plan, so its Cleanup
+// can never fail in a unit test, and the jail half of this cleanup — the
+// leftovers the issue actually logged — would be untestable.
+func (h *PIHandler) cleanupArtifacts(taskID string, removeJail func() error, jailPath string, workDir string, sendLog func(LogEntry) error) {
 	report := func(what string, path string, err error) {
 		err = fmt.Errorf("failed to remove %s %s: %w", what, path, err)
 		h.log.Printf("[CLEANUP] %v", err)
@@ -1085,9 +1102,9 @@ func (h *PIHandler) cleanupArtifacts(taskID string, j *jail.Jail, workDir string
 			h.log.Printf("[CLEANUP] failed to escalate removal failure: %v", logErr)
 		}
 	}
-	if j != nil {
-		if err := j.Cleanup(); err != nil {
-			report("jail", j.Path(), err)
+	if removeJail != nil {
+		if err := removeJail(); err != nil {
+			report("jail", jailPath, err)
 		}
 	}
 	if workDir != "" {

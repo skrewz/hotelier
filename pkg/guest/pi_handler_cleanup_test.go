@@ -99,6 +99,42 @@ func TestJailCleanupRemovesReadOnlyTree(t *testing.T) {
 	}
 }
 
+// TestPIHandler_CleanupArtifacts_EscalatesJailFailureToTaskLog verifies that
+// the jail half of cleanup is escalated too. That half is the failure the
+// issue actually logged — the leftovers were jail roots, holding the read-only
+// home copies — so it must not be the half that can silently regress. A
+// *jail.Jail built inside this package has an empty plan, so j.Cleanup()
+// cannot fail there; jail removal is therefore passed in as a closure, and
+// this test hands it one that fails.
+func TestPIHandler_CleanupArtifacts_EscalatesJailFailureToTaskLog(t *testing.T) {
+	var entries []LogEntry
+	var journal bytes.Buffer
+	h := &PIHandler{
+		log:       log.New(&journal, "", 0),
+		removeDir: os.RemoveAll,
+	}
+	jailRoot := filepath.Join(t.TempDir(), "task-3-abc.jail")
+	if err := os.MkdirAll(jailRoot, 0o755); err != nil {
+		t.Fatalf("create jail root: %v", err)
+	}
+
+	h.cleanupArtifacts("task-3", func() error { return errors.New("permission denied") }, jailRoot, "", func(e LogEntry) error {
+		entries = append(entries, e)
+		return nil
+	})
+
+	var escalated bool
+	for _, e := range entries {
+		if e.Level == "error" && e.TaskID == "task-3" &&
+			bytes.Contains([]byte(e.Line), []byte("task-3-abc.jail")) {
+			escalated = true
+		}
+	}
+	if !escalated {
+		t.Errorf("a failed jail removal should be sent as an error-level task log entry naming the jail root, got: %+v (journal: %s)", entries, journal.String())
+	}
+}
+
 // TestPIHandler_CleanupArtifacts_EscalatesFailureToTaskLog verifies that a
 // cleanup failure is not merely a journal line nobody reads: it is sent to
 // the server as an error-level task log entry, so a guest whose disk is
@@ -109,7 +145,7 @@ func TestPIHandler_CleanupArtifacts_EscalatesFailureToTaskLog(t *testing.T) {
 		log:       log.New(io.Discard, "", 0),
 		removeDir: func(string) error { return errors.New("permission denied") },
 	}
-	h.cleanupArtifacts("task-7", nil, filepath.Join(t.TempDir(), "tasks", "task-7-abc"), func(e LogEntry) error {
+	h.cleanupArtifacts("task-7", nil, "", filepath.Join(t.TempDir(), "tasks", "task-7-abc"), func(e LogEntry) error {
 		entries = append(entries, e)
 		return nil
 	})
@@ -135,7 +171,7 @@ func TestPIHandler_CleanupArtifacts_EscalationFailureIsJournalled(t *testing.T) 
 		log:       log.New(&journal, "", 0),
 		removeDir: func(string) error { return errors.New("permission denied") },
 	}
-	h.cleanupArtifacts("task-9", nil, filepath.Join(t.TempDir(), "tasks", "task-9-abc"), func(LogEntry) error {
+	h.cleanupArtifacts("task-9", nil, "", filepath.Join(t.TempDir(), "tasks", "task-9-abc"), func(LogEntry) error {
 		return errors.New("send log: not connected")
 	})
 	if !bytes.Contains(journal.Bytes(), []byte("failed to escalate removal failure")) {
@@ -158,7 +194,7 @@ func TestPIHandler_CleanupArtifacts_SuccessIsSilent(t *testing.T) {
 		baseCWD:   baseDir,
 		removeDir: os.RemoveAll,
 	}
-	h.cleanupArtifacts("task-8", nil, taskDir, func(e LogEntry) error {
+	h.cleanupArtifacts("task-8", nil, "", taskDir, func(e LogEntry) error {
 		entries = append(entries, e)
 		return nil
 	})
