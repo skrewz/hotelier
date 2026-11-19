@@ -5,7 +5,8 @@
 // everything below the headline, the persona pill is gone from the rows, the
 // persona name remains in the detail pane, and the gutter box occupies the
 // identical dimensions whether the tile loads or the proxy answers 502 — so
-// a forge outage never reflows a row.
+// a forge outage never reflows a row. The caller-supplied task ID is measured
+// at the same time, since the row template this test owns is where it lands.
 //
 // The proxy route is registered so the harness is complete, but every tile
 // request is intercepted by page.route: this file measures the geometry the
@@ -36,6 +37,13 @@ import (
 // interpolates this one constant, so the row and the detail pane are both
 // checked against the exact string the server was configured with.
 const hostilePersona = `cast"<img src=x onload=window.__xss=1>`
+
+// hostileID is a task ID that carries markup. The API takes an ID verbatim,
+// so it is the one value in a row that can arrive from anywhere: the row must
+// render it inert and still hand the exact string back to the handlers that
+// read it off the element's dataset. It probes a different global from
+// hostilePersona, so a failure says which value escaped.
+const hostileID = `casted"<img src=x onload=window.__xssId=1>`
 
 func TestAvatarGutterUI(t *testing.T) {
 	wd, err := os.Getwd()
@@ -101,11 +109,14 @@ func TestAvatarGutterUI(t *testing.T) {
 	}
 
 	// The guttered row's prompt is long enough that its preview wraps, so the
-	// screenshot shows the lines after the first clearing the face too.
+	// screenshot shows the lines after the first clearing the face too. The
+	// fourth row's ID, not its persona, carries markup, so the ID's sinks are
+	// exercised beside the name's.
 	specs := []taskSpec{
 		{"casted-task", "cast-one", "a prompt long enough that its preview wraps onto a second line, so the gutter is seen holding every line under the headline"},
 		{"bare-task", "", "avatar gutter fixture"},
 		{"escaped-task", hostilePersona, "avatar gutter fixture"},
+		{hostileID, "", "avatar gutter fixture"},
 	}
 	for i, s := range specs {
 		body, _ := json.Marshal(map[string]interface{}{
@@ -142,6 +153,10 @@ func TestAvatarGutterUI(t *testing.T) {
 	if err != nil {
 		t.Fatalf("encode hostile persona: %v", err)
 	}
+	hostileIDJS, err := json.Marshal(hostileID)
+	if err != nil {
+		t.Fatalf("encode hostile id: %v", err)
+	}
 	script := fmt.Sprintf(`
 const { chromium } = require('playwright');
 (async () => {
@@ -150,6 +165,7 @@ const { chromium } = require('playwright');
   const screenshotDir = '%s';
   const errors = [];
   const hostile = %s;
+  const hostileId = %s;
   // A 1x1 opaque PNG; CSS scales it into the gutter box.
   const png = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==', 'base64');
 
@@ -166,12 +182,15 @@ const { chromium } = require('playwright');
     });
   };
 
-  const openList = async page => {
+  // showCancelled reveals a status the dashboard hides by default (issue
+  // #289). Pass two needs it: by then the hostile-id fixture is cancelled.
+  const openList = async (page, showCancelled) => {
     await page.goto(baseURL);
     await page.waitForFunction(() => document.querySelectorAll('#task-filter-row .task-filter-btn').length === 6, { timeout: 10000 });
     // PENDING rows are hidden by default (issue #289); reveal them.
     await page.click('#task-filter-row .task-filter-btn[data-status="PENDING"]');
-    await page.waitForFunction(() => document.querySelectorAll('#task-list .task-item').length === 3, { timeout: 10000 });
+    if (showCancelled) await page.click('#task-filter-row .task-filter-btn[data-status="CANCELLED"]');
+    await page.waitForFunction(() => document.querySelectorAll('#task-list .task-item').length === 4, { timeout: 10000 });
     // Every gutter image has settled (loaded or failed) before measuring.
     await page.waitForFunction(() => [...document.querySelectorAll('.task-avatar img')].every(i => i.complete), { timeout: 10000 });
   };
@@ -180,7 +199,7 @@ const { chromium } = require('playwright');
   // call sites can interpolate it into a single fresh lookup: measuring takes
   // a handle from it, and clicking looks the row up and clicks it in the same
   // turn, so the poll's wholesale rebuild can never detach a row mid-click.
-  const findRow = '(tid) => [...document.querySelectorAll(\'#task-list .task-item\')].find(r => r.querySelector(\'.task-id\').textContent.includes(tid))';
+  const findRow = '(tid) => { const row = [...document.querySelectorAll(\'#task-list .task-item\')].find(r => r.querySelector(\'.task-id\').textContent.includes(tid)); if (!row) throw new Error(\'no row in the list for \' + tid); return row; }';
   const rowFor = (page, id) => page.evaluateHandle('(' + findRow + ')(' + JSON.stringify(id) + ')');
   const clickRowFor = (page, id) => page.evaluate('(' + findRow + ')(' + JSON.stringify(id) + ').click()');
 
@@ -197,7 +216,9 @@ const { chromium } = require('playwright');
         gutterTitle: r.querySelector('.task-avatar') ? r.querySelector('.task-avatar').getAttribute('title') : null,
         gap: parseFloat(getComputedStyle(r.querySelector('.task-body')).columnGap) || 0,
         xss: window.__xss === 1,
+        xssId: window.__xssId === 1,
         markupInRow: !!r.querySelector('[onload]'),
+        taskIdAttr: r.getAttribute('data-task-id'),
       };
       const img = r.querySelector('.task-avatar img');
       if (img) {
@@ -214,7 +235,7 @@ const { chromium } = require('playwright');
   const page = await browser.newPage({ viewport: { width: 1280, height: 900 } });
   pageErrors(page);
   await page.route('**/avatar/**', route => route.fulfill({ status: 200, contentType: 'image/png', body: png }));
-  await openList(page);
+  await openList(page, false);
 
   // The pill is gone from the rows: no persona badge markup anywhere in the
   // list, and the mod-8 palette with its hash function left with it.
@@ -242,6 +263,16 @@ const { chromium } = require('playwright');
   }
   if (escaped.markupInRow) throw new Error('a persona name reached the row as markup');
   if (escaped.xss) throw new Error('a persona name executed in the page');
+
+  // A caller-supplied task ID is the only value in this template the API never
+  // constrains, so it is measured by what it does rather than by what it looks
+  // like: no element built from it, nothing executed, and the raw string back
+  // out of the attribute the handlers read it from. Delete either escaping call
+  // and this row grows an element or loses the tail of its ID.
+  const hostileRow = await metricsFor(page, hostileId);
+  if (hostileRow.markupInRow) throw new Error('a task id reached the row as markup');
+  if (hostileRow.xssId) throw new Error('a task id executed in the page');
+  if (hostileRow.taskIdAttr !== hostileId) throw new Error('the row does not hand its task id back unchanged: ' + hostileRow.taskIdAttr);
 
   // The gutter is the token's square. Every measurement below is derived from
   // that token, so raising it stays a one-line change here too.
@@ -299,13 +330,19 @@ const { chromium } = require('playwright');
   if (patched.text !== hostile) throw new Error('the patched badge lost the name: ' + patched.text);
   if (patched.title !== 'Persona: ' + hostile) throw new Error('the patched badge escapes its tooltip: ' + patched.title);
   const rowHeightWithTiles = casted.row.h;
+  // The live row measured above carries the cancel button; the re-run button
+  // only renders on a terminal one. Cancelling the fixture here means pass two
+  // measures the same row with that second button on it, so both call sites of
+  // the idiom are observed without a fixture of their own.
+  const cancelStatus = await page.evaluate(async url => (await fetch(url, { method: 'POST' })).status, '/api/tasks/' + encodeURIComponent(hostileId) + '/cancel');
+  if (cancelStatus !== 200) throw new Error('could not cancel the hostile-id task, leaving its re-run button unmeasured: ' + cancelStatus);
   await page.close();
 
   // --- Pass two: the forge is unreachable; 502 and no cached tile. ---
   const page2 = await browser.newPage({ viewport: { width: 1280, height: 900 } });
   pageErrors(page2);
   await page2.route('**/avatar/**', route => route.fulfill({ status: 502, body: '' }));
-  await openList(page2);
+  await openList(page2, true);
   const failed = await metricsFor(page2, 'casted-task');
 
   // Identical dimensions with a failed load: the fallback glyph shows, the
@@ -321,6 +358,15 @@ const { chromium } = require('playwright');
     throw new Error('the row reflowed on an outage: ' + failed.row.h + ' vs ' + rowHeightWithTiles);
   }
   if (Math.abs(failed.headline.x - casted.headline.x) > 0.5) throw new Error('the headline moved during an outage');
+
+  // The row this pass holds in its terminal status, where the re-run button
+  // interpolates the id: the same two guarantees the live row was measured
+  // against, on the row template's last remaining id sink.
+  const cancelled = await metricsFor(page2, hostileId);
+  if (cancelled.markupInRow) throw new Error('a task id reached the re-run button as markup');
+  if (cancelled.xssId) throw new Error('a task id executed in the page');
+  if (cancelled.taskIdAttr !== hostileId) throw new Error('the cancelled row does not hand its task id back unchanged: ' + cancelled.taskIdAttr);
+
   await page2.screenshot({ path: screenshotDir + '/03-avatar-gutter-forge-outage.png', fullPage: true });
 
   if (errors.length) throw new Error('page errors observed: ' + errors.join(' | '));
@@ -328,7 +374,7 @@ const { chromium } = require('playwright');
   await browser.close();
   console.log('OK: face-as-gutter validated (screenshots in %s)');
 })().catch(err => { console.error(err); process.exit(1); });
-`, baseURL, screenshotDir, string(hostilePersonaJS), screenshotDir)
+`, baseURL, screenshotDir, string(hostilePersonaJS), string(hostileIDJS), screenshotDir)
 
 	tmpScript := t.TempDir() + "/avatar_gutter_ui.js"
 	if err := os.WriteFile(tmpScript, []byte(script), 0o644); err != nil {
