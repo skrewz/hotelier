@@ -225,6 +225,7 @@ log_level: "info"
 | `url` | Full WebSocket URL of the Check-In Host (`ws://` or `wss://`). Scheme defaults to `ws://` or `wss://` based on mTLS config if omitted. | — |
 | `id` | Identity the guest registers under. Set it to something stable per machine (typically the hostname) and a process restart keeps the same identity in the registry; deployments template it. See [Guest identity](#guest-identity). | generated: `guest-<8 random hex>` |
 | `working_dir` | Base directory for task execution | `"/tmp/hotelier"` |
+| `task_timeout` | Seconds a task may run before the guest cancels it. `0` attaches no deadline at all, which leaves the idle watchdog as the only backstop: it stands down while tool calls are in flight (issue #300), so a silent build is not mistaken for a wedged agent, and four hours of continuous silence is its ceiling. | `0` (no deadline) |
 | `log_level` | Logging level (`debug`, `info`, `warn`, `error`) | `"info"` |
 | `keepalive_ping_interval` | Seconds between WebSocket ping control frames (issue #220). A peer that answers neither data nor pongs within `keepalive_ping_interval + keepalive_pong_timeout` is considered gone and the guest reconnects. `0` selects the default. | `10` |
 | `keepalive_pong_timeout` | Seconds of silence (no data, no pong) tolerated before the connection is declared dead (issue #220). Keep the total window below any reverse-proxy idle timeout. `0` selects the default. | `30` |

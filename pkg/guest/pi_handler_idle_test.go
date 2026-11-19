@@ -19,6 +19,9 @@ const (
 	// It is several times idleTestTimeout, so whether the watchdog fires
 	// during the silence is not a race.
 	idleTestQuiet = 1.5
+	// idleTestCeiling is the ceiling on a disarmed watchdog in the ceiling
+	// test: past the window, short enough to elapse inside idleTestQuiet.
+	idleTestCeiling = 800 * time.Millisecond
 )
 
 // withFastIdleWatchdog shortens the watchdog window for tests.
@@ -131,6 +134,69 @@ func TestIdleWatchdog_NestedChildEndKeepsWindowDisarmed(t *testing.T) {
 
 	if !result.Success {
 		t.Fatalf("expected task to survive while the parent call is in flight, got error=%q output=%q", result.Error, result.Output)
+	}
+}
+
+// TestIdleWatchdog_UnmatchedEndKeepsWindowDisarmed verifies that an end
+// event for a tool call id that was never started cannot settle a call that
+// is still running. Only the id's own end may re-arm the window: a plain
+// counter would decrement to zero here and abort a healthy run, which is the
+// bug this change exists to fix.
+func TestIdleWatchdog_UnmatchedEndKeepsWindowDisarmed(t *testing.T) {
+	result, _ := runFakePiScript(t, "idle-unmatched-end", []string{
+		emitLine(fmt.Sprintf(toolStart, "call-open")),
+		emitLine(`{"type": "tool_execution_end", "toolCallId": "call-never-started", "toolName": "bash", "result": "ok"}`),
+		silent(idleTestQuiet),
+		emitLine(fmt.Sprintf(toolEnd, "call-open")),
+		emitLine(`{"type": "agent_settled"}`),
+	}, withFastIdleWatchdog)
+
+	if !result.Success {
+		t.Fatalf("expected a stray end event to leave the watchdog disarmed, got error=%q output=%q", result.Error, result.Output)
+	}
+}
+
+// TestIdleWatchdog_DuplicateEndKeepsWindowDisarmed is the same guarantee
+// from the other side: a duplicated end for a call that already settled must
+// not settle its slower sibling.
+func TestIdleWatchdog_DuplicateEndKeepsWindowDisarmed(t *testing.T) {
+	result, _ := runFakePiScript(t, "idle-duplicate-end", []string{
+		emitLine(fmt.Sprintf(toolStart, "call-fast")),
+		emitLine(fmt.Sprintf(toolStart, "call-slow")),
+		emitLine(fmt.Sprintf(toolEnd, "call-fast")),
+		emitLine(fmt.Sprintf(toolEnd, "call-fast")),
+		silent(idleTestQuiet),
+		emitLine(fmt.Sprintf(toolEnd, "call-slow")),
+		emitLine(`{"type": "agent_settled"}`),
+	}, withFastIdleWatchdog)
+
+	if !result.Success {
+		t.Fatalf("expected a duplicated end event to leave the watchdog disarmed, got error=%q output=%q", result.Error, result.Output)
+	}
+}
+
+// TestIdleWatchdog_CeilingAbortsCallThatNeverReturns covers the failure mode
+// the disarm accepts: an end that never arrives — pi wedged inside a tool
+// call, or a call an untrusted prompt steered the agent into that never
+// returns. Silence with a call in flight is survivable but not eternal, so
+// the watchdog gives up at the ceiling rather than staying disarmed for the
+// rest of the task (which, with no task deadline configured, would be forever).
+func TestIdleWatchdog_CeilingAbortsCallThatNeverReturns(t *testing.T) {
+	result, _ := runFakePiScript(t, "idle-ceiling", []string{
+		emitLine(`{"type": "agent_start"}`),
+		emitLine(fmt.Sprintf(toolStart, "call-hung")),
+		silent(idleTestQuiet),
+		emitLine(`{"type": "agent_settled"}`),
+	}, func(h *PIHandler) {
+		withFastIdleWatchdog(h)
+		h.idleCeiling = idleTestCeiling
+	})
+
+	if result.Success {
+		t.Fatalf("expected a call that never returns to be aborted at the ceiling, got success output=%q", result.Output)
+	}
+	if !strings.Contains(result.Error, "agent idle for") || !strings.Contains(result.Error, "in flight") {
+		t.Fatalf("expected an idle abort naming the call in flight, got %q", result.Error)
 	}
 }
 

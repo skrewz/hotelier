@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -50,21 +51,32 @@ type PIHandler struct {
 	// production. Tests that exercise non-jail code paths in environments
 	// without unprivileged user namespaces may set it to false directly.
 	jailEnabled bool
-	// idleTimeout and idleCheckInterval control the idle watchdog in
-	// ExecuteTask (issue #300). Zero selects the production defaults
-	// (defaultIdleTimeout / defaultIdleCheckInterval); tests shorten them
-	// so a silent period past the window costs about a second.
+	// idleTimeout, idleCheckInterval and idleCeiling control the idle
+	// watchdog in ExecuteTask (issue #300). Zero selects the production
+	// defaults (defaultIdleTimeout / defaultIdleCheckInterval /
+	// defaultIdleCeiling); tests shorten them so a silent period past the
+	// window costs about a second.
 	idleTimeout       time.Duration
 	idleCheckInterval time.Duration
+	idleCeiling       time.Duration
 }
 
 const (
-	// defaultIdleTimeout is how long a task may emit no events with no
-	// tool call in flight before the watchdog aborts it. Raised from 3 to
-	// 10 minutes in 67ccaa9; still unreachable from configuration.
+	// defaultIdleTimeout is how long a task may emit no events with no tool
+	// call in flight before the watchdog aborts it. It is not reachable from
+	// configuration.
 	defaultIdleTimeout = 10 * time.Minute
 	// defaultIdleCheckInterval is how often the watchdog wakes to check.
 	defaultIdleCheckInterval = 30 * time.Second
+	// defaultIdleCeiling caps how long the watchdog may stay disarmed by
+	// calls in flight. A call that never returns — one an untrusted prompt
+	// steered the agent into, or an end event that never arrived — would
+	// otherwise disarm the watchdog for the rest of the task, and a guest
+	// whose task_timeout is 0 (the guest default, meaning no task deadline)
+	// has nothing else to fall back on. Four hours sits well past any silent
+	// call worth keeping, and above the one-hour task_timeout most guests
+	// set, so it only ever fires where the watchdog is the last backstop.
+	defaultIdleCeiling = 4 * time.Hour
 )
 
 // NewPIHandler creates a new PIHandler.
@@ -419,32 +431,55 @@ func (h *PIHandler) ExecuteTask(ctx context.Context, task TaskAssignment, sendLo
 	// tool_execution_update when a tool reports a partial result, and
 	// compaction emits nothing between start and end — so event silence
 	// alone is not evidence of a wedged agent while any call is open.
-	// The count is deliberately a counter rather than a boolean: parallel
-	// calls finish in completion order and nested calls (parentToolCallId)
-	// emit their own lifecycle, so only returning to zero may re-arm the
-	// window. If an end event is lost — pi killed mid-call, or the
-	// subscription dropped on reconnect — the watchdog stays disarmed for
-	// the rest of the task, bounded by the task timeout rather than open-
-	// ended. The counter is scoped to this execution, so aborting or
-	// cancelling the task resets it.
-	var outstandingMu sync.Mutex
-	outstandingCalls := 0
-	incOutstanding := func() {
-		outstandingMu.Lock()
-		outstandingCalls++
-		outstandingMu.Unlock()
+	// The set is keyed by call identity rather than counted: parallel calls
+	// finish in completion order, nested calls (parentToolCallId) emit their
+	// own lifecycle, and an end settles only the call it names, so a stray
+	// or duplicated end cannot re-arm the window while a slower call is
+	// still running. Compaction events carry no id and run one at a time, so
+	// all compactions share a key. If an end never arrives — pi killed
+	// mid-call, or a call that never returns — the watchdog stays disarmed
+	// until idleCeiling expires. The set is scoped to this execution, so
+	// aborting or cancelling the task resets it.
+	const compactionKey = "compaction"
+	var inFlightMu sync.Mutex
+	inFlight := map[string]string{}
+	markInFlight := func(key, label string) {
+		inFlightMu.Lock()
+		defer inFlightMu.Unlock()
+		inFlight[key] = label
 	}
-	decOutstanding := func() {
-		outstandingMu.Lock()
-		if outstandingCalls > 0 {
-			outstandingCalls--
+	settleInFlight := func(key string) {
+		inFlightMu.Lock()
+		defer inFlightMu.Unlock()
+		delete(inFlight, key)
+	}
+	// callsInFlight counts the calls keeping the watchdog disarmed and names
+	// them for the log.
+	callsInFlight := func() (int, string) {
+		inFlightMu.Lock()
+		defer inFlightMu.Unlock()
+		labels := make([]string, 0, len(inFlight))
+		for _, label := range inFlight {
+			labels = append(labels, label)
 		}
-		outstandingMu.Unlock()
+		sort.Strings(labels)
+		return len(labels), strings.Join(labels, ", ")
 	}
-	countOutstanding := func() int {
-		outstandingMu.Lock()
-		defer outstandingMu.Unlock()
-		return outstandingCalls
+	// toolCallKey identifies a call in the set. Pi always sends a
+	// toolCallId; for an event without one the tool name is the key, so
+	// anonymous calls do not all collapse into the same entry.
+	toolCallKey := func(id, name string) string {
+		if id == "" {
+			return name
+		}
+		return id
+	}
+	// toolCallLabel names a call for the watchdog's log line.
+	toolCallLabel := func(id, name string) string {
+		if id == "" {
+			return name
+		}
+		return fmt.Sprintf("%s id: %s", name, id)
 	}
 
 	// Track whether pi sent a settle event (agent_settled, or the legacy
@@ -511,7 +546,7 @@ func (h *PIHandler) ExecuteTask(ctx context.Context, task TaskAssignment, sendLo
 
 				switch event.Type {
 				case "tool_execution_start":
-					incOutstanding()
+					markInFlight(toolCallKey(toolID, toolName), toolCallLabel(toolID, toolName))
 					args := pi.ToolArgs(event)
 					entry := LogEntry{
 						TaskID:   task.TaskID,
@@ -548,7 +583,7 @@ func (h *PIHandler) ExecuteTask(ctx context.Context, task TaskAssignment, sendLo
 					}
 
 				case "tool_execution_end":
-					decOutstanding()
+					settleInFlight(toolCallKey(toolID, toolName))
 					result := pi.ToolResult(event)
 					isErr := event.IsError
 					var line string
@@ -580,7 +615,7 @@ func (h *PIHandler) ExecuteTask(ctx context.Context, task TaskAssignment, sendLo
 				reason := pi.CompactionReason(event)
 				switch pi.CompactionType(event) {
 				case "start":
-					incOutstanding()
+					markInFlight(compactionKey, fmt.Sprintf("compaction (reason: %s)", reason))
 					entry := LogEntry{
 						TaskID:           task.TaskID,
 						Line:             fmt.Sprintf("[COMPACTION_START] (reason: %s)", reason),
@@ -594,7 +629,7 @@ func (h *PIHandler) ExecuteTask(ctx context.Context, task TaskAssignment, sendLo
 					h.log.Printf("[COMPACTION] started (reason: %s)", reason)
 
 				case "end":
-					decOutstanding()
+					settleInFlight(compactionKey)
 					summary := pi.CompactionSummary(event)
 					tokensBefore, tokensAfter := pi.CompactionTokens(event)
 					errMsg := pi.CompactionErrorMessage(event)
@@ -641,8 +676,15 @@ func (h *PIHandler) ExecuteTask(ctx context.Context, task TaskAssignment, sendLo
 	if idleInterval <= 0 {
 		idleInterval = defaultIdleCheckInterval
 	}
+	idleCeiling := h.idleCeiling
+	if idleCeiling <= 0 {
+		idleCeiling = defaultIdleCeiling
+	}
 	idleCheck := time.NewTicker(idleInterval)
 	defer idleCheck.Stop()
+	// notedDisarm keeps the "watchdog disarmed" line to once per episode:
+	// an hour-long call would otherwise print an identical line every tick.
+	notedDisarm := false
 
 	for {
 		select {
@@ -715,27 +757,47 @@ func (h *PIHandler) ExecuteTask(ctx context.Context, task TaskAssignment, sendLo
 			}, nil
 		case <-idleCheck.C:
 			idle := time.Since(getLastActivity())
-			if idle > idleTimeout {
-				if n := countOutstanding(); n > 0 {
-					// Something is running — silence is expected, not a
-					// wedged agent. Stay disarmed (issue #300); the window
-					// re-arms from the event that returns the count to
-					// zero, which refreshes lastActivity like any other.
-					h.log.Printf("[PI] task %s: %d call(s) in flight — idle watchdog disarmed (last event %s)", task.TaskID, n, idle.Round(time.Second))
-					continue
-				}
-				h.log.Printf("[PI] task %s idle for %s — agent may be stuck", task.TaskID, idle)
-				_ = h.client.Abort()
-
-				// Capture diagnostics even on idle timeout
-				diagnostics := h.captureExitDiagnostics(settledReceived)
-				return &TaskResult{
-					TaskID:      task.TaskID,
-					Success:     false,
-					Error:       fmt.Sprintf("agent idle for %s", idle.Round(time.Second)),
-					Diagnostics: diagnostics,
-				}, nil
+			if idle <= idleTimeout {
+				// Back inside the window, so the next call to disarm the
+				// watchdog is an episode worth logging on its own.
+				notedDisarm = false
+				continue
 			}
+			n, labels := callsInFlight()
+			if n > 0 && idle <= idleCeiling {
+				// Something is running — silence is expected, not a wedged
+				// agent (issue #300). The window re-arms from the end event
+				// that empties the set, which refreshes lastActivity like any
+				// other event.
+				if !notedDisarm {
+					notedDisarm = true
+					h.log.Printf("[PI] task %s: %d call(s) in flight (%s) — idle watchdog disarmed (silent for %s)", task.TaskID, n, labels, idle.Round(time.Second))
+				}
+				continue
+			}
+			if n > 0 {
+				// A call is open, but silence has outlasted the ceiling on a
+				// disarmed watchdog: an end that will never arrive, or a call
+				// that never returns. Aborting is the smaller risk than
+				// holding this guest's task slot open forever.
+				h.log.Printf("[PI] task %s idle for %s with %d call(s) in flight (%s) — past the %s ceiling on a disarmed watchdog", task.TaskID, idle, n, labels, idleCeiling)
+			} else {
+				h.log.Printf("[PI] task %s idle for %s — agent may be stuck", task.TaskID, idle)
+			}
+			_ = h.client.Abort()
+
+			// Capture diagnostics even on idle timeout
+			diagnostics := h.captureExitDiagnostics(settledReceived)
+			errMsg := fmt.Sprintf("agent idle for %s", idle.Round(time.Second))
+			if n > 0 {
+				errMsg = fmt.Sprintf("agent idle for %s with %d call(s) in flight", idle.Round(time.Second), n)
+			}
+			return &TaskResult{
+				TaskID:      task.TaskID,
+				Success:     false,
+				Error:       errMsg,
+				Diagnostics: diagnostics,
+			}, nil
 		}
 	}
 }
