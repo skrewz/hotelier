@@ -271,8 +271,8 @@ const { chromium } = require('playwright');
   if (bare.avatar !== null) throw new Error('a task with no identity grew a gutter');
   await page.screenshot({ path: screenshotDir + '/01-task-list-gutters.png', fullPage: true });
 
-  // The row is recognition; the selection is reading: the detail pane still
-  // carries the persona name, without the glyph that stood in for a face.
+  // The row is recognition; the selection is reading: the detail pane
+  // carries the persona name as plain text.
   await clickRowFor(page, 'casted-task');
   await page.waitForSelector('.task-detail-id .persona-badge', { timeout: 10000 });
   const detailPersona = await page.$eval('.task-detail-id .persona-badge', e => e.textContent.trim());
