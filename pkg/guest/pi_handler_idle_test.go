@@ -266,3 +266,30 @@ func TestIdleWatchdog_DisarmedDuringCompaction(t *testing.T) {
 		t.Fatalf("expected task to survive a silent compaction, got error=%q output=%q", result.Error, result.Output)
 	}
 }
+
+// TestIdleWatchdog_RearmsAfterCompactionEnds covers the other edge of
+// compaction: once the compaction settles, the quiet period that follows is
+// silence with nothing running, so the window must have re-armed and the
+// watchdog must fire. Without the settle on compaction_end the compaction
+// key would keep the watchdog disarmed for the rest of the task — the
+// fail-open corner defaultIdleCeiling exists to bound, reached by the one
+// path the ceiling test does not cover.
+func TestIdleWatchdog_RearmsAfterCompactionEnds(t *testing.T) {
+	result, _ := runFakePiScript(t, "idle-compaction-rearm", []string{
+		emitLine(`{"type": "agent_start"}`),
+		emitLine(`{"type": "compaction_start", "reason": "threshold"}`),
+		emitLine(`{"type": "compaction_end", "reason": "threshold", "result": {"summary": "## Goal\nSummarised.", "firstKeptEntryId": "abc", "tokensBefore": 150000, "estimatedTokensAfter": 32000}}`),
+		silent(idleTestQuiet),
+		emitLine(`{"type": "agent_settled"}`),
+	}, withFastIdleWatchdog)
+
+	if result.Success {
+		t.Fatalf("expected idle abort after the compaction ended, got success with output=%q", result.Output)
+	}
+	if !strings.Contains(result.Error, "agent idle for") {
+		t.Fatalf("expected an 'agent idle for' failure, got %q", result.Error)
+	}
+	if strings.Contains(result.Error, "in flight") {
+		t.Fatalf("expected an idle abort with nothing in flight, got %q", result.Error)
+	}
+}
