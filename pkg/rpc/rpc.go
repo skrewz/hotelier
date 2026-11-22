@@ -25,9 +25,22 @@ var ErrConnectionClosed = errors.New("connection closed")
 type connectionIDKey struct{}
 
 // ConnectionIDFromContext returns the connection ID from a handler's context.
+// A nil context carries no connection and reports not-found — handlers are
+// called with nil ctx from tests that dispatch directly.
 func ConnectionIDFromContext(ctx context.Context) (string, bool) {
+	if ctx == nil {
+		return "", false
+	}
 	id, ok := ctx.Value(connectionIDKey{}).(string)
 	return id, ok
+}
+
+// ContextWithConnection returns ctx carrying connID as the current
+// connection ID, the same way the hub tags a handler's context with the
+// connection a message arrived on. Exported so tests can exercise the
+// caller-identity paths that handlers derive from the context.
+func ContextWithConnection(ctx context.Context, connID string) context.Context {
+	return context.WithValue(ctx, connectionIDKey{}, connID)
 }
 
 // MessageType represents the type of a JSON-RPC message.
@@ -417,7 +430,7 @@ func (h *Hub) handleMessage(c *Connection, message []byte) {
 		return
 	}
 
-	ctx := context.WithValue(context.Background(), connectionIDKey{}, c.id)
+	ctx := ContextWithConnection(context.Background(), c.id)
 	result, rpcErr := handler(ctx, msg.Params)
 	if rpcErr != nil {
 		resp := &JSONRPCMessage{

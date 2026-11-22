@@ -270,6 +270,10 @@ const (
 	// Why the claim went away, carried to the guest for its log.
 	claimReasonRequeued       = "re-queued"
 	claimReasonConnectionLost = "connection lost"
+	// claimReasonClaimMismatch explains a revoke fired because the guest's
+	// claim that it is working on a task contradicted the authoritative
+	// assignment (issue #304).
+	claimReasonClaimMismatch = "claim mismatch"
 )
 
 // What a guest reported having done with a task.cancel. They match the
@@ -425,6 +429,52 @@ func (s *Server) forgetCancelIntent(taskID string) {
 	s.cancelIntentMu.Lock()
 	defer s.cancelIntentMu.Unlock()
 	delete(s.cancelIntentByTask, taskID)
+}
+
+// claimContradiction compares a guest's claim that it is working on taskID
+// against the authoritative assignment in the queue (issue #304) and returns
+// why the claim contradicts it, or "" when it does not. The queue owns
+// task.AssignedTo: a claim naming a task the host has no record of, one that
+// is already terminal, or one assigned to somebody else (or not assigned yet)
+// must never move the assignment — the claimant is instead told to stop by
+// the handlers that call this. A claim naming a task still assigned to the
+// claimant is consistent even once terminal: that is the claimant's own task
+// winding down, not a contradiction.
+func (s *Server) claimContradiction(guestID, taskID string) string {
+	task, ok := s.orchestrator.GetTask(taskID)
+	if !ok {
+		return "the host has no record of the task"
+	}
+	if task.AssignedTo == guestID {
+		return ""
+	}
+	switch task.Status {
+	case queue.TaskStatusCompleted, queue.TaskStatusFailed, queue.TaskStatusCancelled:
+		return "the task is already " + task.Status.String()
+	}
+	if task.AssignedTo == "" {
+		return "the task is not assigned to any guest"
+	}
+	return "the task is assigned to " + task.AssignedTo
+}
+
+// revokeClaimOnce is revokeClaim gated on the cancel-intent ledger: while a
+// revoke for the task is outstanding (sent, not yet confirmed) the ask is not
+// repeated. The claim surfaces fire on every heartbeat and every report, so
+// without this a stubborn orphan would be cancelled once per claim (issue
+// #304). The ledger entry clears when the confirmation arrives
+// (resolveCancelIntent) or when the send failed (forgetCancelIntent), so a
+// guest that did receive the ask is not pestered, while one that never
+// received it is asked again on its next claim.
+func (s *Server) revokeClaimOnce(taskID, guestID, reason string) {
+	s.cancelIntentMu.Lock()
+	outstanding := s.cancelIntentByTask[taskID] == cancelIntentRevoke
+	s.cancelIntentMu.Unlock()
+	if outstanding {
+		s.log.Printf("claim revoke for task %s already outstanding; not re-sending to guest %s", taskID, guestID)
+		return
+	}
+	s.revokeClaim(taskID, guestID, reason)
 }
 
 // resolveCancelIntent decides what a guest.cancelled confirmation means:
@@ -1165,6 +1215,17 @@ func (s *Server) handleGuestHeartbeat(ctx context.Context, params json.RawMessag
 		if err := s.orchestrator.TaskHeartbeat(req.ID, req.TaskID); err != nil {
 			return nil, rpc.InternalError(err.Error())
 		}
+		// The heartbeat stays a liveness signal — it never creates or
+		// changes an assignment (issue #251) — but a claim that
+		// contradicts the authoritative assignment is answered here with
+		// a revoke to the claimant, so an orphan whose task moved on
+		// stops its side effects instead of merely being logged
+		// (issue #304). The response stays "ok": the heartbeat itself
+		// succeeded, and the revoke arrives as a task.cancel.
+		if why := s.claimContradiction(req.ID, req.TaskID); why != "" {
+			s.log.Printf("heartbeat claim mismatch: guest %s claims task %s — %s; revoking the claim, assignment unchanged", req.ID, req.TaskID, why)
+			s.revokeClaimOnce(req.TaskID, req.ID, claimReasonClaimMismatch)
+		}
 	} else {
 		if err := s.orchestrator.Heartbeat(req.ID); err != nil {
 			return nil, rpc.InternalError(err.Error())
@@ -1398,8 +1459,35 @@ func (s *Server) handleGuestResult(ctx context.Context, params json.RawMessage) 
 	// Find guest ID from task if not provided
 	guestID := result.GuestID
 	if guestID == "" {
+		// A real guest omits guest_id (see guest.TaskResult): the
+		// connection the report arrived on is the reporter's identity,
+		// the same source the acknowledge handshake uses (issue #304).
+		if connID, ok := rpc.ConnectionIDFromContext(ctx); ok {
+			if gid, err := s.hub.GuestIDFromConnection(connID); err == nil {
+				guestID = gid
+			}
+		}
+	}
+	if guestID == "" {
+		// Still nothing — a direct dispatch with no connection (a test
+		// harness) is attributed to the assignee, which keeps the
+		// ownership gate below vacuous rather than falsely accusatory.
 		if task, ok := s.orchestrator.GetTask(result.TaskID); ok && task.AssignedTo != "" {
 			guestID = task.AssignedTo
+		}
+	}
+
+	// The first executor to finish must not win regardless of ownership:
+	// reconcile the reporter against the authoritative assignment before
+	// the task's fate is touched (issue #304). A report for a task the
+	// host has no record of says nothing about the claim — the rule the
+	// ack path applies since issue #252 — so the gate only fires for
+	// tasks the queue still knows.
+	if _, ok := s.orchestrator.GetTask(result.TaskID); ok && guestID != "" {
+		if why := s.claimContradiction(guestID, result.TaskID); why != "" {
+			s.log.Printf("guest %s reported a result for task %s it does not own — %s; rejecting the report, assignment unchanged, and revoking the claim", guestID, result.TaskID, why)
+			s.revokeClaimOnce(result.TaskID, guestID, claimReasonClaimMismatch)
+			return nil, rpc.ClaimRefusedError(fmt.Sprintf("task %s is not assigned to %s", result.TaskID, guestID))
 		}
 	}
 
