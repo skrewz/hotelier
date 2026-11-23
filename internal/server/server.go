@@ -431,6 +431,27 @@ func (s *Server) forgetCancelIntent(taskID string) {
 	delete(s.cancelIntentByTask, taskID)
 }
 
+// reporterID answers who sent a claim about a task. The connection the claim
+// arrived on is the authority: it is the one identity the reporter does not
+// choose. A name inside the payload is a claim *about* identity, not identity,
+// and taking it instead lets any socket satisfy an ownership gate by typing
+// somebody else's name (issue #304 review). A connection the hub cannot place
+// — a browser session, a guest whose re-registration moved the mapping on —
+// identifies nobody, and falling back to the payload there would leave that
+// door open. Only a dispatch with no connection at all, which is a test
+// harness calling a handler directly, carries its identity in the payload.
+func (s *Server) reporterID(ctx context.Context, explicit string) string {
+	connID, ok := rpc.ConnectionIDFromContext(ctx)
+	if !ok {
+		return explicit
+	}
+	guestID, err := s.hub.GuestIDFromConnection(connID)
+	if err != nil {
+		return ""
+	}
+	return guestID
+}
+
 // claimContradiction compares a guest's claim that it is working on taskID
 // against the authoritative assignment in the queue (issue #304) and returns
 // why the claim contradicts it, or "" when it does not. The queue owns
@@ -1200,7 +1221,8 @@ func (s *Server) handleGuestUnregister(ctx context.Context, params json.RawMessa
 
 // handleGuestHeartbeat handles guest heartbeat.
 // If task_id is present, it uses TaskHeartbeat to track the guest's
-// current task for liveness probing.
+// current task for liveness probing, and reconciles the claim the heartbeat
+// makes against the authoritative assignment (issue #304).
 func (s *Server) handleGuestHeartbeat(ctx context.Context, params json.RawMessage) (interface{}, *rpc.RPCError) {
 	var req struct {
 		ID     string `json:"id"`
@@ -1211,23 +1233,32 @@ func (s *Server) handleGuestHeartbeat(ctx context.Context, params json.RawMessag
 		return nil, rpc.InvalidParamsError("invalid request parameters")
 	}
 
+	// The heartbeat is attributed to the guest behind the socket it arrived
+	// on, not to the name the payload carries: the latter would let any
+	// connection refresh a stranger's liveness and keep their task looking
+	// live to the probe indefinitely (issue #304 review).
+	reporter := s.reporterID(ctx, req.ID)
+
 	if req.TaskID != "" {
-		if err := s.orchestrator.TaskHeartbeat(req.ID, req.TaskID); err != nil {
+		// Examine the claim before the liveness record is touched, so a
+		// mutation cannot precede the decision it belongs to. The heartbeat
+		// stays a liveness signal — it never creates or changes an assignment
+		// (issue #251), and the record written below is the reporter's own:
+		// a claim that contradicts the authoritative assignment is answered
+		// here with a revoke to the reporter, so an orphan whose task moved
+		// on stops its side effects instead of merely being logged (issue
+		// #304). The response stays "ok": the heartbeat itself succeeded,
+		// and the revoke arrives as a task.cancel.
+		why := s.claimContradiction(reporter, req.TaskID)
+		if err := s.orchestrator.TaskHeartbeat(reporter, req.TaskID); err != nil {
 			return nil, rpc.InternalError(err.Error())
 		}
-		// The heartbeat stays a liveness signal — it never creates or
-		// changes an assignment (issue #251) — but a claim that
-		// contradicts the authoritative assignment is answered here with
-		// a revoke to the claimant, so an orphan whose task moved on
-		// stops its side effects instead of merely being logged
-		// (issue #304). The response stays "ok": the heartbeat itself
-		// succeeded, and the revoke arrives as a task.cancel.
-		if why := s.claimContradiction(req.ID, req.TaskID); why != "" {
-			s.log.Printf("heartbeat claim mismatch: guest %s claims task %s — %s; revoking the claim, assignment unchanged", req.ID, req.TaskID, why)
-			s.revokeClaimOnce(req.TaskID, req.ID, claimReasonClaimMismatch)
+		if why != "" {
+			s.log.Printf("heartbeat claim mismatch: guest %s claims task %s — %s; revoking the claim, assignment unchanged", reporter, req.TaskID, why)
+			s.revokeClaimOnce(req.TaskID, reporter, claimReasonClaimMismatch)
 		}
 	} else {
-		if err := s.orchestrator.Heartbeat(req.ID); err != nil {
+		if err := s.orchestrator.Heartbeat(reporter); err != nil {
 			return nil, rpc.InternalError(err.Error())
 		}
 	}
@@ -1456,25 +1487,17 @@ func (s *Server) handleGuestResult(ctx context.Context, params json.RawMessage) 
 		return nil, rpc.InvalidParamsError("task_id is required")
 	}
 
-	// Find guest ID from task if not provided
-	guestID := result.GuestID
+	// The reporter is the guest behind the socket the report arrived on.
+	// Neither the name the payload carries nor the task's assignee can stand
+	// in for it: the payload's word would let any socket satisfy the
+	// ownership gate below by typing the owner's name, and the assignee's
+	// would make that gate vacuous for every report that omits the field —
+	// which is every report a real guest sends (issue #304 review). A report
+	// the host cannot place is refused rather than credited to whoever owns
+	// the task.
+	guestID := s.reporterID(ctx, result.GuestID)
 	if guestID == "" {
-		// A real guest omits guest_id (see guest.TaskResult): the
-		// connection the report arrived on is the reporter's identity,
-		// the same source the acknowledge handshake uses (issue #304).
-		if connID, ok := rpc.ConnectionIDFromContext(ctx); ok {
-			if gid, err := s.hub.GuestIDFromConnection(connID); err == nil {
-				guestID = gid
-			}
-		}
-	}
-	if guestID == "" {
-		// Still nothing — a direct dispatch with no connection (a test
-		// harness) is attributed to the assignee, which keeps the
-		// ownership gate below vacuous rather than falsely accusatory.
-		if task, ok := s.orchestrator.GetTask(result.TaskID); ok && task.AssignedTo != "" {
-			guestID = task.AssignedTo
-		}
+		return nil, rpc.InvalidParamsError("cannot identify the reporting guest")
 	}
 
 	// The first executor to finish must not win regardless of ownership:
@@ -1483,7 +1506,7 @@ func (s *Server) handleGuestResult(ctx context.Context, params json.RawMessage) 
 	// host has no record of says nothing about the claim — the rule the
 	// ack path applies since issue #252 — so the gate only fires for
 	// tasks the queue still knows.
-	if _, ok := s.orchestrator.GetTask(result.TaskID); ok && guestID != "" {
+	if _, ok := s.orchestrator.GetTask(result.TaskID); ok {
 		if why := s.claimContradiction(guestID, result.TaskID); why != "" {
 			s.log.Printf("guest %s reported a result for task %s it does not own — %s; rejecting the report, assignment unchanged, and revoking the claim", guestID, result.TaskID, why)
 			s.revokeClaimOnce(result.TaskID, guestID, claimReasonClaimMismatch)
@@ -1674,15 +1697,10 @@ func (s *Server) handleTaskAcknowledge(ctx context.Context, params json.RawMessa
 		return nil, rpc.InvalidParamsError("task_id is required")
 	}
 
-	// Find guest ID from context if not provided
-	guestID := req.GuestID
-	if guestID == "" {
-		if connID, ok := rpc.ConnectionIDFromContext(ctx); ok {
-			if gid, err := s.hub.GuestIDFromConnection(connID); err == nil {
-				guestID = gid
-			}
-		}
-	}
+	// The reporter is the guest behind the socket the ack arrived on; the
+	// payload's name is only the identity when there is no socket to ask
+	// (issue #304 review).
+	guestID := s.reporterID(ctx, req.GuestID)
 
 	if guestID == "" {
 		return nil, rpc.InvalidParamsError("guest_id is required")

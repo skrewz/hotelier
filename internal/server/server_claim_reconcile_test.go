@@ -351,28 +351,144 @@ func TestGuestResult_NonOwnerReportOnTerminalTaskRejectedAndRevoked(t *testing.T
 	recvCancel(t, connB)
 }
 
-func TestGuestResult_AnonymousReportFallbackPreserved(t *testing.T) {
+// reportResult sends a guest.result from a socket the test names, which is
+// how a real guest reports: guest.TaskResult carries no guest_id, so the
+// connection the report arrived on is the reporter's identity.
+func reportResult(t *testing.T, srv *Server, connID string, taskID string, success bool) *rpc.RPCError {
+	t.Helper()
+	params, _ := json.Marshal(map[string]interface{}{"task_id": taskID, "success": success})
+	_, rpcErr := srv.handleGuestResult(rpc.ContextWithConnection(context.Background(), connID), params)
+	return rpcErr
+}
+
+func TestGuestResult_ReportFromTheOwningSocketIsAccepted(t *testing.T) {
 	srv := newTestServer(t)
-	connectTestGuest(t, srv, "guest-a")
+	connA := connectTestGuest(t, srv, "guest-a")
 
 	task := addAssignedTask(t, srv, "task-x", "guest-a")
 	if err := srv.TaskQueue().Start(task.ID); err != nil {
 		t.Fatalf("start: %v", err)
 	}
 
-	// No guest_id and no connection (direct dispatch, e.g. a test
-	// harness): the report is attributed to the assignee, as before.
-	params, _ := json.Marshal(map[string]interface{}{
-		"task_id": "task-x",
-		"success": true,
-	})
-	if _, rpcErr := srv.handleGuestResult(nil, params); rpcErr != nil {
-		t.Fatalf("anonymous report must keep working: %v", rpcErr)
+	// The owner reporting over its own connection, naming nobody: the
+	// connection is the identity, so the report is the owner's.
+	if rpcErr := reportResult(t, srv, "conn-guest-a", "task-x", true); rpcErr != nil {
+		t.Fatalf("owner report from its own socket must be accepted: %v", rpcErr)
 	}
 	got, _ := srv.Orchestrator().GetTask("task-x")
 	if got.Status != queue.TaskStatusCompleted {
 		t.Errorf("expected COMPLETED, got %s", got.Status)
 	}
+	expectNoCancel(t, connA, 150*time.Millisecond)
+}
+
+func TestGuestResult_UnidentifiableReporterIsRefused(t *testing.T) {
+	srv := newTestServer(t)
+	connA := connectTestGuest(t, srv, "guest-a")
+
+	task := addAssignedTask(t, srv, "task-x", "guest-a")
+	if err := srv.TaskQueue().Start(task.ID); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+
+	// A report the host cannot place — no connection to ask, no name
+	// carried — must not be resolved into the assignee: attributing it
+	// there is what made the ownership gate vacuous for any dispatch that
+	// omitted the field (issue #304 review).
+	if rpcErr := reportResult(t, srv, "", "task-x", true); rpcErr == nil {
+		t.Fatal("expected a report with no identifiable reporter to be refused")
+	}
+	got, _ := srv.Orchestrator().GetTask("task-x")
+	if got.Status != queue.TaskStatusRunning || got.AssignedTo != "guest-a" {
+		t.Errorf("refused report must not move the task: status=%s assigned=%q", got.Status, got.AssignedTo)
+	}
+	if got.Result != "" {
+		t.Errorf("refused report must not store a result: %q", got.Result)
+	}
+	expectNoCancel(t, connA, 150*time.Millisecond)
+}
+
+func TestGuestResult_UnmappedConnectionIsRefused(t *testing.T) {
+	srv := newTestServer(t)
+	connA := connectTestGuest(t, srv, "guest-a")
+
+	task := addAssignedTask(t, srv, "task-x", "guest-a")
+	if err := srv.TaskQueue().Start(task.ID); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+
+	// A socket the hub cannot place behind a guest — a browser session, a
+	// guest whose re-registration moved the mapping on — says nothing about
+	// who sent the report, so it must not be read as the assignee's.
+	if rpcErr := reportResult(t, srv, "conn-browser-1", "task-x", true); rpcErr == nil {
+		t.Fatal("expected a report from an unmapped connection to be refused")
+	}
+	got, _ := srv.Orchestrator().GetTask("task-x")
+	if got.Status != queue.TaskStatusRunning || got.AssignedTo != "guest-a" {
+		t.Errorf("refused report must not move the task: status=%s assigned=%q", got.Status, got.AssignedTo)
+	}
+	expectNoCancel(t, connA, 150*time.Millisecond)
+}
+
+func TestGuestResult_DeclaredNameYieldsToTheConnection(t *testing.T) {
+	srv := newTestServer(t)
+	connA := connectTestGuest(t, srv, "guest-a")
+	connB := connectTestGuest(t, srv, "guest-b")
+
+	task := addAssignedTask(t, srv, "task-x", "guest-a")
+	if err := srv.TaskQueue().Start(task.ID); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+
+	// guest-b holds guest-a's name but not guest-a's socket. The name is a
+	// claim about identity, not identity, so the report is guest-b's — and
+	// guest-b does not own the task (issue #304 review).
+	params, _ := json.Marshal(map[string]interface{}{
+		"task_id":  "task-x",
+		"guest_id": "guest-a",
+		"success":  true,
+		"output":   "typed from the wrong socket",
+	})
+	ctx := rpc.ContextWithConnection(context.Background(), "conn-guest-b")
+	if _, rpcErr := srv.handleGuestResult(ctx, params); rpcErr == nil {
+		t.Fatal("expected a report naming another guest to be refused")
+	}
+	got, _ := srv.Orchestrator().GetTask("task-x")
+	if got.Status != queue.TaskStatusRunning || got.AssignedTo != "guest-a" {
+		t.Errorf("refused report must not move the task: status=%s assigned=%q", got.Status, got.AssignedTo)
+	}
+	if got.Result != "" {
+		t.Errorf("refused report must not store a result: %q", got.Result)
+	}
+	expectNoCancel(t, connA, 100*time.Millisecond)
+
+	// The claimant is the socket behind the report, so that is who is told
+	// to stop — not the name the report typed.
+	cancel := recvCancel(t, connB)
+	if cancel["task_id"] != "task-x" || cancel["intent"] != "revoke" {
+		t.Errorf("expected revoke for task-x, got %v", cancel)
+	}
+}
+
+func TestGuestResult_OwnerReportOnTerminalTaskNeedsNoRevoke(t *testing.T) {
+	srv := newTestServer(t)
+	connA := connectTestGuest(t, srv, "guest-a")
+
+	task := addAssignedTask(t, srv, "task-x", "guest-a")
+	if err := srv.TaskQueue().Start(task.ID); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	if err := srv.Orchestrator().CompleteTask(task.ID, "guest-a", "done"); err != nil {
+		t.Fatalf("complete: %v", err)
+	}
+
+	// The owner reporting its own completed task again is its own task
+	// winding down, not a contradiction (see claimContradiction): no revoke
+	// on the surface that carries the owner's socket.
+	if rpcErr := reportResult(t, srv, "conn-guest-a", "task-x", true); rpcErr != nil {
+		t.Fatalf("owner's repeat report must not be read as a contradiction: %v", rpcErr)
+	}
+	expectNoCancel(t, connA, 150*time.Millisecond)
 }
 
 func TestGuestResult_UnknownTaskErrorWithoutRevoke(t *testing.T) {
@@ -414,4 +530,73 @@ func TestGuestResult_RevokeIsIdempotent(t *testing.T) {
 	}
 	recvCancel(t, connB)
 	expectNoCancel(t, connB, 150*time.Millisecond)
+}
+
+// heartbeatOn names taskID from guestID's socket, which is how a real guest's
+// heartbeat arrives: the hub tags the dispatch with the connection it came in
+// on, so the socket is the identity and the id field is a claim about it.
+func heartbeatOn(t *testing.T, srv *Server, connID, guestID, taskID string) {
+	t.Helper()
+	params, _ := json.Marshal(map[string]string{"id": guestID, "task_id": taskID})
+	if _, rpcErr := srv.handleGuestHeartbeat(rpc.ContextWithConnection(context.Background(), connID), params); rpcErr != nil {
+		t.Fatalf("guest.heartbeat: %v", rpcErr)
+	}
+}
+
+func TestHeartbeat_ClaimInAnotherGuestsNameIsRefused(t *testing.T) {
+	srv := newTestServer(t)
+	connectTestGuest(t, srv, "guest-a")
+	connB := connectTestGuest(t, srv, "guest-b")
+
+	addAssignedTask(t, srv, "task-x", "guest-a")
+	// Backdate the owner's liveness record: a heartbeat arriving on another
+	// guest's socket must not move it, or holding any socket open would keep
+	// a victim looking live to the liveness probe indefinitely (issue #304
+	// review).
+	stale := time.Now().Add(-time.Hour)
+	if err := srv.Registry().SetLastHeartbeat("guest-a", stale); err != nil {
+		t.Fatalf("backdate: %v", err)
+	}
+
+	heartbeatOn(t, srv, "conn-guest-b", "guest-a", "task-x")
+
+	guestA, _ := srv.Registry().GetGuest("guest-a")
+	if !guestA.LastHeartbeat.Equal(stale) {
+		t.Errorf("guest-a's liveness was refreshed in its own name by another socket: %v", guestA.LastHeartbeat)
+	}
+	if guestA.TaskID != "task-x" {
+		t.Errorf("assignment must survive the claim: guest-a holds %q", guestA.TaskID)
+	}
+
+	// The claimant is the socket behind the heartbeat, so that is who is
+	// told to stop — a revoke aimed at the name typed here would let any
+	// socket cancel a stranger's work.
+	cancel := recvCancel(t, connB)
+	if cancel["task_id"] != "task-x" || cancel["intent"] != "revoke" {
+		t.Errorf("expected revoke for task-x, got %v", cancel)
+	}
+}
+
+func TestHeartbeat_OwnerOnTerminalTaskIsNotRevoked(t *testing.T) {
+	srv := newTestServer(t)
+	connA := connectTestGuest(t, srv, "guest-a")
+
+	task := addAssignedTask(t, srv, "task-x", "guest-a")
+	if err := srv.TaskQueue().Start(task.ID); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	if err := srv.Orchestrator().CompleteTask(task.ID, "guest-a", "done"); err != nil {
+		t.Fatalf("complete: %v", err)
+	}
+
+	// The owner's own heartbeat on its own task as it winds down is not a
+	// contradiction, terminal or otherwise: revoking here would cancel work
+	// the host already accepted.
+	heartbeat(t, srv, "guest-a", "task-x")
+	expectNoCancel(t, connA, 150*time.Millisecond)
+
+	got, _ := srv.Orchestrator().GetTask("task-x")
+	if got.Status != queue.TaskStatusCompleted || got.AssignedTo != "guest-a" {
+		t.Errorf("heartbeat must not move the task: status=%s assigned=%q", got.Status, got.AssignedTo)
+	}
 }

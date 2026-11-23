@@ -154,8 +154,10 @@ func TestCompleteTask_FreesSlotAndDrainsWithoutRestart(t *testing.T) {
 	}
 
 	// The guest reporting the result is the event; no restart, no manual
-	// pass, and no second guest polling.
-	params, _ := json.Marshal(map[string]interface{}{"task_id": "t1", "success": true, "output": "done"})
+	// pass, and no second guest polling. hub.Dispatch carries no
+	// connection, so the harness names the reporter — the host no longer
+	// lends a reporter the assignee's identity (issue #304 review).
+	params, _ := json.Marshal(map[string]interface{}{"task_id": "t1", "guest_id": assigneeOf(t, srv, "t1"), "success": true, "output": "done"})
 	if _, rpcErr := srv.hub.Dispatch("guest.result", params); rpcErr != nil {
 		t.Fatalf("guest.result: %v", rpcErr)
 	}

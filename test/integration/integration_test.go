@@ -941,13 +941,16 @@ func TestFullLifecycle_GuestResult(t *testing.T) {
 	srv.TaskQueue().Assign(createdTask.ID, "guest-1")
 	srv.TaskQueue().Start(createdTask.ID)
 
-	// Submit success result
+	// Submit success result. hub.Dispatch carries no connection, so the
+	// harness names the reporter: a report the host cannot place is refused
+	// rather than credited to the assignee (issue #304 review).
 	hub := srv.Hub()
 	go hub.Run()
 	params, _ := json.Marshal(map[string]interface{}{
-		"task_id": createdTask.ID,
-		"success": true,
-		"output":  "Build successful",
+		"task_id":  createdTask.ID,
+		"guest_id": "guest-1",
+		"success":  true,
+		"output":   "Build successful",
 	})
 	_, err := hub.Dispatch("guest.result", params)
 	if err != nil {
