@@ -274,6 +274,15 @@ const (
 	// claim that it is working on a task contradicted the authoritative
 	// assignment (issue #304).
 	claimReasonClaimMismatch = "claim mismatch"
+
+	// claimRevokeRetry bounds how long an unconfirmed claim-mismatch revoke
+	// holds later claims off. The claim surfaces ask once and wait for the
+	// confirmation that clears the ledger entry; a claimant that never
+	// confirms must not have the enforcement silenced for the rest of the
+	// task's life, so it is asked again once this much time has passed
+	// (issue #304 review). Comfortably longer than a heartbeat interval, so
+	// an orphan that is answering is never asked twice.
+	claimRevokeRetry = 2 * time.Minute
 )
 
 // What a guest reported having done with a task.cancel. They match the
@@ -343,20 +352,22 @@ type Server struct {
 	mu             sync.RWMutex
 	claims         claimCounters
 	// cancelIntentMu guards cancelIntentByTask, which remembers the intent
-	// of the last task.cancel sent for each task. A guest that predates the
-	// intent field cannot echo it back, so its confirmation is resolved
-	// against what the host sent rather than against a default (issue #252
-	// review). Entries are written *before* the send (so a confirmation
-	// handled on another goroutine can never resolve against a record that
-	// does not exist yet) and removed when the confirmation arrives, when a
-	// later send for the same task overwrites it, or when the send fails.
-	// A confirmation that never arrives — a guest with no connection skips
-	// it, a socket dying between write and handling loses it — leaves the
-	// entry behind: its lifetime is bounded by the task's, and since task
-	// IDs are never reused the residue is a per-task entry at most, not a
-	// growing set.
+	// of the last task.cancel sent for each task, and when it went out. A
+	// guest that predates the intent field cannot echo it back, so its
+	// confirmation is resolved against what the host sent rather than against
+	// a default (issue #252 review). Entries are written *before* the send
+	// (so a confirmation handled on another goroutine can never resolve
+	// against a record that does not exist yet) and removed when the
+	// confirmation arrives, when a later send for the same task overwrites
+	// it, or when the send fails. A confirmation that never arrives — a guest
+	// with no connection skips it, a socket dying between write and handling
+	// loses it — leaves the entry behind: its lifetime is bounded by the
+	// task's, and since task IDs are never reused the residue is a per-task
+	// entry at most, not a growing set. An outstanding entry also holds the
+	// claim surfaces' own revoke off, which is why the send time is kept
+	// alongside the intent (see claimRevokeDue).
 	cancelIntentMu     sync.Mutex
-	cancelIntentByTask map[string]string
+	cancelIntentByTask map[string]cancelIntentEntry
 	// capOverride, when non-nil, replaces the configured or scheduled
 	// concurrency cap with a value set at runtime through /api/concurrency
 	// (issue #264). It is deliberately in-memory only — nothing persists
@@ -409,6 +420,15 @@ func (s *Server) revokeClaim(taskID, guestID, reason string) {
 	}
 }
 
+// cancelIntentEntry is one entry in the cancel-intent ledger: what the host
+// asked the guest to do with the task, and when the ask went out. The intent
+// is what a confirmation is resolved against; the time bounds how long an
+// ask that was never confirmed keeps later asks off.
+type cancelIntentEntry struct {
+	intent string
+	sentAt time.Time
+}
+
 // rememberCancelIntent records the intent of a task.cancel about to be sent
 // for a task, so an old guest's intent-less confirmation is resolved against
 // what the host actually asked for. Every sender calls it before the send and
@@ -416,10 +436,16 @@ func (s *Server) revokeClaim(taskID, guestID, reason string) {
 func (s *Server) rememberCancelIntent(taskID, intent string) {
 	s.cancelIntentMu.Lock()
 	defer s.cancelIntentMu.Unlock()
+	s.rememberCancelIntentLocked(taskID, intent)
+}
+
+// rememberCancelIntentLocked records the entry; the caller holds
+// cancelIntentMu.
+func (s *Server) rememberCancelIntentLocked(taskID, intent string) {
 	if s.cancelIntentByTask == nil {
-		s.cancelIntentByTask = make(map[string]string)
+		s.cancelIntentByTask = make(map[string]cancelIntentEntry)
 	}
-	s.cancelIntentByTask[taskID] = intent
+	s.cancelIntentByTask[taskID] = cancelIntentEntry{intent: intent, sentAt: time.Now()}
 }
 
 // forgetCancelIntent drops the remembered intent for a task — used when the
@@ -480,22 +506,48 @@ func (s *Server) claimContradiction(guestID, taskID string) string {
 }
 
 // revokeClaimOnce is revokeClaim gated on the cancel-intent ledger: while a
-// revoke for the task is outstanding (sent, not yet confirmed) the ask is not
-// repeated. The claim surfaces fire on every heartbeat and every report, so
-// without this a stubborn orphan would be cancelled once per claim (issue
-// #304). The ledger entry clears when the confirmation arrives
-// (resolveCancelIntent) or when the send failed (forgetCancelIntent), so a
-// guest that did receive the ask is not pestered, while one that never
-// received it is asked again on its next claim.
+// task.cancel for the task is outstanding the ask is not repeated. The claim
+// surfaces fire on every heartbeat and every report, so without this a
+// stubborn orphan would be cancelled once per claim (issue #304).
 func (s *Server) revokeClaimOnce(taskID, guestID, reason string) {
-	s.cancelIntentMu.Lock()
-	outstanding := s.cancelIntentByTask[taskID] == cancelIntentRevoke
-	s.cancelIntentMu.Unlock()
-	if outstanding {
-		s.log.Printf("claim revoke for task %s already outstanding; not re-sending to guest %s", taskID, guestID)
+	if !s.claimRevokeDue(taskID) {
+		s.log.Printf("task.cancel for task %s already outstanding; claim revoke not re-sent to guest %s", taskID, guestID)
 		return
 	}
 	s.revokeClaim(taskID, guestID, reason)
+}
+
+// claimRevokeDue reports whether the claim surfaces should ask for taskID's
+// claim back now, and records the ask when they say they should. Deciding and
+// recording share one critical section so two guests claiming the same task at
+// once cannot both be sent a revoke (issue #304 review); revokeClaim writes
+// the same entry again before it sends, which updates the time rather than
+// adding a second record.
+func (s *Server) claimRevokeDue(taskID string) bool {
+	s.cancelIntentMu.Lock()
+	defer s.cancelIntentMu.Unlock()
+	if entry, outstanding := s.cancelIntentByTask[taskID]; outstanding {
+		// Any task.cancel outstanding for the task holds the claim surfaces
+		// off. A user's cancel especially: that entry is what an old guest's
+		// intent-less confirmation resolves against (#252), and a revoke
+		// written over it would read as a revocation — leaving a task the
+		// user cancelled sitting RUNNING. The guest has also already been
+		// told to stop work on the task entirely, which asks more than a
+		// revoke would.
+		if entry.intent != cancelIntentRevoke {
+			return false
+		}
+		// A revoke holds them off until claimRevokeRetry, not forever: the
+		// confirmation that clears the entry may simply never arrive — a
+		// stalled executor, a confirmation lost on a socket already dying,
+		// which is the population issue #304 was filed from — and enforcement
+		// must not fall silent for the rest of the task over one of those.
+		if time.Since(entry.sentAt) < claimRevokeRetry {
+			return false
+		}
+	}
+	s.rememberCancelIntentLocked(taskID, cancelIntentRevoke)
+	return true
 }
 
 // resolveCancelIntent decides what a guest.cancelled confirmation means:
@@ -515,12 +567,12 @@ func (s *Server) resolveCancelIntent(taskID, echoed string) string {
 		delete(s.cancelIntentByTask, taskID)
 		return echoed
 	}
-	intent, ok := s.cancelIntentByTask[taskID]
+	entry, ok := s.cancelIntentByTask[taskID]
 	if !ok {
 		return cancelIntentCancel
 	}
 	delete(s.cancelIntentByTask, taskID)
-	return intent
+	return entry.intent
 }
 
 // Reload updates the server's runtime configuration from a new ServerConfig.

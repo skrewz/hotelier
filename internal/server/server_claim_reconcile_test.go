@@ -600,3 +600,65 @@ func TestHeartbeat_OwnerOnTerminalTaskIsNotRevoked(t *testing.T) {
 		t.Errorf("heartbeat must not move the task: status=%s assigned=%q", got.Status, got.AssignedTo)
 	}
 }
+
+func TestClaimRevoke_DoesNotOverwriteAnOutstandingCancel(t *testing.T) {
+	srv := newTestServer(t)
+	connectTestGuest(t, srv, "guest-a")
+	connB := connectTestGuest(t, srv, "guest-b")
+
+	task := addAssignedTask(t, srv, "task-x", "guest-a")
+	if err := srv.TaskQueue().Start(task.ID); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+
+	// The user cancelled: a task.cancel asking the holder to stop is in
+	// flight, and its confirmation resolves against the ledger entry — an
+	// old guest cannot echo the intent (issue #252).
+	srv.rememberCancelIntent("task-x", cancelIntentCancel)
+
+	// A second guest now claims the same task. Recording its revoke over
+	// the user's cancel would make the holder's confirmation read as a
+	// revocation, which the host must not act on — leaving a task the user
+	// cancelled sitting RUNNING (issue #304 review).
+	heartbeat(t, srv, "guest-b", "task-x")
+	expectNoCancel(t, connB, 150*time.Millisecond)
+
+	params, _ := json.Marshal(map[string]interface{}{
+		"task_id":  "task-x",
+		"guest_id": "guest-a",
+		"action":   "cancelled_while_running",
+	})
+	if _, err := srv.handleGuestCancelled(nil, params); err != nil {
+		t.Fatalf("guest.cancelled: %v", err)
+	}
+
+	got, _ := srv.Orchestrator().GetTask("task-x")
+	if got.Status != queue.TaskStatusCancelled {
+		t.Errorf("the user's cancel must survive a stranger's claim: status=%s", got.Status)
+	}
+}
+
+func TestClaimRevoke_IsRetriedWhenNeverConfirmed(t *testing.T) {
+	srv := newTestServer(t)
+	connectTestGuest(t, srv, "guest-a")
+	connB := connectTestGuest(t, srv, "guest-b")
+
+	addAssignedTask(t, srv, "task-x", "guest-a")
+
+	heartbeat(t, srv, "guest-b", "task-x")
+	recvCancel(t, connB)
+
+	// The confirmation never arrives: a stalled executor, or a confirmation
+	// lost on a socket that was already dying — the population issue #304
+	// was filed from. Waiting for it forever would mean the claim surfaces
+	// go silent for the rest of the task's life, so a revoke is only held
+	// off for a while (issue #304 review).
+	srv.cancelIntentMu.Lock()
+	entry := srv.cancelIntentByTask["task-x"]
+	entry.sentAt = time.Now().Add(-claimRevokeRetry - time.Second)
+	srv.cancelIntentByTask["task-x"] = entry
+	srv.cancelIntentMu.Unlock()
+
+	heartbeat(t, srv, "guest-b", "task-x")
+	recvCancel(t, connB)
+}
