@@ -197,7 +197,7 @@ The Check-In Host exposes JSON-RPC methods for guest communication.
 | `guest.unregister`  | Guest→Host  | Disconnect / deregister.                 |
 | `guest.heartbeat`   | Guest→Host  | Liveness ping.                           |
 | `guest.log`         | Guest→Host  | Push a log entry (chunk).                |
-| `guest.result`      | Guest→Host  | Submit final task result.                |
+| `guest.result`      | Guest→Host  | Submit final task result (owner only).   |
 | `guest.cancelled`   | Guest→Host  | Report what a `task.cancel` acted on.    |
 
 `resumed` (issue #253) tells the host whether the process registering has
@@ -287,10 +287,14 @@ reconcile on reconnect) release a guest to `IDLE`.
 The guest's heartbeat is a **liveness signal, not an assignment**. It
 names the task the guest reports as executing; that report is recorded
 (`heartbeat_task_id` on `/api/guests`) and never overwrites the server's
-assignment record. A report differing from the assignment is a mismatch
-to surface — logged and flagged via `heartbeat_task_mismatch` — and is
-resolved through the reconcile path, never by silently deleting an
-assignment. Similarly, the stuck-task sweep treats a guest still pointing
+assignment record. It is recorded against the guest whose connection
+carried it, never against whichever name the message typed: the
+connection is the only identity the reporter does not choose, and the
+same holds for the report a guest sends when its task ends. A report
+differing from the assignment is a mismatch to surface — logged and
+flagged via `heartbeat_task_mismatch`, and answered by taking the claim
+back from whoever made it — and is never resolved by silently deleting
+an assignment. Similarly, the stuck-task sweep treats a guest still pointing
 at a terminal or reassigned task as a failed assertion: it logs and
 leaves the state alone, because mutating it was the re-queue loop of
 issue #251.
@@ -324,11 +328,25 @@ The intent is resolved host-side even when the guest cannot echo it: a guest
 that predates the field sends neither `action` nor `intent`, so the host
 remembers the intent of the last `task.cancel` it sent for a task and
 resolves an intent-less confirmation against that record rather than
-defaulting it to a cancel. Only two revocation reasons exist — `re-queued`
-and `connection lost` — because every re-queue revokes the claim from its
-holder at the moment it re-queues: a revocation is never still in flight
-when the task lands elsewhere, so a `reassigned` reason would have no path
-able to send it.
+defaulting it to a cancel. Three revocation reasons exist — `re-queued`,
+`connection lost` and `claim mismatch`. The first two go to the holder at
+the moment the task leaves its hands, which is why a `reassigned` reason
+would have no path able to send it: a revocation is never still in flight
+when the task lands elsewhere. The third answers a guest that asserts it is
+working on a task the host has assigned elsewhere, already closed, or has no
+record of at all — the orphan a dropped socket leaves behind, which keeps
+running side effects until it is told otherwise (issue #304). It goes to
+whoever made the assertion rather than to whoever the assertion names, and
+leaves the assignment exactly where it was: taking a claim back is not a way
+to move one.
+
+Both surfaces that hear such an assertion ask once and then wait for the
+confirmation, because a task that contradicts an assignment contradicts every
+later heartbeat for it too. Any `task.cancel` outstanding for the task holds
+the ask off, a user's cancel included — that one asks more, and its record is
+what the holder's confirmation resolves against. An ask nobody confirms is
+repeated after a while rather than held forever: a claimant that cannot
+confirm is the very guest this revocation exists to reach.
 
 The guest's reply stays the authority on whether it stopped; the host's
 acknowledgement is the authority on whether the work is still its own. A
