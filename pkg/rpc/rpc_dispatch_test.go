@@ -22,7 +22,7 @@ func TestHubDispatch_RegisteredMethod(t *testing.T) {
 		return map[string]interface{}{"echo": req.Message}, nil
 	})
 
-	resp, err := hub.Dispatch("test.echo", json.RawMessage(`{"message":"hello"}`))
+	resp, err := hub.Dispatch(context.Background(), "test.echo", json.RawMessage(`{"message":"hello"}`))
 	if err != nil {
 		t.Fatalf("dispatch failed: %v", err)
 	}
@@ -36,7 +36,7 @@ func TestHubDispatch_RegisteredMethod(t *testing.T) {
 func TestHubDispatch_MethodNotFound(t *testing.T) {
 	hub := NewHub(t.Logf)
 
-	_, err := hub.Dispatch("nonexistent.method", json.RawMessage("{}"))
+	_, err := hub.Dispatch(context.Background(), "nonexistent.method", json.RawMessage("{}"))
 	if err == nil {
 		t.Fatal("expected error for nonexistent method")
 	}
@@ -55,7 +55,7 @@ func TestHubDispatch_HandlerError(t *testing.T) {
 		return nil, InternalError("handler failed")
 	})
 
-	_, err := hub.Dispatch("test.fail", json.RawMessage("{}"))
+	_, err := hub.Dispatch(context.Background(), "test.fail", json.RawMessage("{}"))
 	if err == nil {
 		t.Fatal("expected error from handler")
 	}
@@ -74,7 +74,7 @@ func TestHubDispatch_NilResponse(t *testing.T) {
 		return nil, nil
 	})
 
-	resp, err := hub.Dispatch("test.nil", json.RawMessage("{}"))
+	resp, err := hub.Dispatch(context.Background(), "test.nil", json.RawMessage("{}"))
 	if err != nil {
 		t.Fatalf("dispatch failed: %v", err)
 	}
@@ -104,7 +104,7 @@ func TestHubDispatch_InvalidParams(t *testing.T) {
 	})
 
 	// Missing fields
-	_, err := hub.Dispatch("test.validate", json.RawMessage(`{}`))
+	_, err := hub.Dispatch(context.Background(), "test.validate", json.RawMessage(`{}`))
 	if err == nil {
 		t.Fatal("expected error for missing fields")
 	}
@@ -113,7 +113,7 @@ func TestHubDispatch_InvalidParams(t *testing.T) {
 	}
 
 	// Empty name
-	_, err = hub.Dispatch("test.validate", json.RawMessage(`{"name":"","age":25}`))
+	_, err = hub.Dispatch(context.Background(), "test.validate", json.RawMessage(`{"name":"","age":25}`))
 	if err == nil {
 		t.Fatal("expected error for empty name")
 	}
@@ -122,7 +122,7 @@ func TestHubDispatch_InvalidParams(t *testing.T) {
 	}
 
 	// Negative age
-	_, err = hub.Dispatch("test.validate", json.RawMessage(`{"name":"John","age":-1}`))
+	_, err = hub.Dispatch(context.Background(), "test.validate", json.RawMessage(`{"name":"John","age":-1}`))
 	if err == nil {
 		t.Fatal("expected error for negative age")
 	}
@@ -131,7 +131,7 @@ func TestHubDispatch_InvalidParams(t *testing.T) {
 	}
 
 	// Valid
-	resp, err := hub.Dispatch("test.validate", json.RawMessage(`{"name":"John","age":25}`))
+	resp, err := hub.Dispatch(context.Background(), "test.validate", json.RawMessage(`{"name":"John","age":25}`))
 	if err != nil {
 		t.Fatalf("dispatch failed: %v", err)
 	}
@@ -149,7 +149,7 @@ func TestHubDispatch_BigParams(t *testing.T) {
 	})
 
 	largeParams := json.RawMessage(`{"data":"` + string(make([]byte, 10000)) + `"}`)
-	resp, err := hub.Dispatch("test.big", largeParams)
+	resp, err := hub.Dispatch(context.Background(), "test.big", largeParams)
 	if err != nil {
 		t.Fatalf("dispatch failed: %v", err)
 	}
@@ -502,7 +502,7 @@ func TestHubDispatch_Concurrency(t *testing.T) {
 		wg.Add(1)
 		go func(id int) {
 			defer wg.Done()
-			_, err := hub.Dispatch("test.counter", json.RawMessage(fmt.Sprintf(`{"id":%d}`, id)))
+			_, err := hub.Dispatch(context.Background(), "test.counter", json.RawMessage(fmt.Sprintf(`{"id":%d}`, id)))
 			if err != nil {
 				t.Errorf("dispatch %d failed: %v", id, err)
 			}

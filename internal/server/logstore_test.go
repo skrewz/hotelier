@@ -2,6 +2,7 @@ package server
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -75,7 +76,7 @@ func TestLogPersistence_Integration(t *testing.T) {
 			"level":   ll.level,
 		}
 		rawParams, _ := json.Marshal(params)
-		srv.hub.Dispatch("guest.log", rawParams)
+		srv.hub.Dispatch(context.Background(), "guest.log", rawParams)
 	}
 
 	// Flush the accumulator — this triggers disk writes

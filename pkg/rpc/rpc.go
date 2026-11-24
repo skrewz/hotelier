@@ -24,10 +24,20 @@ var ErrConnectionClosed = errors.New("connection closed")
 // connectionIDKey is the context key for the current connection ID.
 type connectionIDKey struct{}
 
-// ConnectionIDFromContext returns the connection ID from a handler's context.
+// ConnectionIDFromContext returns the connection ID from a handler's
+// context. A context the hub did not tag — context.Background() in a test,
+// say — carries no connection and reports not-found.
 func ConnectionIDFromContext(ctx context.Context) (string, bool) {
 	id, ok := ctx.Value(connectionIDKey{}).(string)
 	return id, ok
+}
+
+// ContextWithConnection returns ctx carrying connID as the current
+// connection ID, the same way the hub tags a handler's context with the
+// connection a message arrived on. Exported so tests can exercise the
+// caller-identity paths that handlers derive from the context.
+func ContextWithConnection(ctx context.Context, connID string) context.Context {
+	return context.WithValue(ctx, connectionIDKey{}, connID)
 }
 
 // MessageType represents the type of a JSON-RPC message.
@@ -417,7 +427,7 @@ func (h *Hub) handleMessage(c *Connection, message []byte) {
 		return
 	}
 
-	ctx := context.WithValue(context.Background(), connectionIDKey{}, c.id)
+	ctx := ContextWithConnection(context.Background(), c.id)
 	result, rpcErr := handler(ctx, msg.Params)
 	if rpcErr != nil {
 		resp := &JSONRPCMessage{
@@ -492,8 +502,13 @@ func (h *Hub) Unregister(c *Connection) {
 	h.unregister <- c
 }
 
-// Dispatch calls a registered handler directly (for testing).
-func (h *Hub) Dispatch(method string, params json.RawMessage) (interface{}, *RPCError) {
+// Dispatch runs a registered handler directly. It exists for tests that
+// want a handler without a WebSocket in the way; production dispatch goes
+// through a Connection, which tags the context with the connection a
+// message arrived on (see handleMessage). Callers that care who a handler
+// sees as the sender must tag ctx the same way — ContextWithConnection —
+// because an untagged context identifies nobody.
+func (h *Hub) Dispatch(ctx context.Context, method string, params json.RawMessage) (interface{}, *RPCError) {
 	h.mu.RLock()
 	handler, ok := h.methods[method]
 	h.mu.RUnlock()
@@ -502,7 +517,6 @@ func (h *Hub) Dispatch(method string, params json.RawMessage) (interface{}, *RPC
 		return nil, MethodNotFoundError(method)
 	}
 
-	ctx := context.Background()
 	return handler(ctx, params)
 }
 

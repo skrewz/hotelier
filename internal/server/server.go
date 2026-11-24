@@ -270,6 +270,15 @@ const (
 	// Why the claim went away, carried to the guest for its log.
 	claimReasonRequeued       = "re-queued"
 	claimReasonConnectionLost = "connection lost"
+	// claimReasonClaimMismatch explains a revoke fired because the guest's
+	// claim that it is working on a task contradicted the authoritative
+	// assignment (issue #304).
+	claimReasonClaimMismatch = "claim mismatch"
+
+	// claimRevokeRetry bounds how long an unconfirmed claim-mismatch revoke
+	// holds later claims off; the Claim Revocation section of
+	// ARCHITECTURE.md owns why the ask is repeated rather than held forever.
+	claimRevokeRetry = 2 * time.Minute
 )
 
 // What a guest reported having done with a task.cancel. They match the
@@ -339,20 +348,24 @@ type Server struct {
 	mu             sync.RWMutex
 	claims         claimCounters
 	// cancelIntentMu guards cancelIntentByTask, which remembers the intent
-	// of the last task.cancel sent for each task. A guest that predates the
-	// intent field cannot echo it back, so its confirmation is resolved
-	// against what the host sent rather than against a default (issue #252
-	// review). Entries are written *before* the send (so a confirmation
-	// handled on another goroutine can never resolve against a record that
-	// does not exist yet) and removed when the confirmation arrives, when a
-	// later send for the same task overwrites it, or when the send fails.
-	// A confirmation that never arrives — a guest with no connection skips
-	// it, a socket dying between write and handling loses it — leaves the
-	// entry behind: its lifetime is bounded by the task's, and since task
-	// IDs are never reused the residue is a per-task entry at most, not a
-	// growing set.
+	// of the last task.cancel sent for each task, and when it went out. A
+	// guest that predates the intent field cannot echo it back, so its
+	// confirmation is resolved against what the host sent rather than against
+	// a default (issue #252 review). Entries are written *before* the send
+	// (so a confirmation handled on another goroutine can never resolve
+	// against a record that does not exist yet) and removed when the
+	// confirmation arrives, when a later send for the same task overwrites
+	// it, or when the send fails. A confirmation that never arrives — a guest
+	// with no connection skips it, a socket dying between write and handling
+	// loses it — leaves the entry behind: its lifetime is bounded by the
+	// task's, and since task IDs are never reused the residue is a per-task
+	// entry at most, not a growing set — with one rider: an entry a claim
+	// surface recorded for a task the host has no record of is cleared only
+	// when that claimant confirms. An outstanding entry also holds the
+	// claim surfaces' own revoke off, which is why the send time is kept
+	// alongside the intent (see claimRevokeDue).
 	cancelIntentMu     sync.Mutex
-	cancelIntentByTask map[string]string
+	cancelIntentByTask map[string]cancelIntentEntry
 	// capOverride, when non-nil, replaces the configured or scheduled
 	// concurrency cap with a value set at runtime through /api/concurrency
 	// (issue #264). It is deliberately in-memory only — nothing persists
@@ -385,24 +398,43 @@ func (s *Server) revokeClaim(taskID, guestID, reason string) {
 	if guestID == "" {
 		return
 	}
-	s.log.Printf("revoking claim on task %s from guest %s: %s", taskID, guestID, reason)
 	// Remember what we are about to ask for before the send: the
 	// confirmation this send provokes may not carry the intent (an old
 	// guest cannot echo it), and it can be handled on another goroutine
 	// before the statement after the send would have run (#252 review).
 	s.rememberCancelIntent(taskID, cancelIntentRevoke)
+	s.sendClaimRevoke(taskID, guestID, reason)
+}
+
+// sendClaimRevoke delivers the revoke for an ask the caller has already
+// recorded in the ledger. A send that never left drops the record again —
+// nothing is owed a resolution for a cancel no guest was told about — but
+// only while the entry still reads as a revocation: a user's cancel that
+// landed after the record is the one its confirmation resolves against, and
+// dropping it here would hand the same failure back (#304 review).
+func (s *Server) sendClaimRevoke(taskID, guestID, reason string) {
+	s.log.Printf("revoking claim on task %s from guest %s: %s", taskID, guestID, reason)
 	if err := s.hub.SendToGuest(guestID, "task.cancel", map[string]interface{}{
 		"task_id": taskID,
 		"reason":  reason,
 		"intent":  cancelIntentRevoke,
 	}); err != nil {
-		// Nothing was sent, so nothing is owed a resolution — drop the
-		// record rather than leaving a revocation on file for a cancel no
-		// guest was ever told about.
-		s.forgetCancelIntent(taskID)
+		s.cancelIntentMu.Lock()
+		if entry, outstanding := s.cancelIntentByTask[taskID]; outstanding && entry.intent == cancelIntentRevoke {
+			delete(s.cancelIntentByTask, taskID)
+		}
+		s.cancelIntentMu.Unlock()
 		s.log.Printf("failed to send task.cancel to guest %s: %v (guest may be disconnected)", guestID, err)
-		return
 	}
+}
+
+// cancelIntentEntry is one entry in the cancel-intent ledger: what the host
+// asked the guest to do with the task, and when the ask went out. The intent
+// is what a confirmation is resolved against; the time bounds how long an
+// ask that was never confirmed keeps later asks off.
+type cancelIntentEntry struct {
+	intent string
+	sentAt time.Time
 }
 
 // rememberCancelIntent records the intent of a task.cancel about to be sent
@@ -412,10 +444,16 @@ func (s *Server) revokeClaim(taskID, guestID, reason string) {
 func (s *Server) rememberCancelIntent(taskID, intent string) {
 	s.cancelIntentMu.Lock()
 	defer s.cancelIntentMu.Unlock()
+	s.rememberCancelIntentLocked(taskID, intent)
+}
+
+// rememberCancelIntentLocked records the entry; the caller holds
+// cancelIntentMu.
+func (s *Server) rememberCancelIntentLocked(taskID, intent string) {
 	if s.cancelIntentByTask == nil {
-		s.cancelIntentByTask = make(map[string]string)
+		s.cancelIntentByTask = make(map[string]cancelIntentEntry)
 	}
-	s.cancelIntentByTask[taskID] = intent
+	s.cancelIntentByTask[taskID] = cancelIntentEntry{intent: intent, sentAt: time.Now()}
 }
 
 // forgetCancelIntent drops the remembered intent for a task — used when the
@@ -425,6 +463,109 @@ func (s *Server) forgetCancelIntent(taskID string) {
 	s.cancelIntentMu.Lock()
 	defer s.cancelIntentMu.Unlock()
 	delete(s.cancelIntentByTask, taskID)
+}
+
+// reporterID answers who sent a claim about a task. The connection the claim
+// arrived on is the authority: it is the one identity the reporter does not
+// choose. A name inside the payload is a claim *about* identity, not
+// identity, and taking it instead lets any socket satisfy an ownership gate
+// by typing somebody else's name (issue #304 review). A connection the hub
+// cannot place — a browser session, a guest whose re-registration moved the
+// mapping on — identifies nobody.
+func (s *Server) reporterID(ctx context.Context) string {
+	connID, ok := rpc.ConnectionIDFromContext(ctx)
+	if !ok {
+		return ""
+	}
+	guestID, err := s.hub.GuestIDFromConnection(connID)
+	if err != nil {
+		return ""
+	}
+	return guestID
+}
+
+// claimContradiction compares a guest's claim that it is working on taskID
+// against the authoritative assignment in the queue (issue #304) and returns
+// why the claim contradicts it, or "" when it does not. The queue owns
+// task.AssignedTo: a claim naming a task the host has no record of, one that
+// is already terminal, or one assigned to somebody else (or not assigned yet)
+// must never move the assignment — the claimant is instead told to stop by
+// the handlers that call this. A claim naming a task still assigned to the
+// claimant is consistent even once terminal: that is the claimant's own task
+// winding down, not a contradiction.
+func (s *Server) claimContradiction(guestID, taskID string) string {
+	task, ok := s.orchestrator.GetTask(taskID)
+	if !ok {
+		return "the host has no record of the task"
+	}
+	if task.AssignedTo == guestID {
+		return ""
+	}
+	switch task.Status {
+	case queue.TaskStatusCompleted, queue.TaskStatusFailed, queue.TaskStatusCancelled:
+		return "the task is already " + task.Status.String()
+	}
+	if task.AssignedTo == "" {
+		return "the task is not assigned to any guest"
+	}
+	return "the task is assigned to " + task.AssignedTo
+}
+
+// revokeClaimOnce is revokeClaim for the claim surfaces, gated on the
+// cancel-intent ledger: while a task.cancel for the task is outstanding the
+// ask is not repeated. The claim surfaces fire on every heartbeat and every
+// report, so without this a stubborn orphan would be cancelled once per
+// claim (issue #304). Unlike revokeClaim it records nothing of its own:
+// claimRevokeDue has already recorded the ask in the same critical section
+// that decided it was due, and a second write before the send would let a
+// user's cancel landing in between be overwritten by this revoke again
+// (issue #304 review).
+func (s *Server) revokeClaimOnce(taskID, guestID, reason string) {
+	if guestID == "" {
+		// Unreachable from either claim surface today — both refuse an empty
+		// reporter before getting here — but a revoke that silently goes
+		// nowhere is the failure mode this whole path exists to avoid.
+		s.log.Printf("claim on task %s contradicted by a guest the host cannot name (%s); no revoke sent", taskID, reason)
+		return
+	}
+	if !s.claimRevokeDue(taskID) {
+		s.log.Printf("task.cancel for task %s already outstanding; claim revoke not re-sent to guest %s", taskID, guestID)
+		return
+	}
+	s.sendClaimRevoke(taskID, guestID, reason)
+}
+
+// claimRevokeDue reports whether the claim surfaces should ask for taskID's
+// claim back now, and records the ask when they say they should. Deciding and
+// recording share one critical section so two guests claiming the same task at
+// once cannot both be sent a revoke, and the send that follows writes the
+// ledger no second time (issue #304 review): what the send resolves against
+// is the entry this decides on, not whatever landed in between. The entry is
+// per-task while the ask names one claimant: an outstanding entry holds the
+// surfaces off for the task, so a second claimant's first claim waits out at
+// most the retry window before it is told to stop itself.
+func (s *Server) claimRevokeDue(taskID string) bool {
+	s.cancelIntentMu.Lock()
+	defer s.cancelIntentMu.Unlock()
+	if entry, outstanding := s.cancelIntentByTask[taskID]; outstanding {
+		// Any task.cancel outstanding for the task holds the claim surfaces
+		// off. A user's cancel especially: that entry is what an old guest's
+		// intent-less confirmation resolves against (#252), and a revoke
+		// written over it would read as a revocation — leaving a task the
+		// user cancelled sitting RUNNING. The guest has also already been
+		// told to stop work on the task entirely, which asks more than a
+		// revoke would.
+		if entry.intent != cancelIntentRevoke {
+			return false
+		}
+		// A revoke holds them off until claimRevokeRetry, not forever —
+		// ARCHITECTURE.md's Claim Revocation section says why.
+		if time.Since(entry.sentAt) < claimRevokeRetry {
+			return false
+		}
+	}
+	s.rememberCancelIntentLocked(taskID, cancelIntentRevoke)
+	return true
 }
 
 // resolveCancelIntent decides what a guest.cancelled confirmation means:
@@ -444,12 +585,12 @@ func (s *Server) resolveCancelIntent(taskID, echoed string) string {
 		delete(s.cancelIntentByTask, taskID)
 		return echoed
 	}
-	intent, ok := s.cancelIntentByTask[taskID]
+	entry, ok := s.cancelIntentByTask[taskID]
 	if !ok {
 		return cancelIntentCancel
 	}
 	delete(s.cancelIntentByTask, taskID)
-	return intent
+	return entry.intent
 }
 
 // Reload updates the server's runtime configuration from a new ServerConfig.
@@ -1150,10 +1291,10 @@ func (s *Server) handleGuestUnregister(ctx context.Context, params json.RawMessa
 
 // handleGuestHeartbeat handles guest heartbeat.
 // If task_id is present, it uses TaskHeartbeat to track the guest's
-// current task for liveness probing.
+// current task for liveness probing, and reconciles the claim the heartbeat
+// makes against the authoritative assignment (issue #304).
 func (s *Server) handleGuestHeartbeat(ctx context.Context, params json.RawMessage) (interface{}, *rpc.RPCError) {
 	var req struct {
-		ID     string `json:"id"`
 		TaskID string `json:"task_id"`
 	}
 
@@ -1161,12 +1302,41 @@ func (s *Server) handleGuestHeartbeat(ctx context.Context, params json.RawMessag
 		return nil, rpc.InvalidParamsError("invalid request parameters")
 	}
 
+	// The heartbeat is attributed to the guest behind the socket it arrived
+	// on, not to the name the payload carries: the latter would let any
+	// connection refresh a stranger's liveness and keep their task looking
+	// live to the probe indefinitely (issue #304 review).
+	reporter := s.reporterID(ctx)
+
 	if req.TaskID != "" {
-		if err := s.orchestrator.TaskHeartbeat(req.ID, req.TaskID); err != nil {
+		// Examine the claim before the liveness record is touched, so a
+		// mutation cannot precede the decision it belongs to. The heartbeat
+		// stays a liveness signal — it never creates or changes an assignment
+		// (issue #251), and the record written below is the reporter's own:
+		// a claim that contradicts the authoritative assignment is answered
+		// here with a revoke to the reporter, so an orphan whose task moved
+		// on stops its side effects instead of merely being logged (issue
+		// #304). The response stays "ok": the heartbeat itself succeeded,
+		// and the revoke arrives as a task.cancel.
+		why := s.claimContradiction(reporter, req.TaskID)
+		if why != "" && reporter == "" {
+			// A claim the host cannot place is refused without a revoke: the
+			// revoke names a claimant, and here there is none — a socket that
+			// never registered, or an orphan whose re-registration moved the
+			// mapping on (issue #304). The log is this claim's whole trace, so
+			// it says what the contradiction was and that no revoke went out,
+			// rather than leaving only TaskHeartbeat's "guest not found" below.
+			s.log.Printf("heartbeat claim mismatch: a connection the host cannot place claims task %s — %s; claim refused, no revoke sent", req.TaskID, why)
+		}
+		if err := s.orchestrator.TaskHeartbeat(reporter, req.TaskID); err != nil {
 			return nil, rpc.InternalError(err.Error())
 		}
+		if why != "" && reporter != "" {
+			s.log.Printf("heartbeat claim mismatch: guest %s claims task %s — %s; revoking the claim, assignment unchanged", reporter, req.TaskID, why)
+			s.revokeClaimOnce(req.TaskID, reporter, claimReasonClaimMismatch)
+		}
 	} else {
-		if err := s.orchestrator.Heartbeat(req.ID); err != nil {
+		if err := s.orchestrator.Heartbeat(reporter); err != nil {
 			return nil, rpc.InternalError(err.Error())
 		}
 	}
@@ -1381,7 +1551,6 @@ func (s *Server) handleGuestLog(ctx context.Context, params json.RawMessage) (in
 func (s *Server) handleGuestResult(ctx context.Context, params json.RawMessage) (interface{}, *rpc.RPCError) {
 	var result struct {
 		TaskID  string `json:"task_id"`
-		GuestID string `json:"guest_id"`
 		Success bool   `json:"success"`
 		Output  string `json:"output,omitempty"`
 		Error   string `json:"error,omitempty"`
@@ -1395,11 +1564,30 @@ func (s *Server) handleGuestResult(ctx context.Context, params json.RawMessage) 
 		return nil, rpc.InvalidParamsError("task_id is required")
 	}
 
-	// Find guest ID from task if not provided
-	guestID := result.GuestID
+	// The reporter is the guest behind the socket the report arrived on.
+	// Neither the name the payload carries nor the task's assignee can stand
+	// in for it: the payload's word would let any socket satisfy the
+	// ownership gate below by typing the owner's name, and the assignee's
+	// would make that gate vacuous for every report that omits the field —
+	// which is every report a real guest sends (issue #304 review). A report
+	// the host cannot place is refused rather than credited to whoever owns
+	// the task.
+	guestID := s.reporterID(ctx)
 	if guestID == "" {
-		if task, ok := s.orchestrator.GetTask(result.TaskID); ok && task.AssignedTo != "" {
-			guestID = task.AssignedTo
+		return nil, rpc.InvalidParamsError("cannot identify the reporting guest")
+	}
+
+	// The first executor to finish must not win regardless of ownership:
+	// reconcile the reporter against the authoritative assignment before
+	// the task's fate is touched (issue #304). A report for a task the
+	// host has no record of says nothing about the claim — the rule the
+	// ack path applies since issue #252 — so the gate only fires for
+	// tasks the queue still knows.
+	if _, ok := s.orchestrator.GetTask(result.TaskID); ok {
+		if why := s.claimContradiction(guestID, result.TaskID); why != "" {
+			s.log.Printf("guest %s reported a result for task %s it does not own — %s; rejecting the report, assignment unchanged, and revoking the claim", guestID, result.TaskID, why)
+			s.revokeClaimOnce(result.TaskID, guestID, claimReasonClaimMismatch)
+			return nil, rpc.ClaimRefusedError(fmt.Sprintf("task %s is not assigned to %s", result.TaskID, guestID))
 		}
 	}
 
@@ -1574,8 +1762,7 @@ func (s *Server) handleTaskAssign(ctx context.Context, params json.RawMessage) (
 // and is executing it. The server transitions ASSIGNED→RUNNING.
 func (s *Server) handleTaskAcknowledge(ctx context.Context, params json.RawMessage) (interface{}, *rpc.RPCError) {
 	var req struct {
-		TaskID  string `json:"task_id"`
-		GuestID string `json:"guest_id"`
+		TaskID string `json:"task_id"`
 	}
 
 	if err := json.Unmarshal(params, &req); err != nil {
@@ -1586,18 +1773,12 @@ func (s *Server) handleTaskAcknowledge(ctx context.Context, params json.RawMessa
 		return nil, rpc.InvalidParamsError("task_id is required")
 	}
 
-	// Find guest ID from context if not provided
-	guestID := req.GuestID
-	if guestID == "" {
-		if connID, ok := rpc.ConnectionIDFromContext(ctx); ok {
-			if gid, err := s.hub.GuestIDFromConnection(connID); err == nil {
-				guestID = gid
-			}
-		}
-	}
+	// The reporter is the guest behind the socket the ack arrived on — the
+	// payload carries no identity worth trusting (issue #304 review).
+	guestID := s.reporterID(ctx)
 
 	if guestID == "" {
-		return nil, rpc.InvalidParamsError("guest_id is required")
+		return nil, rpc.InvalidParamsError("cannot identify the ack'ing guest")
 	}
 
 	// A task the host has no record of says nothing about the claim: it is

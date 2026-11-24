@@ -819,6 +819,9 @@ func (g *Guest) Heartbeat() error {
 	g.mu.Unlock()
 
 	params := map[string]string{
+		// A current host takes the reporter from the connection this arrives
+		// on, never from here; id is read only by a host that predates issue
+		// #304, and guest and host are upgraded separately.
 		"id":      g.id,
 		"task_id": taskID,
 	}
@@ -1149,7 +1152,9 @@ func (g *Guest) ExecuteTask(task TaskAssignment) (*TaskResult, error) {
 	// connection was lost while a task was in flight (issue #72).
 	if c := g.client; c != nil {
 		_, err := c.Call("task.acknowledge", map[string]interface{}{
-			"task_id":  task.TaskID,
+			"task_id": task.TaskID,
+			// Identity is the connection this arrives on (issue #304); the
+			// name is what a host predating that change reads instead.
 			"guest_id": g.id,
 		})
 		if err != nil {

@@ -2,6 +2,7 @@ package server
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -1421,7 +1422,7 @@ func TestHandleGuestRegister_ConnectionMapping(t *testing.T) {
 	// We need to call the handler through the hub's handleMessage
 	// which sets the connection ID in context. Since we can't easily
 	// do that with Dispatch(), let's test via the hub directly.
-	resp, err := hub.Dispatch("guest.register", params)
+	resp, err := hub.Dispatch(context.Background(), "guest.register", params)
 	if err != nil {
 		t.Fatalf("guest.register failed: %v", err)
 	}
@@ -1457,7 +1458,7 @@ func TestHandleGuestRegister_ReRegistration(t *testing.T) {
 		"tags": []string{"tag1"},
 	})
 
-	resp1, err := hub.Dispatch("guest.register", params1)
+	resp1, err := hub.Dispatch(context.Background(), "guest.register", params1)
 	if err != nil {
 		t.Fatalf("first register failed: %v", err)
 	}
@@ -1473,7 +1474,7 @@ func TestHandleGuestRegister_ReRegistration(t *testing.T) {
 		"tags": []string{"tag1", "tag2"},
 	})
 
-	resp2, err := hub.Dispatch("guest.register", params2)
+	resp2, err := hub.Dispatch(context.Background(), "guest.register", params2)
 	if err != nil {
 		t.Fatalf("second register failed: %v", err)
 	}
@@ -1509,7 +1510,7 @@ func TestHandleGuestRegister_RecordsHost(t *testing.T) {
 		"tags": []string{"tag1"},
 		"host": "build-box-1",
 	})
-	if _, err := hub.Dispatch("guest.register", params); err != nil {
+	if _, err := hub.Dispatch(context.Background(), "guest.register", params); err != nil {
 		t.Fatalf("guest.register: %v", err)
 	}
 
@@ -1528,7 +1529,7 @@ func TestHandleGuestRegister_RecordsHost(t *testing.T) {
 		"name": "No Host Guest",
 		"tags": []string{"tag1"},
 	})
-	if _, err := hub.Dispatch("guest.register", noHost); err != nil {
+	if _, err := hub.Dispatch(context.Background(), "guest.register", noHost); err != nil {
 		t.Fatalf("guest.register without host: %v", err)
 	}
 	noHostGuest, ok := srv.Registry().GetGuest("no-host-guest")
@@ -1552,7 +1553,7 @@ func TestHandleGuestRegister_ReRegistrationUpdatesHost(t *testing.T) {
 		"id": "moving-guest", "name": "Moving Guest", "tags": []string{"tag1"},
 		"host": "build-box-1",
 	})
-	if _, err := hub.Dispatch("guest.register", first); err != nil {
+	if _, err := hub.Dispatch(context.Background(), "guest.register", first); err != nil {
 		t.Fatalf("first register: %v", err)
 	}
 
@@ -1560,7 +1561,7 @@ func TestHandleGuestRegister_ReRegistrationUpdatesHost(t *testing.T) {
 		"id": "moving-guest", "name": "Moving Guest", "tags": []string{"tag1"},
 		"host": "build-box-2",
 	})
-	if _, err := hub.Dispatch("guest.register", second); err != nil {
+	if _, err := hub.Dispatch(context.Background(), "guest.register", second); err != nil {
 		t.Fatalf("second register: %v", err)
 	}
 
@@ -1575,7 +1576,7 @@ func TestHandleGuestRegister_ReRegistrationUpdatesHost(t *testing.T) {
 	third, _ := json.Marshal(map[string]interface{}{
 		"id": "moving-guest", "name": "Moving Guest", "tags": []string{"tag1"},
 	})
-	if _, err := hub.Dispatch("guest.register", third); err != nil {
+	if _, err := hub.Dispatch(context.Background(), "guest.register", third); err != nil {
 		t.Fatalf("third register: %v", err)
 	}
 	if guest.Host != "build-box-2" {
@@ -1595,7 +1596,7 @@ func TestHandleGuestRegister_PreservesRunningState(t *testing.T) {
 		"tags": []string{"tag1"},
 	})
 
-	resp1, err := hub.Dispatch("guest.register", params1)
+	resp1, err := hub.Dispatch(context.Background(), "guest.register", params1)
 	if err != nil {
 		t.Fatalf("first register failed: %v", err)
 	}
@@ -1633,7 +1634,7 @@ func TestHandleGuestRegister_PreservesRunningState(t *testing.T) {
 		"tags": []string{"tag1"},
 	})
 
-	resp2, err := hub.Dispatch("guest.register", params2)
+	resp2, err := hub.Dispatch(context.Background(), "guest.register", params2)
 	if err != nil {
 		t.Fatalf("re-register failed: %v", err)
 	}
@@ -1674,7 +1675,7 @@ func TestHandleGuestRegister_IdleGuestGetsTask(t *testing.T) {
 		"tags": []string{},
 	})
 
-	resp1, err := hub.Dispatch("guest.register", params1)
+	resp1, err := hub.Dispatch(context.Background(), "guest.register", params1)
 	if err != nil {
 		t.Fatalf("first register failed: %v", err)
 	}
@@ -1696,7 +1697,7 @@ func TestHandleGuestRegister_IdleGuestGetsTask(t *testing.T) {
 		"tags": []string{},
 	})
 
-	resp2, err := hub.Dispatch("guest.register", params2)
+	resp2, err := hub.Dispatch(context.Background(), "guest.register", params2)
 	if err != nil {
 		t.Fatalf("re-register failed: %v", err)
 	}
@@ -2455,7 +2456,7 @@ func TestIntegration_TaskLogBroadcast(t *testing.T) {
 		"level":   "text",
 	}
 	rawParams, _ := json.Marshal(params)
-	hub.Dispatch("guest.log", rawParams)
+	hub.Dispatch(context.Background(), "guest.log", rawParams)
 
 	srv.LogAccumulator().FlushAll(func(e TaskLogEntry) {
 		srv.LogStore().Add(e)
@@ -3055,7 +3056,7 @@ func TestHandleGuestLog_ToolFieldsFromAccumulator(t *testing.T) {
 
 	for _, tl := range toolLines {
 		params, _ := json.Marshal(tl)
-		hub.Dispatch("guest.log", params)
+		hub.Dispatch(context.Background(), "guest.log", params)
 	}
 
 	// Fetch the task detail to get stored logs
@@ -3534,7 +3535,7 @@ func TestHandleGuestLog_ToolErrorFields(t *testing.T) {
 		"line":    "[TOOL_END] bash (id: t2): [ERROR] exit code 1",
 		"level":   "",
 	})
-	hub.Dispatch("guest.log", params)
+	hub.Dispatch(context.Background(), "guest.log", params)
 
 	// Fetch logs
 	req2 := httptest.NewRequest(http.MethodGet, fmt.Sprintf("/api/tasks/%s", createdTask.ID), nil)
@@ -3561,12 +3562,14 @@ func TestHandleGuestHeartbeat_NoTaskID(t *testing.T) {
 
 	// Register a guest directly via registry
 	srv.Registry().Register("guest-1", "Test Guest", []string{"tag1"})
+	srv.Hub().RegisterGuestConnection("guest-1", "conn-guest-1")
 
-	// Heartbeat without task_id
+	// Heartbeat without task_id, on the guest's own connection: the
+	// heartbeat is attributed to the socket it arrived on.
 	hbParams, _ := json.Marshal(map[string]string{
 		"id": "guest-1",
 	})
-	result, rpcErr := srv.handleGuestHeartbeat(nil, hbParams)
+	result, rpcErr := srv.handleGuestHeartbeat(rpc.ContextWithConnection(context.Background(), "conn-guest-1"), hbParams)
 	if rpcErr != nil {
 		t.Fatalf("expected no error, got %v", rpcErr)
 	}
@@ -3593,13 +3596,14 @@ func TestHandleGuestHeartbeat_WithTaskID(t *testing.T) {
 
 	// Assign a task
 	srv.Registry().SetGuestTask("guest-1", "task-1")
+	srv.Hub().RegisterGuestConnection("guest-1", "conn-guest-1")
 
-	// Heartbeat with task_id
+	// Heartbeat with task_id, on the guest's own connection
 	hbParams, _ := json.Marshal(map[string]string{
 		"id":      "guest-1",
 		"task_id": "task-1",
 	})
-	result, rpcErr := srv.handleGuestHeartbeat(nil, hbParams)
+	result, rpcErr := srv.handleGuestHeartbeat(rpc.ContextWithConnection(context.Background(), "conn-guest-1"), hbParams)
 	if rpcErr != nil {
 		t.Fatalf("expected no error, got %v", rpcErr)
 	}
@@ -3624,7 +3628,9 @@ func TestHandleGuestHeartbeat_NonExistentGuest(t *testing.T) {
 	hbParams, _ := json.Marshal(map[string]string{
 		"id": "unknown-guest",
 	})
-	_, rpcErr := srv.handleGuestHeartbeat(nil, hbParams)
+	// A heartbeat from a socket the hub cannot place identifies nobody —
+	// the payload's name is not a substitute for one.
+	_, rpcErr := srv.handleGuestHeartbeat(context.Background(), hbParams)
 	if rpcErr == nil {
 		t.Error("expected error for unknown guest, got nil")
 	}
@@ -3694,6 +3700,7 @@ func TestCheckStuckTasks_IgnoresHealthyGuests(t *testing.T) {
 
 	// Register a guest directly via registry
 	srv.Registry().Register("guest-1", "Test Guest", []string{"tag1"})
+	srv.Hub().RegisterGuestConnection("guest-1", "conn-guest-1")
 
 	// Add a task via HTTP
 	taskBody, _ := json.Marshal(map[string]interface{}{
@@ -3725,7 +3732,7 @@ func TestCheckStuckTasks_IgnoresHealthyGuests(t *testing.T) {
 		"id":      "guest-1",
 		"task_id": taskID,
 	})
-	srv.handleGuestHeartbeat(nil, hbParams)
+	srv.handleGuestHeartbeat(rpc.ContextWithConnection(context.Background(), "conn-guest-1"), hbParams)
 
 	// Verify heartbeat updated LastTaskHeartbeat
 	guest, _ := srv.Registry().GetGuest("guest-1")
@@ -4274,7 +4281,7 @@ func TestHandleGuestCancelled(t *testing.T) {
 		"guest_id": "guest-1",
 		"reason":   "user requested cancellation",
 	})
-	result, rpcErr := srv.handleGuestCancelled(nil, params)
+	result, rpcErr := srv.handleGuestCancelled(context.Background(), params)
 	if rpcErr != nil {
 		t.Fatalf("expected no error, got %v", rpcErr)
 	}
@@ -4385,7 +4392,7 @@ func TestHandleGuestDisconnect(t *testing.T) {
 		"name": "Disconnect Guest",
 		"tags": []string{"tag1"},
 	})
-	resp, err := hub.Dispatch("guest.register", params)
+	resp, err := hub.Dispatch(context.Background(), "guest.register", params)
 	if err != nil {
 		t.Fatalf("register failed: %v", err)
 	}
@@ -4483,7 +4490,7 @@ func TestHandleGuestDisconnect_NoTask(t *testing.T) {
 		"name": "Idle Guest",
 		"tags": []string{"tag1"},
 	})
-	resp, err := hub.Dispatch("guest.register", params)
+	resp, err := hub.Dispatch(context.Background(), "guest.register", params)
 	if err != nil {
 		t.Fatalf("register failed: %v", err)
 	}

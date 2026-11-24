@@ -2,6 +2,7 @@ package server
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -154,9 +155,17 @@ func TestCompleteTask_FreesSlotAndDrainsWithoutRestart(t *testing.T) {
 	}
 
 	// The guest reporting the result is the event; no restart, no manual
-	// pass, and no second guest polling.
+	// pass, and no second guest polling. The report arrives on the
+	// assignee's own connection — the socket is the reporter (issue #304
+	// review).
+	assignee := assigneeOf(t, srv, "t1")
+	connID, mapped := srv.hub.GetGuestConnectionID(assignee)
+	if !mapped {
+		t.Fatalf("no connection mapped for %s", assignee)
+	}
 	params, _ := json.Marshal(map[string]interface{}{"task_id": "t1", "success": true, "output": "done"})
-	if _, rpcErr := srv.hub.Dispatch("guest.result", params); rpcErr != nil {
+	ctx := rpc.ContextWithConnection(context.Background(), connID)
+	if _, rpcErr := srv.hub.Dispatch(ctx, "guest.result", params); rpcErr != nil {
 		t.Fatalf("guest.result: %v", rpcErr)
 	}
 
