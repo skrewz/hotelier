@@ -290,8 +290,11 @@ names the task the guest reports as executing; that report is recorded
 assignment record. It is recorded against the guest whose connection
 carried it, never against whichever name the message typed: the
 connection is the only identity the reporter does not choose, and the
-same holds for the report a guest sends when its task ends. A report
-differing from the assignment is a mismatch to surface — logged and
+same holds for the report a guest sends when its task ends. The name still
+travels in those payloads — a guest binary and its host are upgraded
+separately, and a host that predates this change reads it — but nothing here
+takes identity from it. A report differing from the assignment is a mismatch
+to surface — logged and
 flagged via `heartbeat_task_mismatch`, and answered by taking the claim
 back from whoever made it, whenever the host can place them (see Claim
 Revocation below) — and is never resolved by silently deleting
