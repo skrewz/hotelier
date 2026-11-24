@@ -638,6 +638,51 @@ func TestClaimRevoke_DoesNotOverwriteAnOutstandingCancel(t *testing.T) {
 	}
 }
 
+// TestClaimRevoke_TheSendRecordsNothingAfterTheDecision pins the window
+// a6bc856 shrank but did not close: claimRevokeDue decides and records under
+// one lock, and the send that follows must write the ledger no second time,
+// because a user's task.cancel recorded in that gap is the one the holder's
+// confirmation resolves against (#304 review). The interleaving is forced
+// the way it happens in the server: decide, cancel lands, send.
+func TestClaimRevoke_TheSendRecordsNothingAfterTheDecision(t *testing.T) {
+	srv := newTestServer(t)
+	connectTestGuest(t, srv, "guest-a")
+	connB := connectTestGuest(t, srv, "guest-b")
+
+	task := addAssignedTask(t, srv, "task-x", "guest-a")
+	if err := srv.TaskQueue().Start(task.ID); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+
+	// The decision half of a claim surface: record the ask under the lock.
+	if !srv.claimRevokeDue("task-x") {
+		t.Fatal("expected the first revoke ask to be due")
+	}
+	// The user's cancel lands in the gap the re-record used to leave open.
+	srv.rememberCancelIntent("task-x", cancelIntentCancel)
+	// The send half of revokeClaimOnce, with no ledger write of its own.
+	srv.sendClaimRevoke("task-x", "guest-b", claimReasonClaimMismatch)
+	recvCancel(t, connB)
+
+	// The holder cannot echo the intent, so its confirmation resolves
+	// against the ledger: if the send had rewritten the entry as a
+	// revocation, the task the user cancelled would read as revoked, sit
+	// RUNNING with a guest that stopped, and the stuck probe would re-queue
+	// the cancelled work.
+	params, _ := json.Marshal(map[string]interface{}{
+		"task_id":  "task-x",
+		"guest_id": "guest-a",
+		"action":   "cancelled_while_running",
+	})
+	if _, err := srv.handleGuestCancelled(nil, params); err != nil {
+		t.Fatalf("guest.cancelled: %v", err)
+	}
+	got, _ := srv.Orchestrator().GetTask("task-x")
+	if got.Status != queue.TaskStatusCancelled {
+		t.Errorf("a cancel recorded between decision and send must survive it: status=%s", got.Status)
+	}
+}
+
 func TestClaimRevoke_IsRetriedWhenNeverConfirmed(t *testing.T) {
 	srv := newTestServer(t)
 	connectTestGuest(t, srv, "guest-a")

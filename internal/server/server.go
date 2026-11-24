@@ -400,23 +400,33 @@ func (s *Server) revokeClaim(taskID, guestID, reason string) {
 	if guestID == "" {
 		return
 	}
-	s.log.Printf("revoking claim on task %s from guest %s: %s", taskID, guestID, reason)
 	// Remember what we are about to ask for before the send: the
 	// confirmation this send provokes may not carry the intent (an old
 	// guest cannot echo it), and it can be handled on another goroutine
 	// before the statement after the send would have run (#252 review).
 	s.rememberCancelIntent(taskID, cancelIntentRevoke)
+	s.sendClaimRevoke(taskID, guestID, reason)
+}
+
+// sendClaimRevoke delivers the revoke for an ask the caller has already
+// recorded in the ledger. A send that never left drops the record again —
+// nothing is owed a resolution for a cancel no guest was told about — but
+// only while the entry still reads as a revocation: a user's cancel that
+// landed after the record is the one its confirmation resolves against, and
+// dropping it here would hand the same failure back (#304 review).
+func (s *Server) sendClaimRevoke(taskID, guestID, reason string) {
+	s.log.Printf("revoking claim on task %s from guest %s: %s", taskID, guestID, reason)
 	if err := s.hub.SendToGuest(guestID, "task.cancel", map[string]interface{}{
 		"task_id": taskID,
 		"reason":  reason,
 		"intent":  cancelIntentRevoke,
 	}); err != nil {
-		// Nothing was sent, so nothing is owed a resolution — drop the
-		// record rather than leaving a revocation on file for a cancel no
-		// guest was ever told about.
-		s.forgetCancelIntent(taskID)
+		s.cancelIntentMu.Lock()
+		if entry, outstanding := s.cancelIntentByTask[taskID]; outstanding && entry.intent == cancelIntentRevoke {
+			delete(s.cancelIntentByTask, taskID)
+		}
+		s.cancelIntentMu.Unlock()
 		s.log.Printf("failed to send task.cancel to guest %s: %v (guest may be disconnected)", guestID, err)
-		return
 	}
 }
 
@@ -505,24 +515,32 @@ func (s *Server) claimContradiction(guestID, taskID string) string {
 	return "the task is assigned to " + task.AssignedTo
 }
 
-// revokeClaimOnce is revokeClaim gated on the cancel-intent ledger: while a
-// task.cancel for the task is outstanding the ask is not repeated. The claim
-// surfaces fire on every heartbeat and every report, so without this a
-// stubborn orphan would be cancelled once per claim (issue #304).
+// revokeClaimOnce is revokeClaim for the claim surfaces, gated on the
+// cancel-intent ledger: while a task.cancel for the task is outstanding the
+// ask is not repeated. The claim surfaces fire on every heartbeat and every
+// report, so without this a stubborn orphan would be cancelled once per
+// claim (issue #304). Unlike revokeClaim it records nothing of its own:
+// claimRevokeDue has already recorded the ask in the same critical section
+// that decided it was due, and a second write before the send would let a
+// user's cancel landing in between be overwritten by this revoke again
+// (issue #304 review).
 func (s *Server) revokeClaimOnce(taskID, guestID, reason string) {
+	if guestID == "" {
+		return
+	}
 	if !s.claimRevokeDue(taskID) {
 		s.log.Printf("task.cancel for task %s already outstanding; claim revoke not re-sent to guest %s", taskID, guestID)
 		return
 	}
-	s.revokeClaim(taskID, guestID, reason)
+	s.sendClaimRevoke(taskID, guestID, reason)
 }
 
 // claimRevokeDue reports whether the claim surfaces should ask for taskID's
 // claim back now, and records the ask when they say they should. Deciding and
 // recording share one critical section so two guests claiming the same task at
-// once cannot both be sent a revoke (issue #304 review); revokeClaim writes
-// the same entry again before it sends, which updates the time rather than
-// adding a second record.
+// once cannot both be sent a revoke, and the send that follows writes the
+// ledger no second time (issue #304 review): what the send resolves against
+// is the entry this decides on, not whatever landed in between.
 func (s *Server) claimRevokeDue(taskID string) bool {
 	s.cancelIntentMu.Lock()
 	defer s.cancelIntentMu.Unlock()
