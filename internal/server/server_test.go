@@ -4281,7 +4281,7 @@ func TestHandleGuestCancelled(t *testing.T) {
 		"guest_id": "guest-1",
 		"reason":   "user requested cancellation",
 	})
-	result, rpcErr := srv.handleGuestCancelled(nil, params)
+	result, rpcErr := srv.handleGuestCancelled(context.Background(), params)
 	if rpcErr != nil {
 		t.Fatalf("expected no error, got %v", rpcErr)
 	}

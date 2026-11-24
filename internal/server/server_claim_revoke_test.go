@@ -155,7 +155,7 @@ func TestHandleGuestCancelled_NotHeld_LeavesTaskAlone(t *testing.T) {
 		"action":   "not_held",
 		"intent":   cancelIntentRevoke,
 	})
-	if _, rpcErr := srv.handleGuestCancelled(nil, params); rpcErr != nil {
+	if _, rpcErr := srv.handleGuestCancelled(context.Background(), params); rpcErr != nil {
 		t.Fatalf("unexpected rpc error: %v", rpcErr)
 	}
 
@@ -192,7 +192,7 @@ func TestHandleGuestCancelled_RevokeKeepsTaskPending(t *testing.T) {
 		"action":   "cancelled_before_start",
 		"intent":   cancelIntentRevoke,
 	})
-	if _, rpcErr := srv.handleGuestCancelled(nil, params); rpcErr != nil {
+	if _, rpcErr := srv.handleGuestCancelled(context.Background(), params); rpcErr != nil {
 		t.Fatalf("unexpected rpc error: %v", rpcErr)
 	}
 
@@ -234,7 +234,7 @@ func TestHandleGuestCancelled_CancelStillCancels(t *testing.T) {
 		"reason":   "user requested cancellation",
 		"action":   "cancelled_while_running",
 	})
-	if _, rpcErr := srv.handleGuestCancelled(nil, params); rpcErr != nil {
+	if _, rpcErr := srv.handleGuestCancelled(context.Background(), params); rpcErr != nil {
 		t.Fatalf("unexpected rpc error: %v", rpcErr)
 	}
 
@@ -300,7 +300,7 @@ func TestHandleGuests_ExposesClaimStats(t *testing.T) {
 		"action":   "cancelled_before_start",
 		"intent":   cancelIntentRevoke,
 	})
-	if _, rpcErr := srv.handleGuestCancelled(nil, confirmation); rpcErr != nil {
+	if _, rpcErr := srv.handleGuestCancelled(context.Background(), confirmation); rpcErr != nil {
 		t.Fatalf("guest.cancelled: %v", rpcErr)
 	}
 
@@ -348,7 +348,7 @@ func TestHandleGuestCancelled_NotHeldWithCancelIntent_EndsTask(t *testing.T) {
 		"action":   cancelActionNotHeld,
 		"intent":   cancelIntentCancel,
 	})
-	if _, rpcErr := srv.handleGuestCancelled(nil, params); rpcErr != nil {
+	if _, rpcErr := srv.handleGuestCancelled(context.Background(), params); rpcErr != nil {
 		t.Fatalf("unexpected rpc error: %v", rpcErr)
 	}
 
@@ -385,7 +385,7 @@ func TestHandleGuestCancelled_OldGuestRevocationLeavesRequeuedTaskPending(t *tes
 		"guest_id": "guest-1",
 		"reason":   "re-queued",
 	})
-	if _, rpcErr := srv.handleGuestCancelled(nil, params); rpcErr != nil {
+	if _, rpcErr := srv.handleGuestCancelled(context.Background(), params); rpcErr != nil {
 		t.Fatalf("unexpected rpc error: %v", rpcErr)
 	}
 
@@ -429,7 +429,7 @@ func TestHandleGuestCancelled_OldGuestUserCancelEndsTask(t *testing.T) {
 		"guest_id": "guest-1",
 		"reason":   "user requested cancellation",
 	})
-	if _, rpcErr := srv.handleGuestCancelled(nil, params); rpcErr != nil {
+	if _, rpcErr := srv.handleGuestCancelled(context.Background(), params); rpcErr != nil {
 		t.Fatalf("unexpected rpc error: %v", rpcErr)
 	}
 

@@ -64,7 +64,7 @@ func confirmRevoke(t *testing.T, srv *Server, taskID, guestID string) {
 		"action":   "cancelled_while_running",
 		"intent":   "revoke",
 	})
-	if _, err := srv.handleGuestCancelled(nil, params); err != nil {
+	if _, err := srv.handleGuestCancelled(context.Background(), params); err != nil {
 		t.Fatalf("guest.cancelled: %v", err)
 	}
 }
@@ -660,7 +660,7 @@ func TestClaimRevoke_DoesNotOverwriteAnOutstandingCancel(t *testing.T) {
 		"guest_id": "guest-a",
 		"action":   "cancelled_while_running",
 	})
-	if _, err := srv.handleGuestCancelled(nil, params); err != nil {
+	if _, err := srv.handleGuestCancelled(context.Background(), params); err != nil {
 		t.Fatalf("guest.cancelled: %v", err)
 	}
 
@@ -706,7 +706,7 @@ func TestClaimRevoke_TheSendRecordsNothingAfterTheDecision(t *testing.T) {
 		"guest_id": "guest-a",
 		"action":   "cancelled_while_running",
 	})
-	if _, err := srv.handleGuestCancelled(nil, params); err != nil {
+	if _, err := srv.handleGuestCancelled(context.Background(), params); err != nil {
 		t.Fatalf("guest.cancelled: %v", err)
 	}
 	got, _ := srv.Orchestrator().GetTask("task-x")
