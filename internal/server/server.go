@@ -522,6 +522,10 @@ func (s *Server) claimContradiction(guestID, taskID string) string {
 // (issue #304 review).
 func (s *Server) revokeClaimOnce(taskID, guestID, reason string) {
 	if guestID == "" {
+		// Unreachable from either claim surface today — both refuse an empty
+		// reporter before getting here — but a revoke that silently goes
+		// nowhere is the failure mode this whole path exists to avoid.
+		s.log.Printf("claim on task %s contradicted by a guest the host cannot name (%s); no revoke sent", taskID, reason)
 		return
 	}
 	if !s.claimRevokeDue(taskID) {
@@ -1315,10 +1319,19 @@ func (s *Server) handleGuestHeartbeat(ctx context.Context, params json.RawMessag
 		// #304). The response stays "ok": the heartbeat itself succeeded,
 		// and the revoke arrives as a task.cancel.
 		why := s.claimContradiction(reporter, req.TaskID)
+		if why != "" && reporter == "" {
+			// A claim the host cannot place is refused without a revoke: the
+			// revoke names a claimant, and here there is none — a socket that
+			// never registered, or an orphan whose re-registration moved the
+			// mapping on (issue #304). The log is this claim's whole trace, so
+			// it says what the contradiction was and that no revoke went out,
+			// rather than leaving only TaskHeartbeat's "guest not found" below.
+			s.log.Printf("heartbeat claim mismatch: a connection the host cannot place claims task %s — %s; claim refused, no revoke sent", req.TaskID, why)
+		}
 		if err := s.orchestrator.TaskHeartbeat(reporter, req.TaskID); err != nil {
 			return nil, rpc.InternalError(err.Error())
 		}
-		if why != "" {
+		if why != "" && reporter != "" {
 			s.log.Printf("heartbeat claim mismatch: guest %s claims task %s — %s; revoking the claim, assignment unchanged", reporter, req.TaskID, why)
 			s.revokeClaimOnce(req.TaskID, reporter, claimReasonClaimMismatch)
 		}

@@ -1,8 +1,10 @@
 package server
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"strings"
 	"testing"
 	"time"
 
@@ -591,6 +593,43 @@ func TestHeartbeat_OwnerOnTerminalTaskIsNotRevoked(t *testing.T) {
 	got, _ := srv.Orchestrator().GetTask("task-x")
 	if got.Status != queue.TaskStatusCompleted || got.AssignedTo != "guest-a" {
 		t.Errorf("heartbeat must not move the task: status=%s assigned=%q", got.Status, got.AssignedTo)
+	}
+}
+
+// TestHeartbeat_UnplaceableClaimLeavesATrace covers the claim surface issue
+// #304 was filed from: a socket the hub cannot place — one that never
+// registered, or an orphan whose re-registration moved the mapping on. Such a
+// claim is refused before the liveness record is touched, and there is no
+// claimant to send a revoke to, so the log is the only trace it leaves
+// (#304 review).
+func TestHeartbeat_UnplaceableClaimLeavesATrace(t *testing.T) {
+	srv := newTestServer(t)
+	connectTestGuest(t, srv, "guest-a")
+	var logBuf bytes.Buffer
+	srv.log.SetOutput(&logBuf)
+
+	task := addAssignedTask(t, srv, "task-x", "guest-a")
+	if err := srv.TaskQueue().Start(task.ID); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+
+	params, _ := json.Marshal(map[string]string{"id": "guest-a", "task_id": "task-x"})
+	if _, rpcErr := srv.handleGuestHeartbeat(
+		rpc.ContextWithConnection(context.Background(), "conn-unmapped"), params); rpcErr == nil {
+		t.Fatal("a claim from a socket the host cannot place must be refused")
+	}
+
+	got, _ := srv.Orchestrator().GetTask("task-x")
+	if got.Status != queue.TaskStatusRunning || got.AssignedTo != "guest-a" {
+		t.Errorf("a refused claim must not move the task: status=%s assigned=%q", got.Status, got.AssignedTo)
+	}
+
+	log := logBuf.String()
+	if !strings.Contains(log, "heartbeat claim mismatch") || !strings.Contains(log, "task-x") {
+		t.Errorf("a refused claim must name the task it contradicted in the log, got: %s", log)
+	}
+	if !strings.Contains(log, "no revoke") {
+		t.Errorf("the log must say no revoke went out, for a reader who assumes one did: %s", log)
 	}
 }
 

@@ -293,7 +293,8 @@ connection is the only identity the reporter does not choose, and the
 same holds for the report a guest sends when its task ends. A report
 differing from the assignment is a mismatch to surface — logged and
 flagged via `heartbeat_task_mismatch`, and answered by taking the claim
-back from whoever made it — and is never resolved by silently deleting
+back from whoever made it, whenever the host can place them (see Claim
+Revocation below) — and is never resolved by silently deleting
 an assignment. Similarly, the stuck-task sweep treats a guest still pointing
 at a terminal or reassigned task as a failed assertion: it logs and
 leaves the state alone, because mutating it was the re-queue loop of
@@ -338,7 +339,10 @@ record of at all — the orphan a dropped socket leaves behind, which keeps
 running side effects until it is told otherwise (issue #304). It goes to
 whoever made the assertion rather than to whoever the assertion names, and
 leaves the assignment exactly where it was: taking a claim back is not a way
-to move one.
+to move one. A claim the host cannot place at all — a socket that never
+registered, or an orphan whose re-registration moved the mapping on — is
+refused without a revoke, because a revoke has to name a claimant: the refusal
+is what the log carries for those.
 
 Both surfaces that hear such an assertion ask once and then wait for the
 confirmation, because a task that contradicts an assignment contradicts every
