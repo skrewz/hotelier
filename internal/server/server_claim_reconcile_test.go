@@ -676,6 +676,57 @@ func TestClaimRevoke_TheSendRecordsNothingAfterTheDecision(t *testing.T) {
 	}
 }
 
+// TestClaimRevoke_AFailedSendKeepsAnOutstandingCancel pins the other half of
+// the window 797c250 closed: the send failed, so the ask it stood for is
+// dropped from the ledger — but only while the entry still reads as a
+// revocation. A user's cancel recorded between the decision and the send is
+// what the holder's confirmation resolves against, and dropping it here would
+// hand the same silent cancel back (#304 review). The failing send is the path
+// an orphan whose socket is already gone actually takes.
+func TestClaimRevoke_AFailedSendKeepsAnOutstandingCancel(t *testing.T) {
+	srv := newTestServer(t)
+	connectTestGuest(t, srv, "guest-a")
+
+	task := addAssignedTask(t, srv, "task-x", "guest-a")
+	if err := srv.TaskQueue().Start(task.ID); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+
+	// The decision half of a claim surface: record the ask under the lock.
+	if !srv.claimRevokeDue("task-x") {
+		t.Fatal("expected the first revoke ask to be due")
+	}
+	// The user's cancel lands before the send goes out.
+	srv.rememberCancelIntent("task-x", cancelIntentCancel)
+	// The send half, naming a guest the hub has no connection for: nothing
+	// leaves, so the send reports the failure it must act on.
+	srv.sendClaimRevoke("task-x", "guest-b", claimReasonClaimMismatch)
+
+	srv.cancelIntentMu.Lock()
+	entry, outstanding := srv.cancelIntentByTask["task-x"]
+	srv.cancelIntentMu.Unlock()
+	if !outstanding || entry.intent != cancelIntentCancel {
+		t.Fatalf("a failed revoke send must leave the user's cancel recorded: outstanding=%v intent=%q",
+			outstanding, entry.intent)
+	}
+
+	// And that entry is what the holder's intent-less confirmation resolves
+	// against: the task the user cancelled ends, rather than merely losing a
+	// claim no guest was ever told about.
+	params, _ := json.Marshal(map[string]interface{}{
+		"task_id":  "task-x",
+		"guest_id": "guest-a",
+		"action":   "cancelled_while_running",
+	})
+	if _, err := srv.handleGuestCancelled(context.Background(), params); err != nil {
+		t.Fatalf("guest.cancelled: %v", err)
+	}
+	got, _ := srv.Orchestrator().GetTask("task-x")
+	if got.Status != queue.TaskStatusCancelled {
+		t.Errorf("a cancel the guest was never told about must still be honoured: status=%s", got.Status)
+	}
+}
+
 func TestClaimRevoke_IsRetriedWhenNeverConfirmed(t *testing.T) {
 	srv := newTestServer(t)
 	connectTestGuest(t, srv, "guest-a")
