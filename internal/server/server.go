@@ -276,12 +276,8 @@ const (
 	claimReasonClaimMismatch = "claim mismatch"
 
 	// claimRevokeRetry bounds how long an unconfirmed claim-mismatch revoke
-	// holds later claims off. The claim surfaces ask once and wait for the
-	// confirmation that clears the ledger entry; a claimant that never
-	// confirms must not have the enforcement silenced for the rest of the
-	// task's life, so it is asked again once this much time has passed
-	// (issue #304 review). Comfortably longer than a heartbeat interval, so
-	// an orphan that is answering is never asked twice.
+	// holds later claims off; the Claim Revocation section of
+	// ARCHITECTURE.md owns why the ask is repeated rather than held forever.
 	claimRevokeRetry = 2 * time.Minute
 )
 
@@ -363,7 +359,9 @@ type Server struct {
 	// with no connection skips it, a socket dying between write and handling
 	// loses it — leaves the entry behind: its lifetime is bounded by the
 	// task's, and since task IDs are never reused the residue is a per-task
-	// entry at most, not a growing set. An outstanding entry also holds the
+	// entry at most, not a growing set — with one rider: an entry a claim
+	// surface recorded for a task the host has no record of is cleared only
+	// when that claimant confirms. An outstanding entry also holds the
 	// claim surfaces' own revoke off, which is why the send time is kept
 	// alongside the intent (see claimRevokeDue).
 	cancelIntentMu     sync.Mutex
@@ -538,7 +536,10 @@ func (s *Server) revokeClaimOnce(taskID, guestID, reason string) {
 // recording share one critical section so two guests claiming the same task at
 // once cannot both be sent a revoke, and the send that follows writes the
 // ledger no second time (issue #304 review): what the send resolves against
-// is the entry this decides on, not whatever landed in between.
+// is the entry this decides on, not whatever landed in between. The entry is
+// per-task while the ask names one claimant: an outstanding entry holds the
+// surfaces off for the task, so a second claimant's first claim waits out at
+// most the retry window before it is told to stop itself.
 func (s *Server) claimRevokeDue(taskID string) bool {
 	s.cancelIntentMu.Lock()
 	defer s.cancelIntentMu.Unlock()
@@ -553,11 +554,8 @@ func (s *Server) claimRevokeDue(taskID string) bool {
 		if entry.intent != cancelIntentRevoke {
 			return false
 		}
-		// A revoke holds them off until claimRevokeRetry, not forever: the
-		// confirmation that clears the entry may simply never arrive — a
-		// stalled executor, a confirmation lost on a socket already dying,
-		// which is the population issue #304 was filed from — and enforcement
-		// must not fall silent for the rest of the task over one of those.
+		// A revoke holds them off until claimRevokeRetry, not forever —
+		// ARCHITECTURE.md's Claim Revocation section says why.
 		if time.Since(entry.sentAt) < claimRevokeRetry {
 			return false
 		}

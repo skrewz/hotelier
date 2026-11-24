@@ -346,7 +346,13 @@ later heartbeat for it too. Any `task.cancel` outstanding for the task holds
 the ask off, a user's cancel included — that one asks more, and its record is
 what the holder's confirmation resolves against. An ask nobody confirms is
 repeated after a while rather than held forever: a claimant that cannot
-confirm is the very guest this revocation exists to reach.
+confirm is the very guest this revocation exists to reach — a stalled
+executor, or one whose confirmation was lost on a socket already dying
+(issue #304). The window is comfortably longer than a heartbeat interval, so
+a claimant that is answering is never asked twice. The outstanding record is
+per-task while the ask names one claimant: a second claimant's first
+contradicting claim may wait out at most that window before it too is told
+to stop.
 
 The guest's reply stays the authority on whether it stopped; the host's
 acknowledgement is the authority on whether the work is still its own. A
