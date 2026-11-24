@@ -2,6 +2,7 @@ package integration
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -40,7 +41,7 @@ func TestFullLifecycle_RegisterGuest(t *testing.T) {
 		"tags": []string{"business-default", "frontend"},
 	})
 
-	resp, err := hub.Dispatch("guest.register", params)
+	resp, err := hub.Dispatch(context.Background(), "guest.register", params)
 	if err != nil {
 		t.Fatalf("guest.register failed: %v", err)
 	}
@@ -364,7 +365,7 @@ func TestFullLifecycle_GuestHostVisibleViaREST(t *testing.T) {
 		"tags": []string{"business-default"},
 		"host": "build-box-1",
 	})
-	if _, err := hub.Dispatch("guest.register", params); err != nil {
+	if _, err := hub.Dispatch(context.Background(), "guest.register", params); err != nil {
 		t.Fatalf("guest.register: %v", err)
 	}
 
@@ -680,13 +681,16 @@ func TestFullLifecycle_RPCDispatch(t *testing.T) {
 
 	go hub.Run()
 
-	// Test guest.register
+	// Test guest.register, dispatched over a connection the hub tags the
+	// way production does: register maps that socket, so later messages
+	// arriving on it are the registered guest's (issue #304 review).
+	rpcCtx := rpc.ContextWithConnection(context.Background(), "conn-rpc-guest-1")
 	params, _ := json.Marshal(map[string]interface{}{
 		"id":   "rpc-guest-1",
 		"name": "RPC Guest",
 		"tags": []string{"test"},
 	})
-	resp, err := hub.Dispatch("guest.register", params)
+	resp, err := hub.Dispatch(rpcCtx, "guest.register", params)
 	if err != nil {
 		t.Fatalf("guest.register failed: %v", err)
 	}
@@ -695,9 +699,9 @@ func TestFullLifecycle_RPCDispatch(t *testing.T) {
 		t.Errorf("expected registered, got %v", result["status"])
 	}
 
-	// Test guest.heartbeat
+	// Test guest.heartbeat, from the same socket register mapped
 	params, _ = json.Marshal(map[string]interface{}{"id": "rpc-guest-1"})
-	resp, err = hub.Dispatch("guest.heartbeat", params)
+	resp, err = hub.Dispatch(rpcCtx, "guest.heartbeat", params)
 	if err != nil {
 		t.Fatalf("guest.heartbeat failed: %v", err)
 	}
@@ -706,7 +710,7 @@ func TestFullLifecycle_RPCDispatch(t *testing.T) {
 	}
 
 	// Test method not found
-	_, err = hub.Dispatch("nonexistent.method", json.RawMessage("{}"))
+	_, err = hub.Dispatch(context.Background(), "nonexistent.method", json.RawMessage("{}"))
 	if err == nil {
 		t.Error("expected error for nonexistent method")
 	}
@@ -716,7 +720,7 @@ func TestFullLifecycle_RPCDispatch(t *testing.T) {
 
 	// Test invalid params
 	params, _ = json.Marshal(map[string]interface{}{})
-	_, err = hub.Dispatch("guest.register", params)
+	_, err = hub.Dispatch(context.Background(), "guest.register", params)
 	if err == nil {
 		t.Error("expected error for missing id")
 	}
@@ -734,14 +738,14 @@ func TestFullLifecycle_GuestUnregister(t *testing.T) {
 		"name": "Unregister Guest",
 		"tags": []string{"test"},
 	})
-	_, err := hub.Dispatch("guest.register", params)
+	_, err := hub.Dispatch(context.Background(), "guest.register", params)
 	if err != nil {
 		t.Fatalf("register failed: %v", err)
 	}
 
 	// Unregister the guest
 	params, _ = json.Marshal(map[string]interface{}{"id": "unreg-guest"})
-	resp, err := hub.Dispatch("guest.unregister", params)
+	resp, err := hub.Dispatch(context.Background(), "guest.unregister", params)
 	if err != nil {
 		t.Fatalf("unregister failed: %v", err)
 	}
@@ -763,7 +767,7 @@ func TestFullLifecycle_GuestLog(t *testing.T) {
 		"line":    "Building project...",
 		"level":   "info",
 	})
-	resp, err := hub.Dispatch("guest.log", params)
+	resp, err := hub.Dispatch(context.Background(), "guest.log", params)
 	if err != nil {
 		t.Fatalf("guest.log failed: %v", err)
 	}
@@ -941,18 +945,18 @@ func TestFullLifecycle_GuestResult(t *testing.T) {
 	srv.TaskQueue().Assign(createdTask.ID, "guest-1")
 	srv.TaskQueue().Start(createdTask.ID)
 
-	// Submit success result. hub.Dispatch carries no connection, so the
-	// harness names the reporter: a report the host cannot place is refused
-	// rather than credited to the assignee (issue #304 review).
+	// Submit the successful result from guest-1's socket: the report is
+	// attributed to the connection it arrives on, so the harness maps one
+	// rather than naming the reporter in the payload (issue #304 review).
 	hub := srv.Hub()
 	go hub.Run()
+	hub.RegisterGuestConnection("guest-1", "conn-guest-1")
 	params, _ := json.Marshal(map[string]interface{}{
-		"task_id":  createdTask.ID,
-		"guest_id": "guest-1",
-		"success":  true,
-		"output":   "Build successful",
+		"task_id": createdTask.ID,
+		"success": true,
+		"output":  "Build successful",
 	})
-	_, err := hub.Dispatch("guest.result", params)
+	_, err := hub.Dispatch(rpc.ContextWithConnection(context.Background(), "conn-guest-1"), "guest.result", params)
 	if err != nil {
 		t.Fatalf("guest.result failed: %v", err)
 	}

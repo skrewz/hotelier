@@ -2,6 +2,7 @@ package server
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -56,7 +57,7 @@ func TestHandleGuestLog_CompactionFields(t *testing.T) {
 		"compaction_tokens_after":  32000,
 	}
 	rawParams, _ := json.Marshal(params)
-	if _, rpcErr := hub.Dispatch("guest.log", rawParams); rpcErr != nil {
+	if _, rpcErr := hub.Dispatch(context.Background(), "guest.log", rawParams); rpcErr != nil {
 		t.Fatalf("guest.log dispatch failed: %v", rpcErr)
 	}
 

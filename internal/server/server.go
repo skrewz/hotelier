@@ -469,17 +469,15 @@ func (s *Server) forgetCancelIntent(taskID string) {
 
 // reporterID answers who sent a claim about a task. The connection the claim
 // arrived on is the authority: it is the one identity the reporter does not
-// choose. A name inside the payload is a claim *about* identity, not identity,
-// and taking it instead lets any socket satisfy an ownership gate by typing
-// somebody else's name (issue #304 review). A connection the hub cannot place
-// — a browser session, a guest whose re-registration moved the mapping on —
-// identifies nobody, and falling back to the payload there would leave that
-// door open. Only a dispatch with no connection at all, which is a test
-// harness calling a handler directly, carries its identity in the payload.
-func (s *Server) reporterID(ctx context.Context, explicit string) string {
+// choose. A name inside the payload is a claim *about* identity, not
+// identity, and taking it instead lets any socket satisfy an ownership gate
+// by typing somebody else's name (issue #304 review). A connection the hub
+// cannot place — a browser session, a guest whose re-registration moved the
+// mapping on — identifies nobody.
+func (s *Server) reporterID(ctx context.Context) string {
 	connID, ok := rpc.ConnectionIDFromContext(ctx)
 	if !ok {
-		return explicit
+		return ""
 	}
 	guestID, err := s.hub.GuestIDFromConnection(connID)
 	if err != nil {
@@ -1295,7 +1293,6 @@ func (s *Server) handleGuestUnregister(ctx context.Context, params json.RawMessa
 // makes against the authoritative assignment (issue #304).
 func (s *Server) handleGuestHeartbeat(ctx context.Context, params json.RawMessage) (interface{}, *rpc.RPCError) {
 	var req struct {
-		ID     string `json:"id"`
 		TaskID string `json:"task_id"`
 	}
 
@@ -1307,7 +1304,7 @@ func (s *Server) handleGuestHeartbeat(ctx context.Context, params json.RawMessag
 	// on, not to the name the payload carries: the latter would let any
 	// connection refresh a stranger's liveness and keep their task looking
 	// live to the probe indefinitely (issue #304 review).
-	reporter := s.reporterID(ctx, req.ID)
+	reporter := s.reporterID(ctx)
 
 	if req.TaskID != "" {
 		// Examine the claim before the liveness record is touched, so a
@@ -1543,7 +1540,6 @@ func (s *Server) handleGuestLog(ctx context.Context, params json.RawMessage) (in
 func (s *Server) handleGuestResult(ctx context.Context, params json.RawMessage) (interface{}, *rpc.RPCError) {
 	var result struct {
 		TaskID  string `json:"task_id"`
-		GuestID string `json:"guest_id"`
 		Success bool   `json:"success"`
 		Output  string `json:"output,omitempty"`
 		Error   string `json:"error,omitempty"`
@@ -1565,7 +1561,7 @@ func (s *Server) handleGuestResult(ctx context.Context, params json.RawMessage) 
 	// which is every report a real guest sends (issue #304 review). A report
 	// the host cannot place is refused rather than credited to whoever owns
 	// the task.
-	guestID := s.reporterID(ctx, result.GuestID)
+	guestID := s.reporterID(ctx)
 	if guestID == "" {
 		return nil, rpc.InvalidParamsError("cannot identify the reporting guest")
 	}
@@ -1755,8 +1751,7 @@ func (s *Server) handleTaskAssign(ctx context.Context, params json.RawMessage) (
 // and is executing it. The server transitions ASSIGNED→RUNNING.
 func (s *Server) handleTaskAcknowledge(ctx context.Context, params json.RawMessage) (interface{}, *rpc.RPCError) {
 	var req struct {
-		TaskID  string `json:"task_id"`
-		GuestID string `json:"guest_id"`
+		TaskID string `json:"task_id"`
 	}
 
 	if err := json.Unmarshal(params, &req); err != nil {
@@ -1767,13 +1762,12 @@ func (s *Server) handleTaskAcknowledge(ctx context.Context, params json.RawMessa
 		return nil, rpc.InvalidParamsError("task_id is required")
 	}
 
-	// The reporter is the guest behind the socket the ack arrived on; the
-	// payload's name is only the identity when there is no socket to ask
-	// (issue #304 review).
-	guestID := s.reporterID(ctx, req.GuestID)
+	// The reporter is the guest behind the socket the ack arrived on — the
+	// payload carries no identity worth trusting (issue #304 review).
+	guestID := s.reporterID(ctx)
 
 	if guestID == "" {
-		return nil, rpc.InvalidParamsError("guest_id is required")
+		return nil, rpc.InvalidParamsError("cannot identify the ack'ing guest")
 	}
 
 	// A task the host has no record of says nothing about the claim: it is

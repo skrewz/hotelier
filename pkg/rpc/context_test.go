@@ -15,8 +15,4 @@ func TestContextWithConnection(t *testing.T) {
 	if _, ok := ConnectionIDFromContext(context.Background()); ok {
 		t.Error("plain context must not carry a connection id")
 	}
-
-	if _, ok := ConnectionIDFromContext(nil); ok {
-		t.Error("nil context must not carry a connection id")
-	}
 }

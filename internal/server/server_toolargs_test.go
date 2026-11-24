@@ -2,6 +2,7 @@ package server
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -54,7 +55,7 @@ func TestHandleGuestLog_ToolArgsJSONPassthrough(t *testing.T) {
 		"tool_args_json": argsJSON,
 	}
 	rawParams, _ := json.Marshal(params)
-	hub.Dispatch("guest.log", rawParams)
+	hub.Dispatch(context.Background(), "guest.log", rawParams)
 
 	// Tool entries bypass the accumulator, so the entry is stored
 	// synchronously by the time Dispatch returns.

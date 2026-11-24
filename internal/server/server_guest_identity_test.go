@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -35,7 +36,7 @@ func TestGuestRegister_ConfiguredIDReachesAPI(t *testing.T) {
 		"tags":    []string{"tag1"},
 		"resumed": false,
 	})
-	if _, err := hub.Dispatch("guest.register", params); err != nil {
+	if _, err := hub.Dispatch(context.Background(), "guest.register", params); err != nil {
 		t.Fatalf("guest.register failed: %v", err)
 	}
 
@@ -67,7 +68,7 @@ func registerAndAssignTask(t *testing.T, srv *Server, hub *rpc.Hub, id string) {
 	params, _ := json.Marshal(map[string]interface{}{
 		"id": id, "name": "Producer", "tags": []string{"tag1"}, "resumed": true,
 	})
-	if _, err := hub.Dispatch("guest.register", params); err != nil {
+	if _, err := hub.Dispatch(context.Background(), "guest.register", params); err != nil {
 		t.Fatalf("first register failed: %v", err)
 	}
 
@@ -93,7 +94,7 @@ func TestGuestRegister_FreshProcessDoesNotReclaimTask(t *testing.T) {
 	params, _ := json.Marshal(map[string]interface{}{
 		"id": "guest-producer-1", "name": "Producer", "tags": []string{"tag1"}, "resumed": false,
 	})
-	resp, err := hub.Dispatch("guest.register", params)
+	resp, err := hub.Dispatch(context.Background(), "guest.register", params)
 	if err != nil {
 		t.Fatalf("fresh register failed: %v", err)
 	}
@@ -137,7 +138,7 @@ func TestGuestRegister_ReconnectStillReconcilesRunningTask(t *testing.T) {
 	params, _ := json.Marshal(map[string]interface{}{
 		"id": "guest-producer-1", "name": "Producer", "tags": []string{"tag1"}, "resumed": true,
 	})
-	resp, err := hub.Dispatch("guest.register", params)
+	resp, err := hub.Dispatch(context.Background(), "guest.register", params)
 	if err != nil {
 		t.Fatalf("reconnect register failed: %v", err)
 	}

@@ -24,13 +24,10 @@ var ErrConnectionClosed = errors.New("connection closed")
 // connectionIDKey is the context key for the current connection ID.
 type connectionIDKey struct{}
 
-// ConnectionIDFromContext returns the connection ID from a handler's context.
-// A nil context carries no connection and reports not-found — handlers are
-// called with nil ctx from tests that dispatch directly.
+// ConnectionIDFromContext returns the connection ID from a handler's
+// context. A context the hub did not tag — context.Background() in a test,
+// say — carries no connection and reports not-found.
 func ConnectionIDFromContext(ctx context.Context) (string, bool) {
-	if ctx == nil {
-		return "", false
-	}
 	id, ok := ctx.Value(connectionIDKey{}).(string)
 	return id, ok
 }
@@ -506,7 +503,13 @@ func (h *Hub) Unregister(c *Connection) {
 }
 
 // Dispatch calls a registered handler directly (for testing).
-func (h *Hub) Dispatch(method string, params json.RawMessage) (interface{}, *RPCError) {
+// Dispatch runs a registered handler directly. It exists for tests that
+// want a handler without a WebSocket in the way; production dispatch goes
+// through a Connection, which tags the context with the connection a
+// message arrived on (see handleMessage). Callers that care who a handler
+// sees as the sender must tag ctx the same way — ContextWithConnection —
+// because an untagged context identifies nobody.
+func (h *Hub) Dispatch(ctx context.Context, method string, params json.RawMessage) (interface{}, *RPCError) {
 	h.mu.RLock()
 	handler, ok := h.methods[method]
 	h.mu.RUnlock()
@@ -515,7 +518,6 @@ func (h *Hub) Dispatch(method string, params json.RawMessage) (interface{}, *RPC
 		return nil, MethodNotFoundError(method)
 	}
 
-	ctx := context.Background()
 	return handler(ctx, params)
 }
 

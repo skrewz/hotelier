@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -258,16 +259,19 @@ func TestHandleTaskAcknowledge_CountsRefusal(t *testing.T) {
 	if _, err := srv.Registry().Register("guest-1", "Test Guest", []string{"default"}); err != nil {
 		t.Fatalf("register: %v", err)
 	}
+	srv.Hub().RegisterGuestConnection("guest-1", "conn-guest-1")
 	addAssignedTask(t, srv, "ack-1", "guest-1")
 	if err := srv.Orchestrator().Queue().Complete("ack-1", "done"); err != nil {
 		t.Fatalf("complete: %v", err)
 	}
 
 	params, _ := json.Marshal(map[string]interface{}{
-		"task_id":  "ack-1",
-		"guest_id": "guest-1",
+		"task_id": "ack-1",
 	})
-	if _, rpcErr := srv.handleTaskAcknowledge(nil, params); rpcErr == nil {
+	// The ack arrives on guest-1's socket: the connection is the identity
+	// the host reconciles the claim against (issue #304 review).
+	ctx := rpc.ContextWithConnection(context.Background(), "conn-guest-1")
+	if _, rpcErr := srv.handleTaskAcknowledge(ctx, params); rpcErr == nil {
 		t.Fatal("expected the ack of a completed task to be refused")
 	}
 

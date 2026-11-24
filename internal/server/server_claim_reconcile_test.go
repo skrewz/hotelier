@@ -16,11 +16,15 @@ import (
 // authoritative assignment: a contradicting claim never moves the assignment
 // and is answered by idempotently revoking the claimant's claim.
 
-// heartbeat names taskID from guestID through the real RPC handler.
-func heartbeat(t *testing.T, srv *Server, guestID, taskID string) {
+// heartbeat dispatches guest.heartbeat over the socket named connID,
+// naming guestID as the guest working on taskID. This is how a real
+// guest's heartbeat arrives: the hub tags the dispatch with the
+// connection the message came in on, so the socket is the identity and
+// the name in the payload is an assertion about it.
+func heartbeat(t *testing.T, srv *Server, connID, guestID, taskID string) {
 	t.Helper()
 	params, _ := json.Marshal(map[string]string{"id": guestID, "task_id": taskID})
-	if _, rpcErr := srv.handleGuestHeartbeat(nil, params); rpcErr != nil {
+	if _, rpcErr := srv.handleGuestHeartbeat(rpc.ContextWithConnection(context.Background(), connID), params); rpcErr != nil {
 		t.Fatalf("guest.heartbeat: %v", rpcErr)
 	}
 }
@@ -67,7 +71,7 @@ func TestHeartbeat_RevokesClaim_WhenTaskIsUnknown(t *testing.T) {
 	srv := newTestServer(t)
 	conn := connectTestGuest(t, srv, "guest-a")
 
-	heartbeat(t, srv, "guest-a", "ghost-task")
+	heartbeat(t, srv, "conn-guest-a", "guest-a", "ghost-task")
 
 	cancel := recvCancel(t, conn)
 	if cancel["task_id"] != "ghost-task" {
@@ -93,7 +97,7 @@ func TestHeartbeat_RevokesClaim_WhenTaskIsTerminal(t *testing.T) {
 
 	// guest-b was never the owner; its claim of a completed task is a
 	// contradiction and must fire the revoke.
-	heartbeat(t, srv, "guest-b", "task-x")
+	heartbeat(t, srv, "conn-guest-b", "guest-b", "task-x")
 
 	cancel := recvCancel(t, connB)
 	if cancel["task_id"] != "task-x" {
@@ -111,7 +115,7 @@ func TestHeartbeat_RevokesClaim_WhenAssignedElsewhere(t *testing.T) {
 
 	addAssignedTask(t, srv, "task-x", "guest-a")
 
-	heartbeat(t, srv, "guest-b", "task-x")
+	heartbeat(t, srv, "conn-guest-b", "guest-b", "task-x")
 
 	cancel := recvCancel(t, connB)
 	if cancel["task_id"] != "task-x" {
@@ -151,7 +155,7 @@ func TestHeartbeat_RevokesClaim_WhenTaskUnassigned(t *testing.T) {
 		t.Fatalf("add task: %v", err)
 	}
 
-	heartbeat(t, srv, "guest-b", "task-x")
+	heartbeat(t, srv, "conn-guest-b", "guest-b", "task-x")
 
 	cancel := recvCancel(t, connB)
 	if cancel["task_id"] != "task-x" {
@@ -169,7 +173,7 @@ func TestHeartbeat_OwnerIsNeverRevoked(t *testing.T) {
 
 	addAssignedTask(t, srv, "task-x", "guest-a")
 
-	heartbeat(t, srv, "guest-a", "task-x")
+	heartbeat(t, srv, "conn-guest-a", "guest-a", "task-x")
 
 	expectNoCancel(t, connA, 150*time.Millisecond)
 
@@ -187,14 +191,14 @@ func TestHeartbeat_RevokeIsIdempotent(t *testing.T) {
 	addAssignedTask(t, srv, "task-x", "guest-a")
 
 	// Two claims while the revoke is outstanding: one ask, no repeat.
-	heartbeat(t, srv, "guest-b", "task-x")
+	heartbeat(t, srv, "conn-guest-b", "guest-b", "task-x")
 	recvCancel(t, connB)
-	heartbeat(t, srv, "guest-b", "task-x")
+	heartbeat(t, srv, "conn-guest-b", "guest-b", "task-x")
 	expectNoCancel(t, connB, 150*time.Millisecond)
 
 	// Once the guest confirms, the next claim may fire a fresh revoke.
 	confirmRevoke(t, srv, "task-x", "guest-b")
-	heartbeat(t, srv, "guest-b", "task-x")
+	heartbeat(t, srv, "conn-guest-b", "guest-b", "task-x")
 	recvCancel(t, connB)
 }
 
@@ -209,12 +213,12 @@ func TestGuestResult_NonOwnerCompletionRejectedAndRevoked(t *testing.T) {
 	}
 
 	params, _ := json.Marshal(map[string]interface{}{
-		"task_id":  "task-x",
-		"guest_id": "guest-b",
-		"success":  true,
-		"output":   "I finished first",
+		"task_id": "task-x",
+		"success": true,
+		"output":  "I finished first",
 	})
-	_, rpcErr := srv.handleGuestResult(nil, params)
+	ctx := rpc.ContextWithConnection(context.Background(), "conn-guest-b")
+	_, rpcErr := srv.handleGuestResult(ctx, params)
 	if rpcErr == nil {
 		t.Fatal("expected the non-owner report to be rejected")
 	}
@@ -251,12 +255,12 @@ func TestGuestResult_NonOwnerFailureRejectedAndRevoked(t *testing.T) {
 	}
 
 	params, _ := json.Marshal(map[string]interface{}{
-		"task_id":  "task-x",
-		"guest_id": "guest-b",
-		"success":  false,
-		"error":    "boom",
+		"task_id": "task-x",
+		"success": false,
+		"error":   "boom",
 	})
-	_, rpcErr := srv.handleGuestResult(nil, params)
+	ctx := rpc.ContextWithConnection(context.Background(), "conn-guest-b")
+	_, rpcErr := srv.handleGuestResult(ctx, params)
 	if rpcErr == nil {
 		t.Fatal("expected the non-owner report to be rejected")
 	}
@@ -310,12 +314,12 @@ func TestGuestResult_OwnerCompletionAcceptedWithoutRevoke(t *testing.T) {
 	}
 
 	params, _ := json.Marshal(map[string]interface{}{
-		"task_id":  "task-x",
-		"guest_id": "guest-a",
-		"success":  true,
-		"output":   "done",
+		"task_id": "task-x",
+		"success": true,
+		"output":  "done",
 	})
-	if _, rpcErr := srv.handleGuestResult(nil, params); rpcErr != nil {
+	ctx := rpc.ContextWithConnection(context.Background(), "conn-guest-a")
+	if _, rpcErr := srv.handleGuestResult(ctx, params); rpcErr != nil {
 		t.Fatalf("owner report must be accepted: %v", rpcErr)
 	}
 
@@ -340,12 +344,12 @@ func TestGuestResult_NonOwnerReportOnTerminalTaskRejectedAndRevoked(t *testing.T
 	}
 
 	params, _ := json.Marshal(map[string]interface{}{
-		"task_id":  "task-x",
-		"guest_id": "guest-b",
-		"success":  false,
-		"error":    "I timed out waiting",
+		"task_id": "task-x",
+		"success": false,
+		"error":   "I timed out waiting",
 	})
-	if _, rpcErr := srv.handleGuestResult(nil, params); rpcErr == nil {
+	ctx := rpc.ContextWithConnection(context.Background(), "conn-guest-b")
+	if _, rpcErr := srv.handleGuestResult(ctx, params); rpcErr == nil {
 		t.Fatal("expected the non-owner report to be rejected")
 	}
 	recvCancel(t, connB)
@@ -498,11 +502,11 @@ func TestGuestResult_UnknownTaskErrorWithoutRevoke(t *testing.T) {
 	// A task the host has no record of says nothing about the claim
 	// (issue #252 precedent): error, but no revoke.
 	params, _ := json.Marshal(map[string]interface{}{
-		"task_id":  "ghost-task",
-		"guest_id": "guest-b",
-		"success":  true,
+		"task_id": "ghost-task",
+		"success": true,
 	})
-	if _, rpcErr := srv.handleGuestResult(nil, params); rpcErr == nil {
+	ctx := rpc.ContextWithConnection(context.Background(), "conn-guest-b")
+	if _, rpcErr := srv.handleGuestResult(ctx, params); rpcErr == nil {
 		t.Fatal("expected an error for the unknown task")
 	}
 	expectNoCancel(t, connB, 150*time.Millisecond)
@@ -519,28 +523,17 @@ func TestGuestResult_RevokeIsIdempotent(t *testing.T) {
 	}
 
 	params, _ := json.Marshal(map[string]interface{}{
-		"task_id":  "task-x",
-		"guest_id": "guest-b",
-		"success":  true,
+		"task_id": "task-x",
+		"success": true,
 	})
+	ctx := rpc.ContextWithConnection(context.Background(), "conn-guest-b")
 	for i := 0; i < 2; i++ {
-		if _, rpcErr := srv.handleGuestResult(nil, params); rpcErr == nil {
+		if _, rpcErr := srv.handleGuestResult(ctx, params); rpcErr == nil {
 			t.Fatalf("report %d: expected rejection", i)
 		}
 	}
 	recvCancel(t, connB)
 	expectNoCancel(t, connB, 150*time.Millisecond)
-}
-
-// heartbeatOn names taskID from guestID's socket, which is how a real guest's
-// heartbeat arrives: the hub tags the dispatch with the connection it came in
-// on, so the socket is the identity and the id field is a claim about it.
-func heartbeatOn(t *testing.T, srv *Server, connID, guestID, taskID string) {
-	t.Helper()
-	params, _ := json.Marshal(map[string]string{"id": guestID, "task_id": taskID})
-	if _, rpcErr := srv.handleGuestHeartbeat(rpc.ContextWithConnection(context.Background(), connID), params); rpcErr != nil {
-		t.Fatalf("guest.heartbeat: %v", rpcErr)
-	}
 }
 
 func TestHeartbeat_ClaimInAnotherGuestsNameIsRefused(t *testing.T) {
@@ -558,7 +551,7 @@ func TestHeartbeat_ClaimInAnotherGuestsNameIsRefused(t *testing.T) {
 		t.Fatalf("backdate: %v", err)
 	}
 
-	heartbeatOn(t, srv, "conn-guest-b", "guest-a", "task-x")
+	heartbeat(t, srv, "conn-guest-b", "guest-a", "task-x")
 
 	guestA, _ := srv.Registry().GetGuest("guest-a")
 	if !guestA.LastHeartbeat.Equal(stale) {
@@ -592,7 +585,7 @@ func TestHeartbeat_OwnerOnTerminalTaskIsNotRevoked(t *testing.T) {
 	// The owner's own heartbeat on its own task as it winds down is not a
 	// contradiction, terminal or otherwise: revoking here would cancel work
 	// the host already accepted.
-	heartbeat(t, srv, "guest-a", "task-x")
+	heartbeat(t, srv, "conn-guest-a", "guest-a", "task-x")
 	expectNoCancel(t, connA, 150*time.Millisecond)
 
 	got, _ := srv.Orchestrator().GetTask("task-x")
@@ -620,7 +613,7 @@ func TestClaimRevoke_DoesNotOverwriteAnOutstandingCancel(t *testing.T) {
 	// the user's cancel would make the holder's confirmation read as a
 	// revocation, which the host must not act on — leaving a task the user
 	// cancelled sitting RUNNING (issue #304 review).
-	heartbeat(t, srv, "guest-b", "task-x")
+	heartbeat(t, srv, "conn-guest-b", "guest-b", "task-x")
 	expectNoCancel(t, connB, 150*time.Millisecond)
 
 	params, _ := json.Marshal(map[string]interface{}{
@@ -690,7 +683,7 @@ func TestClaimRevoke_IsRetriedWhenNeverConfirmed(t *testing.T) {
 
 	addAssignedTask(t, srv, "task-x", "guest-a")
 
-	heartbeat(t, srv, "guest-b", "task-x")
+	heartbeat(t, srv, "conn-guest-b", "guest-b", "task-x")
 	recvCancel(t, connB)
 
 	// The confirmation never arrives: a stalled executor, or a confirmation
@@ -704,6 +697,6 @@ func TestClaimRevoke_IsRetriedWhenNeverConfirmed(t *testing.T) {
 	srv.cancelIntentByTask["task-x"] = entry
 	srv.cancelIntentMu.Unlock()
 
-	heartbeat(t, srv, "guest-b", "task-x")
+	heartbeat(t, srv, "conn-guest-b", "guest-b", "task-x")
 	recvCancel(t, connB)
 }
