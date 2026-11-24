@@ -502,7 +502,6 @@ func (h *Hub) Unregister(c *Connection) {
 	h.unregister <- c
 }
 
-// Dispatch calls a registered handler directly (for testing).
 // Dispatch runs a registered handler directly. It exists for tests that
 // want a handler without a WebSocket in the way; production dispatch goes
 // through a Connection, which tags the context with the connection a
