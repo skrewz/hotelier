@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -332,7 +333,7 @@ func (h *PIHandler) ExecuteTask(ctx context.Context, task TaskAssignment, sendLo
 	// path /task.
 	if h.jailEnabled {
 		var err error
-		jail, err = h.setupJail(workDir, task.TaskID, h.jailNeedsRangeMap(task.Tags), sendLog)
+		jail, err = h.setupJail(workDir, task.TaskID, task.Tags, sendLog)
 		if err != nil {
 			return nil, fmt.Errorf("set up jail: %w", err)
 		}
@@ -1145,17 +1146,7 @@ const PodmanTag = "podman"
 // is fail-closed (issue #236), so there is no quiet fallback to the
 // single-entry drop, and none to running with no jail at all.
 func (h *PIHandler) jailNeedsRangeMap(taskTags []string) bool {
-	return hasTag(h.tags, PodmanTag) || hasTag(taskTags, PodmanTag)
-}
-
-// hasTag reports whether tags contains want, matched exactly.
-func hasTag(tags []string, want string) bool {
-	for _, t := range tags {
-		if t == want {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(h.tags, PodmanTag) || slices.Contains(taskTags, PodmanTag)
 }
 
 // setupJail builds the namespace jail for the task whose working
@@ -1168,10 +1159,11 @@ func hasTag(tags []string, want string) bool {
 // absolute-path references keep working unmodified inside the jail.
 //
 // The caller owns the returned jail and must call Cleanup on it
-// (ExecuteTask does this via defer). mapGuestRange selects the
-// range-mapped uid map (issue #236); the caller decides it with
-// jailNeedsRangeMap (issue #306).
-func (h *PIHandler) setupJail(taskDir, taskID string, mapGuestRange bool, sendLog func(LogEntry) error) (*jail.Jail, error) {
+// (ExecuteTask does this via defer). The task's own tags go in as they are:
+// setupJail is where the jail's uid map shape gets decided (issue #306), so
+// the decision and the log line naming it cannot drift apart.
+func (h *PIHandler) setupJail(taskDir, taskID string, taskTags []string, sendLog func(LogEntry) error) (*jail.Jail, error) {
+	mapGuestRange := h.jailNeedsRangeMap(taskTags)
 	// The pi executable. Fatal — a guest without pi cannot run tasks. The
 	// pinned execPath (issue #33) is used verbatim so the jail always
 	// contains the exact binary the client spawns; only a handler that
@@ -1192,7 +1184,7 @@ func (h *PIHandler) setupJail(taskDir, taskID string, mapGuestRange bool, sendLo
 	j := jail.NewJail(h.log)
 	h.log.Printf("[JAIL] setting up jail for task %s", taskID)
 	if mapGuestRange {
-		h.log.Printf("[JAIL] task %s: range-mapped jail mode (issue #236); guest tags %v", taskID, h.tags)
+		h.log.Printf("[JAIL] task %s: range-mapped jail mode (issue #236); guest tags %v, task tags %v", taskID, h.tags, taskTags)
 	}
 	_ = sendLog(LogEntry{TaskID: taskID, Line: "Setting up namespace jail", Level: "system"})
 	if err := j.Setup(taskDir, homeDir, piPath, h.homeCopies, mapGuestRange); err != nil {
