@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -1329,6 +1330,16 @@ func (g *Guest) Reload(cfg config.GuestConfig) {
 	}
 	if cfg.LogLevel != g.config.LogLevel {
 		g.log.Printf("log_level updated: %s", cfg.LogLevel)
+	}
+	// The advertised tags are read at startup in the two places that use
+	// them: this struct puts its own copy in the registration payload, and
+	// the handler decides each task jail's uid map shape from the copy it was
+	// given (issue #306). g.config is replaced wholesale below, so say here
+	// what a reloader would otherwise assume — changing tags means restarting
+	// the guest, or the set advertised to the registry and the map the jails
+	// get drift apart.
+	if !slices.Equal(cfg.Tags, g.tags) {
+		g.log.Printf("tags changed in the reloaded config (%v), but tags are read at startup only: restart this guest to advertise them and to pick the jail's uid map shape (issue #306)", cfg.Tags)
 	}
 	g.config = cfg
 }
