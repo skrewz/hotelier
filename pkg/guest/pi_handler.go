@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -35,8 +36,14 @@ type PIHandler struct {
 	// home_copies field (issue #201). Nil or empty keeps the jail's
 	// built-in default set. Set at construction via SetHomeCopies.
 	homeCopies []string
-	debugMu    sync.Mutex
-	mu         sync.Mutex
+	// tags are the capabilities this guest advertises, from the guest
+	// config's tags field. They decide the jail's uid map shape (issue
+	// #306) — see jailNeedsRangeMap. Set at construction via SetTags before
+	// any task runs, so task goroutines read them without a lock (like
+	// homeCopies).
+	tags    []string
+	debugMu sync.Mutex
+	mu      sync.Mutex
 	// removeDir removes a directory tree: task cleanup, the startup sweep
 	// and the stale destination cloneRepo moves into (issues #180, #301).
 	// Set once at construction by NewPIHandlerDebug — every call site calls
@@ -97,6 +104,14 @@ func (h *PIHandler) BaseCWD() string {
 // this method is called once at construction before any task runs.
 func (h *PIHandler) SetHomeCopies(entries []string) {
 	h.homeCopies = entries
+}
+
+// SetTags records the capabilities this guest advertises (the guest
+// config's tags field). Like SetHomeCopies it is called once at
+// construction, before any task runs: the jail's uid map shape reads them
+// (issue #306).
+func (h *PIHandler) SetTags(tags []string) {
+	h.tags = tags
 }
 
 // NewPIHandlerDebug creates a new PIHandler with optional RPC debug logging.
@@ -318,7 +333,7 @@ func (h *PIHandler) ExecuteTask(ctx context.Context, task TaskAssignment, sendLo
 	// path /task.
 	if h.jailEnabled {
 		var err error
-		jail, err = h.setupJail(workDir, task.TaskID, taskNeedsRangeMap(task.Tags), sendLog)
+		jail, err = h.setupJail(workDir, task.TaskID, task.Tags, sendLog)
 		if err != nil {
 			return nil, fmt.Errorf("set up jail: %w", err)
 		}
@@ -1101,22 +1116,37 @@ func (h *PIHandler) resetClientWithEnv(ctx context.Context, workDir string, task
 	return fmt.Errorf("pi client spawn failed after %d attempts: %w", maxRetries, lastErr)
 }
 
-// PodmanTag is the task tag that opts a task into the range-mapped
-// jail mode (issue #236): the jail then maps the guest's subuid/subgid
-// range, letting a nested container runtime (rootless podman) work
-// inside the jail. Tasks without the tag keep today's single-UID
-// mapping unchanged.
+// PodmanTag names the podman capability: the tag a guest advertises to
+// say it can run a nested container runtime (rootless podman), and the
+// tag a task may carry to ask for one.
+//
+// It selects the range-mapped jail mode (issue #236), in which the jail
+// maps the guest's subuid/subgid range so the command's namespace has
+// inner uid 0 mapped. Which jails get that map is a property of the
+// guest, not of the task (issue #306) — see jailNeedsRangeMap.
 const PodmanTag = "podman"
 
-// taskNeedsRangeMap reports whether a task's tags request the
-// range-mapped jail mode (issue #236). Tags are matched exactly.
-func taskNeedsRangeMap(tags []string) bool {
-	for _, t := range tags {
-		if t == PodmanTag {
-			return true
-		}
-	}
-	return false
+// jailNeedsRangeMap reports whether the jail for a task gets the
+// range-mapped uid map rather than the single-entry drop, which leaves
+// inner uid 0 unmapped — a shape a file-ownership guard cannot trust, since
+// in such a namespace the checking process could itself have rewritten the
+// file whose owner it checks. Two things ask for the range map, and neither
+// is a property of the work itself:
+//
+//   - the capabilities this guest advertises (issue #306). What a jail must
+//     be able to run is a fact about the machine, and dispatch puts no tags
+//     on a task, so a task dispatched without tags to a podman-capable guest
+//     gets the same map as one tagged podman.
+//   - the task's own tags, which still decide for a task assigned
+//     explicitly to a guest that does not advertise the capability
+//     (Orchestrator.AssignTask assigns by id and does not gate on tags).
+//
+// Tags are matched exactly. A guest that advertises the capability but whose
+// account owns no subordinate id range fails such a task at spawn: range mode
+// is fail-closed (issue #236), so there is no quiet fallback to the
+// single-entry drop, and none to running with no jail at all.
+func (h *PIHandler) jailNeedsRangeMap(taskTags []string) bool {
+	return slices.Contains(h.tags, PodmanTag) || slices.Contains(taskTags, PodmanTag)
 }
 
 // setupJail builds the namespace jail for the task whose working
@@ -1129,8 +1159,11 @@ func taskNeedsRangeMap(tags []string) bool {
 // absolute-path references keep working unmodified inside the jail.
 //
 // The caller owns the returned jail and must call Cleanup on it
-// (ExecuteTask does this via defer).
-func (h *PIHandler) setupJail(taskDir, taskID string, mapGuestRange bool, sendLog func(LogEntry) error) (*jail.Jail, error) {
+// (ExecuteTask does this via defer). The task's own tags go in as they are:
+// setupJail is where the jail's uid map shape gets decided (issue #306), so
+// the decision and the log line naming it cannot drift apart.
+func (h *PIHandler) setupJail(taskDir, taskID string, taskTags []string, sendLog func(LogEntry) error) (*jail.Jail, error) {
+	mapGuestRange := h.jailNeedsRangeMap(taskTags)
 	// The pi executable. Fatal — a guest without pi cannot run tasks. The
 	// pinned execPath (issue #33) is used verbatim so the jail always
 	// contains the exact binary the client spawns; only a handler that
@@ -1151,7 +1184,7 @@ func (h *PIHandler) setupJail(taskDir, taskID string, mapGuestRange bool, sendLo
 	j := jail.NewJail(h.log)
 	h.log.Printf("[JAIL] setting up jail for task %s", taskID)
 	if mapGuestRange {
-		h.log.Printf("[JAIL] task %s carries the %q tag: range-mapped mode (issue #236)", taskID, PodmanTag)
+		h.log.Printf("[JAIL] task %s: range-mapped jail mode (issue #236); guest tags %v, task tags %v", taskID, h.tags, taskTags)
 	}
 	_ = sendLog(LogEntry{TaskID: taskID, Line: "Setting up namespace jail", Level: "system"})
 	if err := j.Setup(taskDir, homeDir, piPath, h.homeCopies, mapGuestRange); err != nil {

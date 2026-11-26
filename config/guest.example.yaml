@@ -7,6 +7,11 @@ url: "wss://hotelier.example.com:443/ws"
 # renames the guest on every restart. Never give one id to two live guests.
 id: "guest-1"
 name: "Development Guest #1"
+# Capabilities this guest advertises. They route tasks to it, and one of
+# them decides more than routing: advertising "podman" runs every task's
+# jail in range-mapped mode (issue #306), which needs this account's
+# subuid/subgid range provisioned — without it every task on this guest
+# fails at spawn, not just a tagged one. See the README jail section.
 tags:
   - "business-default"
   - "frontend"
