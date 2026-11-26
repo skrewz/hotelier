@@ -714,15 +714,12 @@ reach the host. The jail is removed when the task completes.
 A jail's **uid map shape** is set by what the *guest* advertises, not by
 the task's tags (issue #306): a guest declaring the `podman` capability
 runs every task in **range-mapped** mode (issue #236), so a task
-dispatched without tags gets the same map as one tagged `podman`. Tags are
+dispatched without tags gets the same map as one tagged `podman`: tags are
 how a task is *routed* to a guest and say nothing about the work. The other
-shape is the single-entry map `1000 0 1`, which leaves inner uid 0 unmapped
-— a reading a file-ownership guard cannot trust, because in a namespace
-that does not map uid 0 the checking process could itself have rewritten
-the file whose owner it is checking. A task that does carry the `podman`
-tag still gets a range-mapped jail (tags route tasks, and assigning a task
-to a guest by id checks none), and a guest that does not advertise the
-capability keeps the single-UID map for its tasks.
+shape is the single-entry map `1000 0 1`, which leaves inner uid 0 unmapped.
+A task that does carry the `podman` tag still gets a range-mapped jail
+(assigning a task to a guest by id checks no tags), and a guest that does
+not advertise the capability keeps that map for its tasks.
 
 A range-mapped jail additionally maps the guest user's subuid/subgid block
 (`unshare --map-root-user --map-auto`, util-linux >= 2.41.6) and the
