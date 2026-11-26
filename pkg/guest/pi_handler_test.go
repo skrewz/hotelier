@@ -1959,26 +1959,87 @@ func TestPIHandler_SetupJail(t *testing.T) {
 	}
 }
 
-// TestPIHandler_TaskNeedsRangeMap verifies the tag gate for the
-// range-mapped jail mode (issue #236): only a task carrying the podman
-// tag gets the subuid/subgid-range mapping; everything else keeps
-// today's single-UID jail.
-func TestPIHandler_TaskNeedsRangeMap(t *testing.T) {
+// TestPIHandler_JailNeedsRangeMap verifies what selects the range-mapped
+// jail mode (issue #236). Issue #306 moved the decision onto the guest:
+// a guest advertising the podman capability gets the subuid/subgid-range
+// mapping for every task, including one dispatched without tags, while a
+// task carrying the tag still gets it (the explicit-assign path reaches
+// guests that do not advertise the capability). Tags are matched exactly.
+func TestPIHandler_JailNeedsRangeMap(t *testing.T) {
 	cases := []struct {
-		tags []string
-		want bool
+		name      string
+		guestTags []string
+		taskTags  []string
+		want      bool
 	}{
-		{nil, false},
-		{[]string{}, false},
-		{[]string{"gpu", "fast"}, false},
-		{[]string{"podman"}, true},
-		{[]string{"gpu", "podman"}, true},
-		{[]string{"Podman"}, false}, // tags are matched exactly
+		{"neither advertises podman", nil, nil, false},
+		{"guest has other capabilities only", []string{"android"}, nil, false},
+		{"task has other tags only", nil, []string{"gpu", "fast"}, false},
+		{"guest advertises podman, task untagged", []string{"podman"}, nil, true},
+		{"guest advertises podman among others", []string{"gpu", "podman"}, nil, true},
+		{"task carries podman, guest does not advertise it", nil, []string{"podman"}, true},
+		{"both", []string{"podman"}, []string{"podman"}, true},
+		{"case matters on both sides", []string{"Podman"}, []string{"Podman"}, false},
 	}
 	for _, tc := range cases {
-		if got := taskNeedsRangeMap(tc.tags); got != tc.want {
-			t.Errorf("taskNeedsRangeMap(%v) = %v, want %v", tc.tags, got, tc.want)
+		h := NewPIHandler(t.TempDir(), "", "", "")
+		h.SetTags(tc.guestTags)
+		if got := h.jailNeedsRangeMap(tc.taskTags); got != tc.want {
+			t.Errorf("%s: jailNeedsRangeMap(task tags %v) with guest tags %v = %v, want %v",
+				tc.name, tc.taskTags, tc.guestTags, got, tc.want)
 		}
+	}
+}
+
+// TestPIHandler_SetupJail_RangeMappedByGuestCapability verifies criterion
+// 1 of issue #306 at the jail seam: a task dispatched without tags to a
+// guest that advertises the podman capability gets a jail whose spec asks
+// for the range-mapped uid map, not the single-entry drop.
+func TestPIHandler_SetupJail_RangeMappedByGuestCapability(t *testing.T) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	baseDir, err := os.MkdirTemp(home, "hotelier-setupjail-capability-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(baseDir)
+	// A fake pi keeps the jail small (the real pi package is ~134 MB).
+	fakeBinDir := filepath.Join(baseDir, "fakebin")
+	if err := os.MkdirAll(fakeBinDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(fakeBinDir, "pi"), []byte("#!/bin/sh\nread -r _ || true\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	origPath := os.Getenv("PATH")
+	t.Cleanup(func() { os.Setenv("PATH", origPath) })
+	os.Setenv("PATH", fakeBinDir+string(os.PathListSeparator)+origPath)
+
+	taskDir := filepath.Join(baseDir, "tasks", "task-untagged", "abc123")
+	if err := os.MkdirAll(taskDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	h := NewPIHandler(baseDir, "", "", "")
+	h.SetTags([]string{"business-default", PodmanTag})
+
+	j, err := h.setupJail(taskDir, "task-untagged", h.jailNeedsRangeMap(nil), func(LogEntry) error { return nil })
+	if err != nil {
+		t.Fatalf("setupJail failed: %v", err)
+	}
+	defer j.Cleanup()
+
+	if !j.Plan().MapGuestRange {
+		t.Error("plan MapGuestRange = false, want true for a task on a podman-capable guest")
+	}
+	spec, err := jail.ReadSpec(j.SpecPath())
+	if err != nil {
+		t.Fatalf("ReadSpec: %v", err)
+	}
+	if !spec.MapGuestRange {
+		t.Error("spec MapGuestRange = false, want true for a task on a podman-capable guest")
 	}
 }
 

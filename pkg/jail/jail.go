@@ -210,7 +210,8 @@ func (j *Jail) Setup(taskDir, homeDir, piPath string, homeCopies []string, mapGu
 	if err != nil {
 		return err
 	}
-	// Not a host fact: a per-task request (podman tag), carried like this
+	// Not a host fact: the caller decides it (issue #306 — the capabilities
+	// the guest advertises, or the task's tags), carried like this
 	// so BuildPlan stays the single place the plan is composed.
 	facts.MapGuestRange = mapGuestRange
 	plan, err := BuildPlan(facts)

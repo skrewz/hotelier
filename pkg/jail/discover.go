@@ -51,8 +51,9 @@ type Facts struct {
 	// semantics, like the /etc files. Names are relative to HomeDir.
 	HomeCopyFiles []string
 	// MapGuestRange requests the range-mapped jail mode for nested
-	// container runtimes (issue #236). It is not probed from the host:
-	// the caller (Jail.Setup) sets it from the task's tags.
+	// container runtimes (issue #236). It is not probed from the host: the
+	// caller (Jail.Setup) passes it in, the guest having decided it (issue
+	// #306).
 	MapGuestRange bool
 }
 

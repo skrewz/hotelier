@@ -27,8 +27,8 @@ func BuildPlan(f Facts) (Plan, error) {
 		// exec, so the command holds no capabilities in the outer
 		// namespace (issue #198).
 		DropToUID: DropID,
-		// Range mapping for nested container runtimes is a per-task
-		// request, not a host fact (issue #236); false keeps today's
+		// Range mapping for nested container runtimes is not a host fact
+		// (issue #236): the caller decides it (issue #306); false keeps the
 		// single-UID mapping.
 		MapGuestRange: f.MapGuestRange,
 	}
